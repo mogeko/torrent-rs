@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ef1116dfb4595cf437d5d2e3709af4d0caf1fe3d211ae4f88062b53fa9179008 # shrinks to val = Dict([(b"\xd4", Bytes(b"")), (b"\0", Bytes(b""))])
