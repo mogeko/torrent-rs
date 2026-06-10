@@ -572,6 +572,7 @@ dependencies = [
  "proptest",
  "rand 0.8.6",
  "sha1",
+ "tempfile",
  "tokio",
 ]
 

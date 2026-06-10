@@ -22,8 +22,6 @@ pub enum Bencode {
     Dict(Vec<(Bytes, Bencode)>),
 }
 
-// ── From impls ────────────────────────────────────────────────────────
-
 impl From<&[u8]> for Bencode {
     fn from(value: &[u8]) -> Self {
         Bencode::Bytes(Bytes::copy_from_slice(value))
@@ -54,8 +52,6 @@ impl<T: Into<Bencode>> From<Vec<T>> for Bencode {
     }
 }
 
-// ── Display ───────────────────────────────────────────────────────────
-
 impl fmt::Display for Bencode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -84,8 +80,6 @@ impl fmt::Display for Bencode {
         }
     }
 }
-
-// ── Re-exports ────────────────────────────────────────────────────────
 
 pub use decode::decode;
 pub use encode::encode;

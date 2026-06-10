@@ -13,7 +13,9 @@ tokio = { version = "1.52", features = [
     "macros",
     "time",
     "io-util",
+    "fs",
 ] }
 
 [dev-dependencies]
 proptest = "1.11"
+tempfile = "3.27"
