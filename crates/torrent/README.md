@@ -64,65 +64,19 @@ use torrent::storage::PieceManager;
 
 ## Examples
 
-### HTTP Tracker
+See the [`examples/`](./examples) directory for runnable scenario guides:
 
-```rust
-use torrent::tracker::{AnnounceRequest, AnnounceEvent, HttpTracker};
-use torrent::peer::PeerId;
+| Example                                                 | Scenario                                            |
+| ------------------------------------------------------- | --------------------------------------------------- |
+| [`parse_metainfo.rs`](./examples/parse_metainfo.rs)     | Parse a .torrent file and inspect metadata          |
+| [`tracker_announce.rs`](./examples/tracker_announce.rs) | Query HTTP/UDP trackers for peer lists              |
+| [`dht_discovery.rs`](./examples/dht_discovery.rs)       | Discover peers via the DHT (Kademlia)               |
+| [`peer_connect.rs`](./examples/peer_connect.rs)         | Low-level peer wire protocol (handshake + messages) |
 
-let tracker = HttpTracker::new("http://tracker.example.com:6969/announce");
-let req = AnnounceRequest {
-    info_hash: [0x01; 20],
-    peer_id: PeerId::random(),
-    port: 6881,
-    uploaded: 0,
-    downloaded: 0,
-    left: 1024,
-    event: AnnounceEvent::Started,
-    compact: true,
-    numwant: Some(50),
-    key: None,
-    trackerid: None,
-};
-// let resp = tracker.announce(&req).await?;
-```
+Run with:
 
-### UDP Tracker
-
-```rust
-use torrent::tracker::UdpTracker;
-
-let tracker = UdpTracker::new("udp://tracker.opentrackr.org:1337")?;
-// let resp = tracker.announce(&req).await?;
-```
-
-### Async Peer Stream
-
-```rust
-use torrent::peer::PeerConnection;
-use torrent::peer::PeerId;
-
-let info_hash = [0u8; 20]; // target torrent
-let peer_id = PeerId::random();
-let addr = "192.168.1.42:6881".parse()?;
-
-// let conn = PeerConnection::connect(addr, info_hash, peer_id).await?;
-// conn.send(&PeerMessage::Interested).await?;
-// let msg = conn.recv().await?;
-```
-
-### DHT RPC
-
-```rust
-use torrent::dht::DhtRpc;
-use torrent::dht::krpc;
-
-let rpc = DhtRpc::new("0.0.0.0:0".parse()?).await?;
-let tid = rand::random();
-let node_id = [0u8; 20];
-
-// let response = rpc.ping(addr, tid, &node_id).await?;
-// let nodes = torrent::dht::find_node(&rpc, addr, tid, &node_id, &target).await?;
+```bash
+cargo run -p torrent --example parse_metainfo
 ```
 
 ## Relationship with `torrent-core`
