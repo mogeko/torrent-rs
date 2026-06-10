@@ -20,6 +20,10 @@ pub enum ErrorKind {
     Io,
     InvalidInput,
     Protocol,
+    // Metainfo errors
+    MetainfoMissingField,
+    MetainfoInvalidField,
+    MetainfoInvalidPieces,
 }
 
 impl fmt::Display for Error {
@@ -32,6 +36,9 @@ impl fmt::Display for Error {
             ErrorKind::Io => write!(f, "I/O error"),
             ErrorKind::InvalidInput => write!(f, "invalid input"),
             ErrorKind::Protocol => write!(f, "protocol error"),
+            ErrorKind::MetainfoMissingField => write!(f, "missing required metainfo field"),
+            ErrorKind::MetainfoInvalidField => write!(f, "invalid metainfo field"),
+            ErrorKind::MetainfoInvalidPieces => write!(f, "invalid pieces length in metainfo"),
         }
     }
 }
@@ -46,6 +53,9 @@ impl fmt::Display for ErrorKind {
             ErrorKind::Io => write!(f, "Io"),
             ErrorKind::InvalidInput => write!(f, "InvalidInput"),
             ErrorKind::Protocol => write!(f, "Protocol"),
+            ErrorKind::MetainfoMissingField => write!(f, "MetainfoMissingField"),
+            ErrorKind::MetainfoInvalidField => write!(f, "MetainfoInvalidField"),
+            ErrorKind::MetainfoInvalidPieces => write!(f, "MetainfoInvalidPieces"),
         }
     }
 }

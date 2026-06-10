@@ -2,7 +2,6 @@ name: Build & Test
 
 on:
   push:
-    branches-ignore: [master]
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -27,6 +26,6 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo fmt --check
-      - run: cargo clippy
+      - run: cargo clippy --release --locked
       - run: cargo build --release --locked
-      - run: cargo test --locked
+      - run: cargo test --release --locked

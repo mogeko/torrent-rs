@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bytes = "1.0"
+sha1 = "0.10"
 
 [dev-dependencies]
 proptest = "1.0"
