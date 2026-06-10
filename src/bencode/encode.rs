@@ -3,6 +3,31 @@ use bytes::Bytes;
 use crate::bencode::Bencode;
 
 /// Encode a `Bencode` value into its bencoded byte representation.
+///
+/// Dictionary keys are sorted lexicographically per BEP 3. This ensures
+/// that `encode` followed by [`decode`](crate::bencode::decode) is
+/// idempotent regardless of the input key order.
+///
+/// # Examples
+///
+/// ```
+/// use torrent::bencode::{encode, Bencode};
+/// use bytes::Bytes;
+///
+/// let val = Bencode::Bytes(Bytes::from("spam"));
+/// assert_eq!(encode(&val), b"4:spam");
+/// ```
+///
+/// ```
+/// use torrent::bencode::{encode, Bencode};
+/// use bytes::Bytes;
+///
+/// let val = Bencode::List(vec![
+///     Bencode::Integer(1),
+///     Bencode::Integer(2),
+/// ]);
+/// assert_eq!(encode(&val), b"li1ei2ee");
+/// ```
 pub fn encode(val: &Bencode) -> Vec<u8> {
     match val {
         Bencode::Bytes(b) => encode_bytes(b),

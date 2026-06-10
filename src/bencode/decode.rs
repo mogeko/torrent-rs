@@ -5,8 +5,39 @@ use crate::error::{Error, ErrorKind};
 
 /// Decode a single bencoded value from the beginning of `data`.
 ///
-/// Returns the decoded `Bencode` value and the remaining unconsumed bytes
-/// on success, or an `Error` on failure.
+/// Uses a recursive-descent parser. Returns the decoded [`Bencode`] value
+/// and the remaining unconsumed bytes.
+///
+/// # Errors
+///
+/// Returns [`Error`](crate::error::Error) with kind:
+/// - [`BencodeInvalidSyntax`](crate::error::ErrorKind::BencodeInvalidSyntax) —
+///   data doesn't start with a valid bencode type marker (`0-9`, `i`, `l`, `d`).
+/// - [`BencodeUnexpectedEof`](crate::error::ErrorKind::BencodeUnexpectedEof) —
+///   input ends before the value is complete.
+/// - [`BencodeInvalidInteger`](crate::error::ErrorKind::BencodeInvalidInteger) —
+///   malformed integer (leading zeros, negative zero, empty digit string).
+/// - [`BencodeIntegerOverflow`](crate::error::ErrorKind::BencodeIntegerOverflow) —
+///   integer value exceeds `i64::MIN..=i64::MAX`.
+///
+/// # Examples
+///
+/// ```
+/// use torrent::bencode::decode;
+///
+/// let (val, rest) = decode(b"4:spam").unwrap();
+/// assert!(rest.is_empty());
+/// ```
+///
+/// Decoding a nested dictionary:
+///
+/// ```
+/// use torrent::bencode::{decode, Bencode};
+/// use bytes::Bytes;
+///
+/// let (val, rest) = decode(b"d3:fooi42e3:bar4:spame").unwrap();
+/// assert!(rest.is_empty());
+/// ```
 pub fn decode(data: &[u8]) -> Result<(Bencode, &[u8]), Error> {
     if data.is_empty() {
         return Err(Error::new(ErrorKind::BencodeUnexpectedEof));
