@@ -24,6 +24,14 @@ pub enum ErrorKind {
     MetainfoMissingField,
     MetainfoInvalidField,
     MetainfoInvalidPieces,
+    // Peer errors
+    PeerInvalidHandshake,
+    PeerInvalidMessage,
+    PeerConnectionClosed,
+    // Tracker errors
+    TrackerInvalidResponse,
+    TrackerRequestFailed,
+    TrackerProtocolError,
 }
 
 impl fmt::Display for Error {
@@ -39,6 +47,12 @@ impl fmt::Display for Error {
             ErrorKind::MetainfoMissingField => write!(f, "missing required metainfo field"),
             ErrorKind::MetainfoInvalidField => write!(f, "invalid metainfo field"),
             ErrorKind::MetainfoInvalidPieces => write!(f, "invalid pieces length in metainfo"),
+            ErrorKind::PeerInvalidHandshake => write!(f, "invalid peer handshake"),
+            ErrorKind::PeerInvalidMessage => write!(f, "invalid peer message"),
+            ErrorKind::PeerConnectionClosed => write!(f, "peer connection closed"),
+            ErrorKind::TrackerInvalidResponse => write!(f, "invalid tracker response"),
+            ErrorKind::TrackerRequestFailed => write!(f, "tracker request failed"),
+            ErrorKind::TrackerProtocolError => write!(f, "tracker protocol error"),
         }
     }
 }
@@ -56,6 +70,12 @@ impl fmt::Display for ErrorKind {
             ErrorKind::MetainfoMissingField => write!(f, "MetainfoMissingField"),
             ErrorKind::MetainfoInvalidField => write!(f, "MetainfoInvalidField"),
             ErrorKind::MetainfoInvalidPieces => write!(f, "MetainfoInvalidPieces"),
+            ErrorKind::PeerInvalidHandshake => write!(f, "PeerInvalidHandshake"),
+            ErrorKind::PeerInvalidMessage => write!(f, "PeerInvalidMessage"),
+            ErrorKind::PeerConnectionClosed => write!(f, "PeerConnectionClosed"),
+            ErrorKind::TrackerInvalidResponse => write!(f, "TrackerInvalidResponse"),
+            ErrorKind::TrackerRequestFailed => write!(f, "TrackerRequestFailed"),
+            ErrorKind::TrackerProtocolError => write!(f, "TrackerProtocolError"),
         }
     }
 }

@@ -4,8 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytes = "1.0"
+bytes = "1.11"
+rand = "0.8"
 sha1 = "0.10"
+tokio = { version = "1.52", features = [
+    "net",
+    "rt",
+    "macros",
+    "time",
+    "io-util",
+] }
 
 [dev-dependencies]
-proptest = "1.0"
+proptest = "1.11"
