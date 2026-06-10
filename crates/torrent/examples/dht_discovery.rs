@@ -6,7 +6,7 @@
 //!
 //! Run with: `cargo run -p torrent --example dht_discovery`
 
-use torrent::dht::{Node, RoutingTable, DhtRpc, krpc};
+use torrent::dht::{DhtRpc, Node, RoutingTable, krpc};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -44,7 +44,8 @@ async fn main() {
     assert!(krpc::KrpcMessage::from_bytes(&ping).is_ok());
 
     // -- Async: DHT RPC --
-    let rpc = DhtRpc::new("0.0.0.0:0".parse().unwrap()).await
+    let rpc = DhtRpc::new("0.0.0.0:0".parse().unwrap())
+        .await
         .expect("failed to bind DHT socket");
     println!("DHT RPC bound: OK");
 

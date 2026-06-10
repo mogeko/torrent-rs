@@ -25,17 +25,38 @@ fn main() {
     // --- Message types ---
     println!("\n=== All 11 Message Types ===");
     let messages = [
-        ("KeepAlive",        PeerMessage::KeepAlive),
-        ("Choke",            PeerMessage::Choke),
-        ("Unchoke",          PeerMessage::Unchoke),
-        ("Interested",       PeerMessage::Interested),
-        ("NotInterested",    PeerMessage::NotInterested),
-        ("Have(42)",         PeerMessage::Have(42)),
+        ("KeepAlive", PeerMessage::KeepAlive),
+        ("Choke", PeerMessage::Choke),
+        ("Unchoke", PeerMessage::Unchoke),
+        ("Interested", PeerMessage::Interested),
+        ("NotInterested", PeerMessage::NotInterested),
+        ("Have(42)", PeerMessage::Have(42)),
         ("Bitfield([0xFF])", PeerMessage::Bitfield(vec![0xFF])),
-        ("Request",          PeerMessage::Request { index: 0, begin: 0, length: 16384 }),
-        ("Piece",            PeerMessage::Piece { index: 0, begin: 0, data: vec![0xAA; 16] }),
-        ("Cancel",           PeerMessage::Cancel { index: 1, begin: 1024, length: 8192 }),
-        ("Port(6881)",       PeerMessage::Port(6881)),
+        (
+            "Request",
+            PeerMessage::Request {
+                index: 0,
+                begin: 0,
+                length: 16384,
+            },
+        ),
+        (
+            "Piece",
+            PeerMessage::Piece {
+                index: 0,
+                begin: 0,
+                data: vec![0xAA; 16],
+            },
+        ),
+        (
+            "Cancel",
+            PeerMessage::Cancel {
+                index: 1,
+                begin: 1024,
+                length: 8192,
+            },
+        ),
+        ("Port(6881)", PeerMessage::Port(6881)),
     ];
 
     for (name, msg) in &messages {
