@@ -574,6 +574,17 @@ dependencies = [
  "sha1",
  "tempfile",
  "tokio",
+ "torrent-core",
+]
+
+[[package]]
+name = "torrent-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "proptest",
+ "rand 0.8.6",
+ "sha1",
 ]
 
 [[package]]

@@ -20,7 +20,7 @@ argument-hint: "[BEP number or protocol feature to implement]"
 | BEP    | Title                                    | Module(s)                                                      |
 | ------ | ---------------------------------------- | -------------------------------------------------------------- |
 | BEP 3  | The BitTorrent Protocol Specification    | `bencode`, `metainfo`, `peer`, `tracker`, `storage`, `session` |
-| BEP 5  | DHT Protocol                             | `dht` (krpc, routing table, rpc)                               |
+| BEP 5  | DHT Protocol                             | `dht` (krpc, routing table, rpc, query)                        |
 | BEP 9  | Extension for Peers to Send Metadata     | `magnet`                                                       |
 | BEP 12 | Multitracker Metadata Extension          | `metainfo` (announce-list)                                     |
 | BEP 15 | UDP Tracker Protocol                     | `tracker::udp`                                                 |
@@ -50,13 +50,13 @@ error (Error + ErrorKind)
 When adding a new protocol feature, follow this order:
 
 1. **Read the BEP spec** — understand the wire format, message types, and edge cases
-2. **Add ErrorKind variants** — in `src/error.rs` (or `crates/torrent-core/src/error.rs`), add protocol-specific error variants
+2. **Add ErrorKind variants** — in `crates/torrent-core/src/error.rs`, add protocol-specific error variants
 3. **Define data types** — in `torrent-core`, create the structs/enums for the protocol messages
 4. **Implement encode/decode** — `to_bytes()` / `from_bytes()` or `Display` / `FromStr`
 5. **Document with BEP references** — use `/// Implements BEP XXXX: Title` on all public types
 6. **Write unit tests** — round-trip encode/decode, edge cases, error conditions
 7. **Add I/O layer (if needed)** — async send/receive in `torrent`
-8. **Integration tests** — in `tests/` for cross-module scenarios
+8. **Integration tests** — in `crates/torrent-core/tests/` (sync) or `crates/torrent/tests/` (async) for cross-module scenarios
 9. **Run full suite** — `cargo test && cargo clippy -- -D warnings`
 
 ## Peer Wire Protocol (BEP 3)
@@ -83,7 +83,7 @@ When adding a new protocol feature, follow this order:
 | 8   | Cancel        | 13     | index + begin + length (u32×3) |
 | 9   | Port          | 3      | listen port (u16)              |
 
-Defined in [`src/peer/message.rs`](../../../src/peer/message.rs) (→ `torrent-core`).
+Defined in [`crates/torrent-core/src/peer/message.rs`](../../../crates/torrent-core/src/peer/message.rs).
 
 ### Handshake
 
@@ -94,7 +94,7 @@ Extension bits are numbered per BEP conventions: bit 0 = MSB of byte 0. Common e
 - Bit 43 (byte 5, `0x10`): DHT (BEP 5)
 - Bit 44 (byte 5, `0x08`): Extension Protocol (BEP 10)
 
-Defined in [`src/peer/handshake.rs`](../../../src/peer/handshake.rs) (→ `torrent-core`).
+Defined in [`crates/torrent-core/src/peer/handshake.rs`](../../../crates/torrent-core/src/peer/handshake.rs).
 
 ## DHT / KRPC (BEP 5)
 
@@ -119,7 +119,7 @@ Error:    {"t": "<2-byte id>", "y": "e", "e": [<code>, <msg>]}
 
 - 160 K-buckets (K = 8)
 - XOR distance metric
-- Defined in [`src/dht/mod.rs`](../../../src/dht/mod.rs) (→ `torrent-core`)
+  Defined in [`crates/torrent-core/src/dht/mod.rs`](../../../crates/torrent-core/src/dht/mod.rs).
 
 ## Tracker Protocol (BEP 3, 15, 23)
 
@@ -136,8 +136,8 @@ Error:    {"t": "<2-byte id>", "y": "e", "e": [<code>, <msg>]}
 | `event`      | enum | No       | started/stopped/completed  |
 | `compact`    | 0/1  | No       | Compact peer list (BEP 23) |
 
-- HTTP: Manual HTTP/1.1 client in [`src/tracker/http.rs`](../../../src/tracker/http.rs) — no `reqwest` dependency
-- UDP: Connection protocol (BEP 15) in [`src/tracker/udp.rs`](../../../src/tracker/udp.rs)
+- HTTP: Manual HTTP/1.1 client in [`crates/torrent/src/tracker/http.rs`](../../../crates/torrent/src/tracker/http.rs) — no `reqwest` dependency
+- UDP: Connection protocol (BEP 15) in [`crates/torrent/src/tracker/udp.rs`](../../../crates/torrent/src/tracker/udp.rs)
 
 ## Magnet URI (BEP 9)
 
@@ -150,7 +150,7 @@ magnet:?xt=urn:btih:<info_hash>&dn=<name>&tr=<tracker>
 - `tr`: tracker URL (repeatable)
 - `ws`: web seed (BEP 19)
 
-Defined in [`src/magnet/mod.rs`](../../../src/magnet/mod.rs) (→ `torrent-core`).
+Defined in [`crates/torrent-core/src/magnet/mod.rs`](../../../crates/torrent-core/src/magnet/mod.rs).
 
 ## Metainfo (.torrent files, BEP 3/12/52)
 
@@ -159,7 +159,7 @@ Defined in [`src/magnet/mod.rs`](../../../src/magnet/mod.rs) (→ `torrent-core`
 - Multi-file (BEP 52): `info.files[]` with `path`, `length`
 - Announce tiers (BEP 12): `announce-list` with nested lists
 
-Defined in [`src/metainfo/`](../../../src/metainfo/) (→ `torrent-core`).
+Defined in [`crates/torrent-core/src/metainfo/`](../../../crates/torrent-core/src/metainfo/).
 
 ## Bencode (BEP 3)
 
@@ -169,13 +169,13 @@ The wire format for all BT protocols. Strict recursive-descent parser with:
 - Integer validation: no leading zeros, no negative zero, `i64` range
 - Uses `Vec<(Bytes, Bencode)>` for dicts
 
-Defined in [`src/bencode/`](../../../src/bencode/) (→ `torrent-core`).
+Defined in [`crates/torrent-core/src/bencode/`](../../../crates/torrent-core/src/bencode/).
 
 ## Testing Protocol Features
 
-- **Unit tests**: inline `#[cfg(test)] mod tests` in the same file (torrent-core: sync, torrent: `#[tokio::test]`)
-- **Property-based tests**: `tests/*_proptests.rs` using `proptest`
-- **Test vectors**: binary `.bin` files in `tests/data/` for bencode and `.torrent` files
+- **Unit tests**: inline `#[cfg(test)] mod tests` in the same file (torrent-core: sync `#[test]`, torrent: `#[tokio::test]`)
+- **Property-based tests**: `crates/torrent-core/tests/*_proptests.rs` using `proptest`
+- **Test vectors**: binary `.bin` files in `crates/torrent-core/tests/data/` for bencode and `.torrent` files
 - **No network**: tests must never require actual network access
 - **Round-trip**: always test encode→decode and decode→encode idempotency
 
