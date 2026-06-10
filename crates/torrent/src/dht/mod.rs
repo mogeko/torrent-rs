@@ -5,9 +5,9 @@
 //!
 //! # Key Types
 //!
-//! - [`Node`], [`RoutingTable`], [`KrpcMessage`] — re-exported from `torrent_core`
-//! - [`DhtRpc`] — async UDP send/receive with transaction matching
-//! - [`find_node`], [`get_peers`], [`announce_peer`] — high-level query helpers
+//! - [`Node`], [`RoutingTable`], [`krpc::KrpcMessage`] — re-exported from `torrent_core`
+//! - [`rpc::DhtRpc`] — async UDP send/receive with transaction matching
+//! - [`query::find_node`], [`query::get_peers`], [`query::announce_peer`] — high-level query helpers
 
 pub use torrent_core::dht::{Node, RoutingTable, krpc};
 

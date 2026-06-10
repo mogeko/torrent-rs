@@ -5,7 +5,7 @@
 //! - [`PieceManager`] — bitfield tracking, progress calculation
 //! - [`PieceSelector`] trait + 4 strategies for picking which piece to download next
 //!
-//! The async [`FileStorage`] implementation lives in the `torrent` crate.
+//! The async `FileStorage` implementation lives in the `torrent` crate.
 //!
 //! # Selection Strategies
 //!

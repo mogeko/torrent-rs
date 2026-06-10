@@ -7,8 +7,7 @@
 //! - [`PeerState`]: connection state machine
 //!
 //! All types are purely data with no I/O, usable in both sync and async
-//! contexts. The async [`PeerConnection`](crate::peer::PeerConnection) lives
-//! in the `torrent` crate.
+//! contexts. The async `PeerConnection` type lives in the `torrent` crate.
 
 mod handshake;
 mod message;

@@ -27,6 +27,7 @@ These MUST be followed. Apply them before consulting the reference architecture 
     cargo clippy -p torrent-core -- -D warnings
     cargo clippy -p torrent -- -D warnings
     cargo fmt -- --check
+    RUSTDOCFLAGS="-D warnings" cargo doc
     ```
 
     - Tests must never require network access.
