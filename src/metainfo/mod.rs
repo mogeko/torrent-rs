@@ -1,8 +1,50 @@
+//! .torrent file parsing and metadata (BEP 3, 12, 52).
+//!
+//! The metainfo module parses `.torrent` files into structured data,
+//! supporting both single-file and multi-file modes. The `info_hash`
+//! is computed as `SHA-1(bencoded_info_dict)`, serving as the
+//! torrent's unique identifier.
+//!
+//! # Key Types
+//!
+//! - [`Metainfo`] — the top-level parsed torrent
+//! - [`Info`] — the `info` dictionary with piece hashes and file layout
+//! - [`Mode`] — single-file vs multi-file layout
+//! - [`FileInfo`] — per-file metadata in multi-file mode
+//! - [`from_bytes`] — parse raw bencoded `.torrent` data
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use torrent::metainfo::from_bytes;
+//!
+//! let data = std::fs::read("debian.torrent").unwrap();
+//! let meta = from_bytes(&data).unwrap();
+//! println!("Info hash: {:x?}", meta.info_hash());
+//! println!("Pieces: {}", meta.info.num_pieces());
+//! ```
+
 mod parse;
 
 use bytes::Bytes;
 
 /// Represents a parsed `.torrent` file (BEP 3).
+///
+/// A `Metainfo` is the result of parsing a `.torrent` file's bencoded content
+/// via [`from_bytes`]. It contains tracker URLs, file metadata, and
+/// the raw info dict bytes needed for computing the torrent's
+/// unique [`info_hash`](Metainfo::info_hash).
+///
+/// # Examples
+///
+/// ```no_run
+/// use torrent::metainfo::from_bytes;
+///
+/// let data = std::fs::read("debian.torrent").unwrap();
+/// let meta = from_bytes(&data).unwrap();
+/// println!("Info hash: {:x?}", meta.info_hash());
+/// println!("Announce: {}", meta.announce);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Metainfo {
     /// The URL of the tracker.

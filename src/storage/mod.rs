@@ -1,3 +1,18 @@
+//! Torrent data storage and piece management.
+//!
+//! This module handles all disk I/O and download scheduling decisions:
+//! - [`Storage`] trait — abstraction for reading/writing pieces
+//! - [`FileStorage`] — file-based implementation (single & multi-file)
+//! - [`PieceManager`] — bitfield tracking, progress calculation
+//! - [`PieceSelector`] trait + 4 strategies for picking which piece to download next
+//!
+//! # Selection Strategies
+//!
+//! - [`RarestFirst`] — picks the piece available from the fewest peers (BEP 3 recommended)
+//! - [`RandomFirst`] — picks a random available piece
+//! - [`Sequential`] — picks the lowest-indexed missing piece
+//! - [`EndGame`] — picks any remaining piece (for duplicate requests in final phase)
+
 mod file_backend;
 mod piece_selector;
 

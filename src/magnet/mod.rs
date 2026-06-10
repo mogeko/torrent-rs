@@ -1,9 +1,59 @@
+//! Magnet URI parsing (BEP 9).
+//!
+//! Magnet URIs identify torrents by their info hash without requiring
+//! a `.torrent` file. This module supports both hex (40 chars) and
+//! base32 (32 chars) encoded info hashes, plus display name and
+//! tracker parameters.
+//!
+//! # Key Types
+//!
+//! - [`MagnetUri`] — the parsed URI, implementing `FromStr` and `Display`
+//! - [`InfoHash`] — a 20-byte SHA-1 hash with its original encoded form
+//!
+//! # Examples
+//!
+//! ```
+//! use std::str::FromStr;
+//! use torrent::magnet::MagnetUri;
+//!
+//! let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+//! let magnet = MagnetUri::from_str(uri).unwrap();
+//! assert_eq!(magnet.info_hashes.len(), 1);
+//! ```
+
 use std::fmt;
 use std::str::FromStr;
 
 use crate::error::{Error, ErrorKind};
 
 /// A parsed magnet URI (BEP 9).
+///
+/// Magnet URIs provide a way to identify torrents by their info hash
+/// without requiring a `.torrent` file. The format is:
+///
+/// ```text
+/// magnet:?xt=urn:btih:<info_hash>&dn=<name>&tr=<tracker_url>&...
+/// ```
+///
+/// Both hex (40 characters) and base32 (32 characters) encoded info
+/// hashes are supported.
+///
+/// # Examples
+///
+/// ```
+/// use std::str::FromStr;
+/// use torrent::magnet::MagnetUri;
+///
+/// let uri = "magnet:?xt=urn:btih:\
+///     0123456789abcdef0123456789abcdef01234567\
+///     &dn=ubuntu-24.04\
+///     &tr=http://tracker.example.com/announce";
+///
+/// let magnet = MagnetUri::from_str(uri).unwrap();
+/// assert_eq!(magnet.info_hashes.len(), 1);
+/// assert_eq!(magnet.display_name.as_deref(), Some("ubuntu-24.04"));
+/// assert_eq!(magnet.trackers.len(), 1);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MagnetUri {
     /// Exact Topic — info hashes (at least one required).

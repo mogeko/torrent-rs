@@ -1,3 +1,15 @@
+//! BitTorrent peer wire protocol (BEP 3).
+//!
+//! This module provides all the primitives needed to communicate with
+//! other peers in a BitTorrent swarm:
+//! - [`PeerId`]: 20-byte client identifier
+//! - [`Handshake`]: 68-byte protocol handshake
+//! - [`PeerMessage`]: 11 wire protocol messages
+//! - [`PeerConnection`]: async TCP connection with buffered I/O
+//!
+//! The handshake and message types are purely data (no I/O), making them
+//! usable in both sync and async contexts.
+
 mod handshake;
 mod message;
 mod stream;
@@ -7,6 +19,20 @@ use std::fmt;
 use rand::Rng;
 
 /// A 20-byte peer identifier (BEP 3).
+///
+/// Peer IDs are used to uniquely identify BitTorrent clients on a swarm.
+/// The [`PeerId::random`] method generates an Azureus-style ID with the
+/// format `-TR1000-<12 random alphanumeric chars>`.
+///
+/// # Examples
+///
+/// ```
+/// use torrent::peer::PeerId;
+///
+/// let peer_id = PeerId::random();
+/// assert_eq!(peer_id.0.len(), 20);
+/// assert_eq!(&peer_id.0[..8], b"-TR1000-");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId(pub [u8; 20]);
 

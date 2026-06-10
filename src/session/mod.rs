@@ -1,3 +1,15 @@
+//! High-level session management — orchestrates all BitTorrent modules.
+//!
+//! The [`Session`] is the main entry point. Use [`SessionConfig`] to configure
+//! it, then add torrents with [`Session::add_torrent_bytes`] or
+//! [`Session::add_torrent`]. Track progress via [`Session::torrent_status`].
+//!
+//! # Architecture
+//!
+//! Each added torrent spawns a [`tokio`] task that runs a download loop.
+//! The loop periodically connects to peers, requests blocks, verifies
+//! pieces using SHA-1, and updates the torrent status.
+
 mod download;
 mod peer_manager;
 mod torrent;
@@ -15,9 +27,40 @@ use crate::peer::PeerId;
 use crate::storage::FileStorage;
 
 /// Unique identifier for a torrent (SHA-1 info hash).
+///
+/// This is the 20-byte hash used throughout the BitTorrent protocol
+/// to identify torrents. It is computed as `SHA-1(bencoded_info_dict)`.
 pub type InfoHash = [u8; 20];
 
 /// High-level session managing all torrent downloads/uploads.
+///
+/// This is the main entry point for the library. Create a [`Session`]
+/// with [`SessionConfig`], then add torrents via
+/// [`add_torrent`](Session::add_torrent) or
+/// [`add_torrent_bytes`](Session::add_torrent_bytes).
+///
+/// # Examples
+///
+/// ```no_run
+/// use torrent::session::{Session, SessionConfig};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = SessionConfig {
+///     download_dir: std::path::PathBuf::from("./downloads"),
+///     ..Default::default()
+/// };
+/// let session = Session::new(config).await.unwrap();
+///
+/// // Add a torrent from a .torrent file
+/// let data = std::fs::read("torrent.torrent").unwrap();
+/// let info_hash = session.add_torrent_bytes(&data).await.unwrap();
+///
+/// // Check its status
+/// let status = session.torrent_status(&info_hash).await.unwrap();
+/// println!("Progress: {:.1}%", status.progress * 100.0);
+/// # Ok(())
+/// # }
+/// ```
 pub struct Session {
     /// Our peer ID.
     #[allow(dead_code)]

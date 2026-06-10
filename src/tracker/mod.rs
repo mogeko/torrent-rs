@@ -1,3 +1,13 @@
+//! Tracker communication — HTTP and UDP announce (BEP 3, BEP 15).
+//!
+//! Trackers coordinate peer discovery in a BitTorrent swarm.
+//! Two implementations are provided:
+//! - [`HttpTracker`]: HTTP GET announce (no `reqwest`, manual HTTP/1.1)
+//! - [`UdpTracker`]: UDP announce with connection protocol (BEP 15)
+//!
+//! The core data types [`AnnounceRequest`] and [`AnnounceResponse`]
+//! are shared by both implementations.
+
 mod http;
 mod udp;
 

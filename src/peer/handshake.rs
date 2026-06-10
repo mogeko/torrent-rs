@@ -7,6 +7,28 @@ use crate::error::{Error, ErrorKind};
 /// ```text
 /// | pstrlen (1) | pstr (19) | reserved (8) | info_hash (20) | peer_id (20) |
 /// ```
+///
+/// # Examples
+///
+/// ```
+/// use torrent::peer::Handshake;
+///
+/// let hs = Handshake::new([1u8; 20], [2u8; 20]);
+/// let bytes = hs.to_bytes();
+/// let parsed = Handshake::from_bytes(&bytes).unwrap();
+/// assert_eq!(hs, parsed);
+/// ```
+///
+/// Checking extension bits:
+///
+/// ```
+/// use torrent::peer::Handshake;
+///
+/// let mut hs = Handshake::new([0u8; 20], [0u8; 20]);
+/// // Set the DHT bit (bit 43: byte 5, bit 4 from LSB)
+/// hs.reserved[5] = 0x10;
+/// assert!(hs.has_extension(43));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handshake {
     /// The info_hash of the torrent we want to download.

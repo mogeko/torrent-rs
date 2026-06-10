@@ -1,6 +1,53 @@
 use crate::error::{Error, ErrorKind};
 
 /// A peer wire protocol message (BEP 3).
+///
+/// Messages follow a fixed-length header format:
+///
+/// ```text
+/// <4-byte big-endian length> <1-byte message ID> <payload>
+/// ```
+///
+/// Currently 11 message types are supported, from `KeepAlive` (length = 0)
+/// to `Port` (length = 3).
+///
+/// # Examples
+///
+/// Encoding and decoding a Have message:
+///
+/// ```
+/// use torrent::peer::{PeerMessage, encode, decode};
+///
+/// let msg = PeerMessage::Have(42);
+/// let encoded = encode(&msg);
+/// let decoded = decode(&encoded).unwrap();
+/// assert_eq!(msg, decoded);
+/// ```
+///
+/// Round-trip all message types:
+///
+/// ```
+/// use torrent::peer::{PeerMessage, encode, decode};
+///
+/// let messages = vec![
+///     PeerMessage::KeepAlive,
+///     PeerMessage::Choke,
+///     PeerMessage::Unchoke,
+///     PeerMessage::Interested,
+///     PeerMessage::NotInterested,
+///     PeerMessage::Have(7),
+///     PeerMessage::Bitfield(vec![0xFF]),
+///     PeerMessage::Request { index: 0, begin: 0, length: 16384 },
+///     PeerMessage::Cancel { index: 1, begin: 1024, length: 8192 },
+///     PeerMessage::Port(6881),
+/// ];
+///
+/// for msg in &messages {
+///     let encoded = encode(msg);
+///     let decoded = decode(&encoded).unwrap();
+///     assert_eq!(msg, &decoded);
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerMessage {
     /// Keep-alive: `<len=0000>`.

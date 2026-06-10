@@ -1,6 +1,48 @@
+//! Error types for the torrent library.
+//!
+//! Uses a `kind` + `source` pattern similar to [`std::io::Error`].
+//!
+//! # Key Types
+//!
+//! - [`Error`] — the main error type
+//! - [`ErrorKind`] — categorization via a `#[non_exhaustive]` enum
+//!
+//! # Examples
+//!
+//! ```
+//! use torrent::error::{Error, ErrorKind};
+//!
+//! let err = Error::new(ErrorKind::InvalidInput);
+//! assert_eq!(err.kind(), ErrorKind::InvalidInput);
+//! ```
+
 use std::fmt;
 
 /// Top-level error type for the torrent library.
+///
+/// Uses a `kind` + `source` pattern similar to [`std::io::Error`].
+/// The [`ErrorKind`] enum categorizes the error, while an optional
+/// underlying source provides additional context.
+///
+/// # Examples
+///
+/// ```
+/// use torrent::error::{Error, ErrorKind};
+///
+/// let err = Error::new(ErrorKind::InvalidInput);
+/// assert_eq!(err.kind(), ErrorKind::InvalidInput);
+/// ```
+///
+/// Creating an error with a source:
+///
+/// ```
+/// use torrent::error::{Error, ErrorKind};
+/// use std::io;
+///
+/// let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
+/// let err = Error::with_source(ErrorKind::Io, io_err);
+/// assert_eq!(err.kind(), ErrorKind::Io);
+/// ```
 #[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,

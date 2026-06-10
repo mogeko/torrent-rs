@@ -1,3 +1,18 @@
+//! Kademlia Distributed Hash Table (BEP 5).
+//!
+//! The DHT module provides a distributed peer discovery mechanism
+//! without requiring a central tracker. It implements:
+//! - Kademlia routing table with 160 K-buckets
+//! - KRPC message encoding/decoding (bencode-based)
+//! - Four query types: `ping`, `find_node`, `get_peers`, `announce_peer`
+//!
+//! # Architecture
+//!
+//! - [`RoutingTable`] — sync K-bucket management (insert, lookup, find_closest)
+//! - [`krpc::KrpcMessage`] — sync encode/decode of DHT messages
+//! - [`rpc::DhtRpc`] — async UDP send/receive with transaction matching
+//! - Query helpers in `query` module — high-level find_node/get_peers/announce
+
 pub mod krpc;
 pub mod query;
 pub mod rpc;
