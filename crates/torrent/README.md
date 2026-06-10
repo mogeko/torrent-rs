@@ -154,16 +154,6 @@ let node_id = [0u8; 20];
 └─────────────────────────────────────────────────────┘
 ```
 
-## Dependencies
-
-| Crate          | Version | Purpose                                                  |
-| -------------- | ------- | -------------------------------------------------------- |
-| `torrent-core` | 0.1     | Core data types and algorithms                           |
-| `tokio`        | 1       | Async runtime (net, rt, macros, time, io-util, fs, sync) |
-| `bytes`        | 1       | Zero-copy byte buffers                                   |
-| `sha1`         | 0.10    | SHA-1 hashing                                            |
-| `rand`         | 0.8     | Random ID generation                                     |
-
 ## Testing
 
 ```bash

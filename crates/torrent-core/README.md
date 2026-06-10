@@ -128,14 +128,6 @@ let peers = parse_compact_peers_ipv4(&data).unwrap();
 assert_eq!(peers[0].to_string(), "127.0.0.1:6881");
 ```
 
-## Dependencies
-
-| Crate   | Version | Purpose                                    |
-| ------- | ------- | ------------------------------------------ |
-| `bytes` | 1       | Zero-copy byte buffers                     |
-| `sha1`  | 0.10    | SHA-1 hashing (info hash, DHT, pieces)     |
-| `rand`  | 0.8     | Random peer/transaction/node ID generation |
-
 **No async runtime required** — this crate has zero dependency on tokio or any
 other async runtime.
 

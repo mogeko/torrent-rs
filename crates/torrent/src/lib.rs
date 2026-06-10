@@ -35,3 +35,6 @@ pub mod peer;
 pub mod session;
 pub mod storage;
 pub mod tracker;
+
+// Re-export commonly-used types at the crate root for convenience.
+pub use peer::PeerId;
