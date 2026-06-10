@@ -1,6 +1,8 @@
 mod file_backend;
 mod piece_selector;
 
+use std::future::Future;
+
 use crate::error::Error;
 
 /// Storage abstraction for torrent data.
@@ -13,7 +15,7 @@ pub trait Storage: Send + Sync {
         &self,
         index: u32,
         buf: &mut [u8],
-    ) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Write a block (a portion of a piece) to storage.
     fn write_block(
@@ -21,7 +23,7 @@ pub trait Storage: Send + Sync {
         piece: u32,
         offset: u32,
         data: &[u8],
-    ) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Check if a piece is fully downloaded and verified.
     fn has_piece(&self, index: u32) -> bool;

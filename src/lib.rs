@@ -4,5 +4,6 @@ pub mod error;
 pub mod magnet;
 pub mod metainfo;
 pub mod peer;
+pub mod session;
 pub mod storage;
 pub mod tracker;
