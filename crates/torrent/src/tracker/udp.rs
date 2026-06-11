@@ -39,6 +39,11 @@ impl UdpTracker {
         Ok(UdpTracker { url })
     }
 
+    /// Returns the tracker's URL.
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
     /// Announce to the UDP tracker.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
         // Resolve hostname to SocketAddr (async, lazy)

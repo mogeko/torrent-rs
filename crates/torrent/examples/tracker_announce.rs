@@ -3,10 +3,6 @@
 //! Uses the bundled Ubuntu 26.04 torrent's built-in tracker list.
 //! Demonstrates single and multi-tracker announce via the unified [`Tracker`] API.
 //!
-//! **Note**: The Ubuntu torrent only has HTTPS trackers, but the current
-//! `HttpTracker` supports TLS (`tokio-rustls`). Falls back to a public UDP tracker
-//! to demonstrate actual network activity.
-//!
 //! Run with: `cargo run -p torrent --example tracker_announce`
 
 use torrent::metainfo::from_bytes;
@@ -27,19 +23,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut req = AnnounceRequest::new(info_hash, PeerId::random(), 6881);
     req.event = AnnounceEvent::Started;
 
-    // --- Fallback: public UDP tracker ---
-    // The Ubuntu torrent only has HTTPS trackers, so we add a public UDP
-    // tracker to demonstrate actual announce activity.
-    let public_udp = "udp://tracker.opentrackr.org:1337";
-    // --- Public UDP tracker ---
-    println!("\n=== Public UDP Tracker (Tracker::single) ===");
-    println!("URL: {}", public_udp);
-    match Tracker::single(public_udp)?.announce(&req).await {
+    // --- Tracker from Metainfo (collects announce + announce_list URLs) ---
+    let tracker = Tracker::from_metainfo(&meta)?;
+    println!("\n=== Built-in Trackers (Tracker::from_metainfo) ===");
+    match tracker.announce(&req).await {
         Ok(resp) => print_response(&resp),
-        Err(e) => {
-            eprintln!("Public UDP tracker failed: {}", e);
-            eprintln!("(Public trackers may be offline or reject unknown info_hashes)");
-        }
+        Err(e) => eprintln!("Tracker failed: {}", e),
     }
 
     Ok(())

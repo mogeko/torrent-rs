@@ -36,7 +36,11 @@ pub use self::http::HttpTracker;
 pub use self::into_url::IntoUrl;
 pub use self::udp::UdpTracker;
 
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
 use tokio::task::JoinSet;
+use torrent_core::metainfo::Metainfo;
 
 use crate::error::{Error, ErrorKind};
 
@@ -93,6 +97,81 @@ impl Tracker {
         Ok(Tracker { trackers })
     }
 
+    /// Create a `Tracker` from a parsed [`Metainfo`].
+    ///
+    /// Collects all tracker URLs from `announce` and `announce_list` (BEP 12),
+    /// deduplicates them, and returns a single-tracker or multi-tracker as
+    /// appropriate.  Accepts `&Metainfo` or `Metainfo`.
+    ///
+    /// Returns an error if any embedded URL is invalid.
+    pub fn from_metainfo(meta: &Metainfo) -> Result<Self, Error> {
+        let mut urls: BTreeSet<&str> = BTreeSet::new();
+
+        urls.insert(&meta.announce);
+        for tier in &meta.announce_list {
+            for url in tier {
+                urls.insert(url);
+            }
+        }
+
+        if urls.len() == 1 {
+            Self::single(*(urls.first().unwrap()))
+        } else {
+            Self::multi(urls)
+        }
+    }
+
+    /// Returns the number of trackers.
+    pub fn len(&self) -> usize {
+        self.trackers.len()
+    }
+
+    /// Returns `true` if there are no trackers.
+    pub fn is_empty(&self) -> bool {
+        self.trackers.is_empty()
+    }
+
+    /// Add a single tracker URL.
+    ///
+    /// Returns an error if the URL is invalid or has an unsupported scheme.
+    pub fn add(&mut self, url: impl IntoUrl) -> Result<(), Error> {
+        let url = url.into_url()?;
+        self.trackers.push(Inner::from_url(url)?);
+        Ok(())
+    }
+
+    /// Add multiple tracker URLs.
+    ///
+    /// Returns an error if any URL is invalid.
+    pub fn add_all<I: IntoIterator>(&mut self, urls: I) -> Result<(), Error>
+    where
+        I::Item: IntoUrl,
+    {
+        for url in urls {
+            self.add(url)?;
+        }
+        Ok(())
+    }
+
+    /// Remove a tracker by its URL.
+    ///
+    /// Returns `true` if a tracker was found and removed.
+    pub fn remove(&mut self, url: &str) -> bool {
+        let len_before = self.trackers.len();
+        self.trackers.retain(|inner| inner.url() != url);
+        self.trackers.len() < len_before
+    }
+
+    /// Remove all trackers.
+    pub fn clear(&mut self) {
+        self.trackers.clear();
+    }
+
+    /// Return the URLs of all trackers (for logging / debugging).
+    pub fn urls(&self) -> Vec<&str> {
+        self.trackers.iter().map(|inner| inner.url()).collect()
+    }
+
     /// Announce to the tracker(s).
     ///
     /// For a single tracker, delegates directly.
@@ -142,9 +221,10 @@ impl Tracker {
         req: &AnnounceRequest,
     ) -> JoinSet<Result<AnnounceResponse, Error>> {
         let mut set = JoinSet::new();
+        let req = Arc::new(req.clone());
         for inner in &self.trackers {
             let inner = inner.clone();
-            let req = req.clone();
+            let req = Arc::clone(&req);
             set.spawn(async move { inner.announce(&req).await });
         }
         set
@@ -159,6 +239,13 @@ enum Inner {
 }
 
 impl Inner {
+    fn url(&self) -> &str {
+        match self {
+            Inner::Http(t) => t.url().as_str(),
+            Inner::Udp(t) => t.url().as_str(),
+        }
+    }
+
     fn from_url(url: Url) -> Result<Self, Error> {
         match url.scheme() {
             "http" | "https" => Ok(Inner::Http(HttpTracker::new(url)?)),
@@ -278,5 +365,55 @@ mod tests {
         let url2 = Url::parse("udp://tracker.b.com:6969").unwrap();
         let t = Tracker::multi([url1, url2]).unwrap();
         assert_eq!(t.trackers.len(), 2);
+    }
+
+    #[test]
+    fn test_tracker_from_metainfo() {
+        use torrent_core::metainfo::{Info, Metainfo, Mode};
+
+        let info = Info {
+            piece_length: 262144,
+            pieces: vec![[0u8; 20]],
+            mode: Mode::Single {
+                name: "test.txt".into(),
+                length: 1024,
+            },
+            raw_info: bytes::Bytes::new(),
+        };
+        let meta = Metainfo {
+            announce: "http://tracker.a.com/announce".into(),
+            announce_list: vec![vec!["udp://tracker.b.com:6969".into()]],
+            info,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+
+        let t = Tracker::from_metainfo(&meta).unwrap();
+        assert_eq!(t.trackers.len(), 2);
+    }
+
+    #[test]
+    fn test_tracker_add_and_remove() {
+        let mut t = Tracker::single("http://tracker.a.com/announce").unwrap();
+        assert_eq!(t.len(), 1);
+        assert!(!t.is_empty());
+        assert_eq!(t.urls(), &["http://tracker.a.com/announce"]);
+
+        t.add("udp://tracker.b.com:6969").unwrap();
+        assert_eq!(t.len(), 2);
+        assert_eq!(
+            t.urls(),
+            &["http://tracker.a.com/announce", "udp://tracker.b.com:6969"]
+        );
+
+        assert!(t.remove("http://tracker.a.com/announce"));
+        assert_eq!(t.len(), 1);
+        assert!(!t.remove("http://tracker.a.com/announce")); // already gone
+
+        t.clear();
+        assert!(t.is_empty());
+        assert!(t.urls().is_empty());
     }
 }

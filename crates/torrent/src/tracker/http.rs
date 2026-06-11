@@ -61,6 +61,11 @@ impl HttpTracker {
         Ok(HttpTracker { url, tls })
     }
 
+    /// Returns the tracker's URL.
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
     /// Announce to the HTTP tracker.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
         // Build path + query string (avoid intermediate Url clone).
