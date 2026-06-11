@@ -12,4 +12,4 @@ pub use torrent_core::peer::{Handshake, PeerId, PeerMessage, PeerState, decode, 
 
 mod stream;
 
-pub use stream::PeerConnection;
+pub use self::stream::PeerConnection;

@@ -16,6 +16,8 @@
 
 mod piece_selector;
 
+pub use self::piece_selector::*;
+
 use std::future::Future;
 
 use crate::error::Error;
@@ -123,5 +125,3 @@ impl PieceManager {
         bytes
     }
 }
-
-pub use piece_selector::*;

@@ -26,6 +26,8 @@
 
 mod parse;
 
+pub use self::parse::from_bytes;
+
 use bytes::Bytes;
 
 /// Represents a parsed `.torrent` file (BEP 3).
@@ -138,5 +140,3 @@ impl Info {
         self.pieces.len()
     }
 }
-
-pub use parse::from_bytes;

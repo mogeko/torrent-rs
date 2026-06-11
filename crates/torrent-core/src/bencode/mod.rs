@@ -28,6 +28,10 @@ mod decode;
 mod encode;
 mod util;
 
+pub use self::decode::decode;
+pub use self::encode::encode;
+pub use self::util::*;
+
 use std::fmt;
 
 use bytes::Bytes;
@@ -138,7 +142,3 @@ impl fmt::Display for Bencode {
         }
     }
 }
-
-pub use decode::decode;
-pub use encode::encode;
-pub use util::*;

@@ -12,6 +12,9 @@
 mod handshake;
 mod message;
 
+pub use self::handshake::Handshake;
+pub use self::message::{PeerMessage, decode, encode};
+
 use std::fmt;
 
 use rand::Rng;
@@ -81,6 +84,3 @@ pub enum PeerState {
     /// Connection ended.
     Closed,
 }
-
-pub use handshake::Handshake;
-pub use message::{PeerMessage, decode, encode};

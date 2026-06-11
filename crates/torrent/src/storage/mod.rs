@@ -15,4 +15,4 @@ pub use torrent_core::storage::{
 
 mod file_backend;
 
-pub use file_backend::FileStorage;
+pub use self::file_backend::FileStorage;

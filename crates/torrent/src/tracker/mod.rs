@@ -16,5 +16,5 @@ pub use torrent_core::tracker::{
 mod http;
 mod udp;
 
-pub use http::HttpTracker;
-pub use udp::UdpTracker;
+pub use self::http::HttpTracker;
+pub use self::udp::UdpTracker;

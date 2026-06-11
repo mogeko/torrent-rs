@@ -14,5 +14,5 @@ pub use torrent_core::dht::{Node, RoutingTable, krpc};
 mod query;
 mod rpc;
 
-pub use query::{announce_peer, find_node, get_peers};
-pub use rpc::DhtRpc;
+pub use self::query::{announce_peer, find_node, get_peers};
+pub use self::rpc::DhtRpc;
