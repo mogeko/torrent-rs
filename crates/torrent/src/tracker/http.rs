@@ -5,6 +5,7 @@ use crate::error::{Error, ErrorKind};
 use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
 /// HTTP tracker client (BEP 3).
+#[derive(Debug, Clone)]
 pub struct HttpTracker {
     url: Url,
 }

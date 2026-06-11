@@ -19,6 +19,7 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RETRIES: u32 = 3;
 
 /// UDP tracker client (BEP 15).
+#[derive(Debug, Clone)]
 pub struct UdpTracker {
     url: Url,
 }
