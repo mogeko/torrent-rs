@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.dependencies]
 bytes = "1.11"
 proptest = "1.11"
-rand = "0.8"
+rand = "0.9"
 rustls = "0.23"
 rustls-native-certs = "0.8"
 sha1 = "0.10"
