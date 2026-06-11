@@ -1,0 +1,20 @@
+[package]
+name = "torrent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+torrent-core = { path = "../torrent-core" }
+bytes.workspace = true
+rand.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+sha1.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+url.workspace = true
+
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true

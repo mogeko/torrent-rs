@@ -1,0 +1,12 @@
+[package]
+name = "torrent-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes.workspace = true
+rand.workspace = true
+sha1.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
