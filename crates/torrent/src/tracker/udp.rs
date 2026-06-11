@@ -46,62 +46,73 @@ impl UdpTracker {
 
     /// Announce to the UDP tracker.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
-        // Resolve hostname to SocketAddr (async, lazy)
         let Some(host) = self.url.host_str() else {
             return Err(Error::new(ErrorKind::InvalidInput));
         };
         let port = self.url.port().unwrap_or(80);
 
-        let addr = lookup_host((host, port))
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?
-            .next()
-            .ok_or(Error::new(ErrorKind::TrackerRequestFailed))?;
-
-        // Bind a socket on the same address family as the tracker.
-        let bind_addr = SocketAddr::new(
-            if addr.is_ipv4() {
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-            } else {
-                IpAddr::V6(Ipv6Addr::UNSPECIFIED)
-            },
-            0,
-        );
-        let socket = UdpSocket::bind(bind_addr)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
-
-        // Phase 1: Connect to get connection ID
-        let connection_id = connect(&socket, addr).await?;
-
-        // Phase 2: Announce (with retries — UDP is unreliable)
         let event = match req.event {
             AnnounceEvent::None => 0u32,
             AnnounceEvent::Completed => 1u32,
             AnnounceEvent::Started => 2u32,
             AnnounceEvent::Stopped => 3u32,
-            _ => 0u32, // unknown future variants → treat as None
+            _ => 0u32,
         };
 
-        let transaction_id = rand::random::<u32>();
-        let announce_packet = build_announce_packet(connection_id, transaction_id, req, event);
+        let mut last_err = None;
 
-        for _ in 0..MAX_RETRIES {
-            socket
-                .send_to(&announce_packet, addr)
-                .await
-                .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
-
-            let mut buf = vec![0u8; RECV_BUF_SIZE];
-            match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
-                Ok(Ok((len, _src))) => {
-                    return parse_announce_response(&buf[..len], transaction_id);
+        // Resolve hostname — try every address returned by DNS.
+        for addr in lookup_host((host, port))
+            .await
+            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?
+        {
+            // Bind a socket matching this address family.
+            let bind_addr = SocketAddr::new(
+                if addr.is_ipv4() {
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+                } else {
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+                },
+                0,
+            );
+            let socket = match UdpSocket::bind(bind_addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    last_err = Some(Error::with_source(ErrorKind::TrackerRequestFailed, e));
+                    continue;
                 }
-                _ => continue,
+            };
+
+            // Phase 1: Connect
+            let connection_id = match connect(&socket, addr).await {
+                Ok(id) => id,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            // Phase 2: Announce (with retries — UDP is unreliable)
+            let transaction_id = rand::random::<u32>();
+            let announce_packet = build_announce_packet(connection_id, transaction_id, req, event);
+
+            for _ in 0..MAX_RETRIES {
+                if let Err(e) = socket.send_to(&announce_packet, addr).await {
+                    last_err = Some(Error::with_source(ErrorKind::TrackerRequestFailed, e));
+                    break;
+                }
+
+                let mut buf = vec![0u8; RECV_BUF_SIZE];
+                match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
+                    Ok(Ok((len, _src))) => {
+                        return parse_announce_response(&buf[..len], transaction_id);
+                    }
+                    _ => continue,
+                }
             }
         }
 
-        Err(Error::new(ErrorKind::TrackerRequestFailed))
+        Err(last_err.unwrap_or_else(|| Error::new(ErrorKind::TrackerRequestFailed)))
     }
 }
 
