@@ -1,4 +1,4 @@
-//! Async tracker implementations — HTTP and UDP announce.
+//! Async tracker implementations — HTTP (plain + TLS) and UDP announce.
 //!
 //! Re-exports data types from `torrent_core::tracker` and provides
 //! async HTTP and UDP tracker clients.
@@ -6,22 +6,30 @@
 //! # Key Types
 //!
 //! - [`Tracker`] — unified announce client (single or multi-tracker)
-//! - [`HttpTracker`] — HTTP GET announce (BEP 3/23)
+//! - [`HttpTracker`] — HTTP/HTTPS GET announce (BEP 3/23)
 //! - [`UdpTracker`] — UDP announce (BEP 15)
 //!
 //! # Constructors
 //!
 //! - [`Tracker::single`] — create from a single URL
 //! - [`Tracker::multi`] — create from multiple URLs
+//! - [`Tracker::from_metainfo`] — create from parsed torrent metadata
+//!
+//! # Tracker Management
+//!
+//! - [`Tracker::add`] / [`Tracker::add_all`] — add trackers at runtime
+//! - [`Tracker::remove`] — remove a tracker by URL
+//! - [`Tracker::clear`] — remove all trackers
+//! - [`Tracker::len`] / [`Tracker::is_empty`] / [`Tracker::urls`] — introspection
 //!
 //! # Announce Methods
 //!
-//！ | Method                         | Behavior                                             |
-//！ | ------------------------------ | ---------------------------------------------------- |
-//！ | [`Tracker::announce`]          | single-tracker; for multi acts like `announce_first` |
-//！ | [`Tracker::announce_first`]    | race all trackers, return first success              |
-//！ | [`Tracker::announce_all`]      | collect all successful responses                     |
-//！ | [`Tracker::announce_into_set`] | return a [`JoinSet`] for caller to drive             |
+//! | Method                         | Behavior                                             |
+//! | ------------------------------ | ---------------------------------------------------- |
+//! | [`Tracker::announce`]          | single-tracker; for multi acts like `announce_first` |
+//! | [`Tracker::announce_first`]    | race all trackers, return first success              |
+//! | [`Tracker::announce_all`]      | collect all successful responses                     |
+//! | [`Tracker::announce_into_set`] | return a [`JoinSet`] for caller to drive             |
 
 mod http;
 mod into_url;

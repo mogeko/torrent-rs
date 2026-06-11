@@ -150,7 +150,7 @@ bencode ─── metainfo             session ───────────
 
 ### Project Status
 
-All 5 implementation phases are complete (162 tests, 0 failures):
+All 5 implementation phases are complete (202 tests, 0 failures):
 
 | Phase | Modules              | Status                                      |
 | ----- | -------------------- | ------------------------------------------- |

@@ -45,6 +45,10 @@ impl UdpTracker {
     }
 
     /// Announce to the UDP tracker.
+    ///
+    /// Resolves all addresses and tries each one in sequence (multi-homed
+    /// tracker support).  Uses the BEP 15 two-phase connect+announce protocol
+    /// with retries on both phases.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
         let Some(host) = self.url.host_str() else {
             return Err(Error::new(ErrorKind::InvalidInput));
