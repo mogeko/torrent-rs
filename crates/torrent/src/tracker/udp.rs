@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use tokio::net::{UdpSocket, lookup_host};
@@ -53,8 +53,16 @@ impl UdpTracker {
             .next()
             .ok_or(Error::new(ErrorKind::TrackerRequestFailed))?;
 
-        // Dual-stack socket: bind to IPv6 wildcard (accepts IPv4-mapped addresses too).
-        let socket = UdpSocket::bind("[::]:0")
+        // Bind a socket on the same address family as the tracker.
+        let bind_addr = SocketAddr::new(
+            if addr.is_ipv4() {
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+            } else {
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+            },
+            0,
+        );
+        let socket = UdpSocket::bind(bind_addr)
             .await
             .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
 
