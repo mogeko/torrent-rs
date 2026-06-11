@@ -84,6 +84,7 @@ impl Tracker {
     /// - `udp://` → [`UdpTracker`]
     ///
     /// Accepts `&str`, `String`, `&String`, or [`Url`].
+    ///
     /// Returns `None` if the URL is invalid or uses an unsupported scheme.
     pub fn single(url: impl IntoUrl) -> Option<Self> {
         let inner = Inner::from_url(url.into_url().ok()?).ok()?;
@@ -95,6 +96,7 @@ impl Tracker {
     /// Create a `Tracker` from multiple tracker URLs.
     ///
     /// Invalid or unsupported URLs are silently skipped.
+    ///
     /// Returns `None` if **all** URLs are invalid.
     pub fn multi<I: IntoIterator>(urls: I) -> Option<Self>
     where
@@ -117,6 +119,7 @@ impl Tracker {
     /// Collects all tracker URLs from `announce` and `announce_list` (BEP 12),
     /// deduplicates them, and returns a single-tracker or multi-tracker as
     /// appropriate. Invalid or unsupported URLs are silently skipped.
+    ///
     /// Returns `None` if no valid tracker URLs were found.
     pub fn from_metainfo(meta: &Metainfo) -> Option<Self> {
         let mut urls: BTreeSet<&str> = BTreeSet::new();
