@@ -1,9 +1,8 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use url::Url;
 
 use crate::error::{Error, ErrorKind};
-use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
+use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
 /// HTTP tracker client (BEP 3).
 pub struct HttpTracker {
@@ -14,9 +13,11 @@ impl HttpTracker {
     /// Create a new HTTP tracker client.
     ///
     /// `url` must be a full announce URL (e.g. `http://tracker.example.com:6969/announce`).
-    pub fn new(url: &str) -> Result<Self, Error> {
-        let url = Url::parse(url).map_err(|e| Error::with_source(ErrorKind::InvalidInput, e))?;
-        Ok(HttpTracker { url })
+    /// Accepts `&str`, `String`, `&String`, or `Url`.
+    pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
+        Ok(HttpTracker {
+            url: url.into_url()?,
+        })
     }
 
     /// Announce to the HTTP tracker.

@@ -9,12 +9,15 @@
 //! - [`HttpTracker`] — HTTP GET announce (BEP 3/23)
 //! - [`UdpTracker`] — UDP announce (BEP 15)
 
+mod http;
+mod into_url;
+mod udp;
+
 pub use torrent_core::tracker::{
     AnnounceEvent, AnnounceRequest, AnnounceResponse, parse_compact_peers_ipv4,
 };
-
-mod http;
-mod udp;
+pub use url::Url;
 
 pub use self::http::HttpTracker;
+pub use self::into_url::IntoUrl;
 pub use self::udp::UdpTracker;

@@ -5,10 +5,9 @@ use tokio::net::{UdpSocket, lookup_host};
 use tokio_stream::StreamExt;
 use tokio_util::codec::BytesCodec;
 use tokio_util::udp::UdpFramed;
-use url::Url;
 
 use crate::error::{Error, ErrorKind};
-use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
+use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
 /// Magic connection ID constant used during the connection phase.
 const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
@@ -28,8 +27,9 @@ impl UdpTracker {
     /// Create a new UDP tracker client for a given tracker URL.
     ///
     /// `url` must be a `udp://` URL (e.g. `udp://tracker.example.com:6969`).
-    pub fn new(url: &str) -> Result<Self, Error> {
-        let url = Url::parse(url).map_err(|e| Error::with_source(ErrorKind::InvalidInput, e))?;
+    /// Accepts `&str`, `String`, `&String`, or `Url`.
+    pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
+        let url = url.into_url()?;
 
         if url.scheme() != "udp" {
             return Err(Error::new(ErrorKind::InvalidInput));
