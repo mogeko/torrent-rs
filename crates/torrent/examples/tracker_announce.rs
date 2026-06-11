@@ -4,7 +4,7 @@
 //! Demonstrates single and multi-tracker announce via the unified [`Tracker`] API.
 //!
 //! **Note**: The Ubuntu torrent only has HTTPS trackers, but the current
-//! `HttpTracker` does not support TLS. Falls back to a public UDP tracker
+//! `HttpTracker` supports TLS (`tokio-rustls`). Falls back to a public UDP tracker
 //! to demonstrate actual network activity.
 //!
 //! Run with: `cargo run -p torrent --example tracker_announce`

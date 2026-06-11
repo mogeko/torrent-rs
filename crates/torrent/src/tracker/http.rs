@@ -1,7 +1,9 @@
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, lookup_host};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use crate::error::{Error, ErrorKind};
 use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
@@ -12,21 +14,51 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum response size to guard against malicious or buggy trackers (256 KB).
 const MAX_RESPONSE_SIZE: u64 = 256 * 1024;
 
-/// HTTP tracker client (BEP 3).
-#[derive(Debug, Clone)]
+/// Internal trait to unify plain TCP and TLS streams into a single `Box<dyn …>`.
+trait TrackerStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> TrackerStream for T {}
+
+/// HTTP tracker client (BEP 3, BEP 23).
+///
+/// Supports both `http://` (plain TCP) and `https://` (TLS via `tokio-rustls`).
 pub struct HttpTracker {
     url: Url,
+    /// TLS connector for `https://` URLs; `None` for plain `http://`.
+    tls: Option<tokio_rustls::TlsConnector>,
+}
+
+impl fmt::Debug for HttpTracker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpTracker")
+            .field("url", &self.url)
+            .field("tls", &self.tls.is_some())
+            .finish()
+    }
+}
+
+impl Clone for HttpTracker {
+    fn clone(&self) -> Self {
+        HttpTracker {
+            url: self.url.clone(),
+            tls: self.tls.clone(),
+        }
+    }
 }
 
 impl HttpTracker {
     /// Create a new HTTP tracker client.
     ///
-    /// `url` must be a full announce URL (e.g. `http://tracker.example.com:6969/announce`).
+    /// `url` must be a full announce URL (e.g. `http://tracker.example.com:6969/announce`
+    /// or `https://tracker.example.com/announce`). Automatically detects TLS.
     /// Accepts `&str`, `String`, `&String`, or `Url`.
     pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
-        Ok(HttpTracker {
-            url: url.into_url()?,
-        })
+        let url = url.into_url()?;
+        let tls = if url.scheme() == "https" {
+            Some(build_tls_connector()?)
+        } else {
+            None
+        };
+        Ok(HttpTracker { url, tls })
     }
 
     /// Announce to the HTTP tracker.
@@ -34,17 +66,16 @@ impl HttpTracker {
         // Build path + query string (avoid intermediate Url clone).
         let path_and_query = format!("{}?{}", self.url.path(), build_query_string(req));
 
-        // Resolve hostname asynchronously (avoid blocking the tokio runtime).
-        let Some(host) = self.url.host_str() else {
-            return Err(Error::new(ErrorKind::InvalidInput));
-        };
-        let port = self.url.port().unwrap_or(80);
-
-        let addr = lookup_host((host, port))
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?
-            .next()
-            .ok_or(Error::new(ErrorKind::TrackerRequestFailed))?;
+        // Owned copy for the async block (TlsConnector::connect requires 'static).
+        let host: &'static str = Box::leak(
+            self.url
+                .host_str()
+                .ok_or(Error::new(ErrorKind::InvalidInput))?
+                .to_owned()
+                .into_boxed_str(),
+        );
+        // Use the correct default port for the scheme (80 for http, 443 for https).
+        let port = self.url.port_or_known_default().unwrap_or(80);
 
         // Build host header
         let host_header = match self.url.port() {
@@ -59,10 +90,25 @@ impl HttpTracker {
         );
 
         // Perform the full HTTP round-trip with a single timeout guard.
-        let response = tokio::time::timeout(TIMEOUT, async {
-            let mut stream = TcpStream::connect(addr)
+        // Clone TLS connector before the async block to avoid borrowing self.
+        let tls = self.tls.clone();
+        let response = tokio::time::timeout(TIMEOUT, async move {
+            let tcp_stream = TcpStream::connect((host, port))
                 .await
                 .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+
+            // Conditionally wrap the TCP stream in TLS for `https://` URLs.
+            let mut stream: Box<dyn TrackerStream> = if let Some(ref connector) = tls {
+                let domain = rustls::pki_types::ServerName::try_from(host)
+                    .map_err(|_| Error::new(ErrorKind::InvalidInput))?;
+                let tls_stream = connector
+                    .connect(domain, tcp_stream)
+                    .await
+                    .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+                Box::new(tls_stream)
+            } else {
+                Box::new(tcp_stream)
+            };
 
             stream
                 .write_all(request.as_bytes())
@@ -107,6 +153,24 @@ impl HttpTracker {
             _ => Err(Error::new(ErrorKind::TrackerRequestFailed)),
         }
     }
+}
+
+/// Build a TLS connector with system root certificates.
+fn build_tls_connector() -> Result<tokio_rustls::TlsConnector, Error> {
+    let mut root_store = rustls::RootCertStore::empty();
+
+    let native_certs = rustls_native_certs::load_native_certs();
+    for cert in native_certs.certs {
+        root_store
+            .add(cert)
+            .map_err(|e| Error::with_source(ErrorKind::InvalidInput, e))?;
+    }
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+    Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
 }
 
 /// Build the query string with correct percent-encoding for binary fields

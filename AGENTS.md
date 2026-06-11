@@ -143,7 +143,7 @@ bencode ─── metainfo             session ───────────
 - **Magnet**: Parses `magnet:?xt=urn:btih:<hex\|base32>`. Hex and base32 decoding implemented manually.
 - **Peer**: 11 message types (`KeepAlive`–`Port`). 68-byte handshake with reserved extension bits. Types in `torrent-core`, async `PeerConnection` in `torrent`.
 - **Tracker**: `HttpTracker` uses manual HTTP/1.1 (no `reqwest`). `UdpTracker` implements BEP 15 connection protocol + announce + retry. Both in `torrent`.
-  - **Limitation**: HTTP tracker does not yet support TLS. `https://` URLs are rejected at construction with a clear error. **TODO**: add TLS support via `tokio-rustls` or `native-tls` in the `http` module.
+  - `HttpTracker` supports both `http://` (plain TCP) and `https://` (TLS via `tokio-rustls`).
 - **Storage**: `Storage` trait + `PieceManager` + 4 selection strategies (`RarestFirst`, `RandomFirst`, `Sequential`, `EndGame`) in `torrent-core`. `FileStorage` implementation in `torrent`.
 - **DHT**: 160 K-buckets (K=8), XOR distance, KRPC bencode-based messages in `torrent-core`. Async RPC + 4 query types (`ping`, `find_node`, `get_peers`, `announce_peer`) in `torrent`.
 - **Session**: `Session::new(config)` → `add_torrent()` / `remove_torrent()` / `torrent_status()`. Per-torrent `DownloadLoop` (tokio::spawn). `PeerManager` connection pool. `UploadManager` choke/unchoke logic. All in `torrent`.

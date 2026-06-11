@@ -7,9 +7,13 @@ edition = "2024"
 torrent-core = { path = "../torrent-core" }
 bytes.workspace = true
 rand.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 sha1.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 url.workspace = true
+
 
 [dev-dependencies]
 tempfile.workspace = true

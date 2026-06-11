@@ -66,9 +66,9 @@ impl Tracker {
     /// Create a single `Tracker` from a URL.
     ///
     /// The scheme determines which backend is used:
-    /// - `http://` → [`HttpTracker`]
+    /// - `http://` → [`HttpTracker`] (plain TCP)
+    /// - `https://` → [`HttpTracker`] with TLS
     /// - `udp://` → [`UdpTracker`]
-    /// - `https://` ❌ rejected — TLS not yet supported
     ///
     /// Accepts `&str`, `String`, `&String`, or [`Url`].
     pub fn single(url: impl IntoUrl) -> Result<Self, Error> {
@@ -161,8 +161,7 @@ enum Inner {
 impl Inner {
     fn from_url(url: Url) -> Result<Self, Error> {
         match url.scheme() {
-            // TODO(#next): support HTTPS via TLS (e.g. tokio-rustls)
-            "http" => Ok(Inner::Http(HttpTracker::new(url)?)),
+            "http" | "https" => Ok(Inner::Http(HttpTracker::new(url)?)),
             "udp" => Ok(Inner::Udp(UdpTracker::new(url)?)),
             _ => Err(Error::new(ErrorKind::InvalidInput)),
         }
@@ -194,17 +193,20 @@ mod tests {
     }
 
     #[test]
-    fn test_tracker_single_https_rejected() {
-        assert!(Tracker::single("https://tracker.example.com/announce").is_err());
+    fn test_tracker_single_https() {
+        // HTTPS is now supported via TLS wrapping
+        let t = Tracker::single("https://tracker.example.com/announce").unwrap();
+        assert_eq!(t.trackers.len(), 1);
     }
 
     #[test]
-    fn test_tracker_multi_https_rejected() {
+    fn test_tracker_multi_mixed_http_https() {
         let result = Tracker::multi([
             "http://tracker.a.com/announce",
             "https://tracker.b.com/announce",
         ]);
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().trackers.len(), 2);
     }
 
     #[test]
