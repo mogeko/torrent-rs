@@ -1,16 +1,17 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
+use tokio::net::{UdpSocket, lookup_host};
+use tokio_stream::StreamExt;
+use tokio_util::codec::BytesCodec;
+use tokio_util::udp::UdpFramed;
+use url::Url;
 
 use crate::error::{Error, ErrorKind};
 use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
 
 /// Magic connection ID constant used during the connection phase.
 const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
-
-/// UDP datagram buffer size.
-const UDP_BUF_SIZE: usize = 2048;
 
 /// Connection timeout.
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -20,32 +21,45 @@ const MAX_RETRIES: u32 = 3;
 
 /// UDP tracker client (BEP 15).
 pub struct UdpTracker {
-    addr: SocketAddr,
+    url: Url,
 }
 
 impl UdpTracker {
     /// Create a new UDP tracker client for a given tracker URL.
+    ///
+    /// `url` must be a `udp://` URL (e.g. `udp://tracker.example.com:6969`).
     pub fn new(url: &str) -> Result<Self, Error> {
-        // Strip udp:// prefix
-        let addr_str = url
-            .strip_prefix("udp://")
-            .ok_or(Error::new(ErrorKind::InvalidInput))?;
+        let url = Url::parse(url).map_err(|e| Error::with_source(ErrorKind::InvalidInput, e))?;
 
-        let addr: SocketAddr = addr_str
-            .parse()
-            .map_err(|_| Error::new(ErrorKind::InvalidInput))?;
+        if url.scheme() != "udp" {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
 
-        Ok(UdpTracker { addr })
+        Ok(UdpTracker { url })
     }
 
     /// Announce to the UDP tracker.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
+        // Resolve hostname to SocketAddr (async, lazy)
+        let host = self
+            .url
+            .host_str()
+            .ok_or(Error::new(ErrorKind::InvalidInput))?;
+        let port = self.url.port().unwrap_or(80);
+        let addr = lookup_host((host, port))
+            .await
+            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?
+            .next()
+            .ok_or(Error::new(ErrorKind::TrackerRequestFailed))?;
+
         let socket = UdpSocket::bind("0.0.0.0:0")
             .await
             .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
 
+        let mut framed = UdpFramed::new(socket, BytesCodec::new());
+
         // Phase 1: Connect to get connection ID
-        let connection_id = connect(&socket, self.addr).await?;
+        let connection_id = connect(&mut framed, addr).await?;
 
         // Phase 2: Announce
         let event = match req.event {
@@ -73,48 +87,43 @@ impl UdpTracker {
         announce_packet.extend_from_slice(&(req.numwant.unwrap_or(50) as i32).to_be_bytes()); // 4
         announce_packet.extend_from_slice(&req.port.to_be_bytes()); // 2
 
-        socket
-            .send_to(&announce_packet, self.addr)
+        framed
+            .get_mut()
+            .send_to(&announce_packet, addr)
             .await
             .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
 
-        let mut buf = [0u8; UDP_BUF_SIZE];
-        let (len, _src) = tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf))
-            .await
-            .map_err(|_| Error::new(ErrorKind::TrackerRequestFailed))?
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
-
-        parse_announce_response(&buf[..len], transaction_id)
+        match tokio::time::timeout(TIMEOUT, framed.next()).await {
+            Ok(Some(Ok((data, _src)))) => parse_announce_response(&data, transaction_id),
+            Ok(Some(Err(e))) => Err(Error::with_source(ErrorKind::TrackerRequestFailed, e)),
+            Ok(None) => Err(Error::new(ErrorKind::TrackerRequestFailed)),
+            Err(_) => Err(Error::new(ErrorKind::TrackerRequestFailed)),
+        }
     }
 }
 
 /// Connect phase: obtain a connection ID from the tracker.
-async fn connect(socket: &UdpSocket, addr: SocketAddr) -> Result<u64, Error> {
+async fn connect(framed: &mut UdpFramed<BytesCodec>, addr: SocketAddr) -> Result<u64, Error> {
     let transaction_id = rand::random::<u32>();
 
     let connect_packet = build_connect_packet(transaction_id);
 
-    let mut buf = [0u8; 16];
-    let mut retries = 0;
-
-    loop {
-        socket
+    for _ in 0..MAX_RETRIES {
+        framed
+            .get_mut()
             .send_to(&connect_packet, addr)
             .await
             .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
 
-        match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
-            Ok(Ok((len, _src))) => {
-                return parse_connect_response(&buf[..len], transaction_id);
+        match tokio::time::timeout(TIMEOUT, framed.next()).await {
+            Ok(Some(Ok((data, _src)))) => {
+                return parse_connect_response(&data, transaction_id);
             }
-            _ => {
-                retries += 1;
-                if retries >= MAX_RETRIES {
-                    return Err(Error::new(ErrorKind::TrackerRequestFailed));
-                }
-            }
+            _ => continue,
         }
     }
+
+    Err(Error::new(ErrorKind::TrackerRequestFailed))
 }
 
 /// Build a UDP connect request packet.
@@ -244,5 +253,15 @@ mod tests {
             response.peers[0],
             "127.0.0.1:6881".parse::<SocketAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn test_new_invalid_scheme() {
+        assert!(UdpTracker::new("http://tracker.example.com:6969").is_err());
+    }
+
+    #[test]
+    fn test_new_invalid_url() {
+        assert!(UdpTracker::new("not-a-url").is_err());
     }
 }

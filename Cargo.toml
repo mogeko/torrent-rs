@@ -4,8 +4,10 @@ resolver = "2"
 
 [workspace.dependencies]
 bytes = "1.11"
+proptest = "1.11"
 rand = "0.8"
 sha1 = "0.10"
+tempfile = "3.27"
 tokio = { version = "1.52", features = [
     "net",
     "rt",
@@ -15,5 +17,6 @@ tokio = { version = "1.52", features = [
     "fs",
     "sync",
 ] }
-proptest = "1.11"
-tempfile = "3.27"
+tokio-util = { version = "0.7", features = ["codec", "net"] }
+tokio-stream = "0.1"
+url = "2.5"
