@@ -9,10 +9,10 @@
 //! - [`rpc::DhtRpc`] — async UDP send/receive with transaction matching
 //! - [`query::find_node`], [`query::get_peers`], [`query::announce_peer`] — high-level query helpers
 
-pub use torrent_core::dht::{Node, RoutingTable, krpc};
-
 mod query;
 mod rpc;
+
+pub use torrent_core::dht::{Node, RoutingTable, krpc};
 
 pub use self::query::{announce_peer, find_node, get_peers};
 pub use self::rpc::DhtRpc;

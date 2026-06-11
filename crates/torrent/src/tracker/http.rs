@@ -1,8 +1,16 @@
+use std::time::Duration;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, lookup_host};
 
 use crate::error::{Error, ErrorKind};
 use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
+
+/// Timeout for HTTP tracker connect + request + response read.
+const TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Maximum response size to guard against malicious or buggy trackers (256 KB).
+const MAX_RESPONSE_SIZE: u64 = 256 * 1024;
 
 /// HTTP tracker client (BEP 3).
 #[derive(Debug, Clone)]
@@ -23,18 +31,20 @@ impl HttpTracker {
 
     /// Announce to the HTTP tracker.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
-        let announce_url = build_announce_url(&self.url, req);
+        // Build path + query string (avoid intermediate Url clone).
+        let path_and_query = format!("{}?{}", self.url.path(), build_query_string(req));
 
-        // Resolve host:port (supports DNS via ToSocketAddrs)
-        let host = self
-            .url
-            .host_str()
-            .ok_or(Error::new(ErrorKind::InvalidInput))?;
+        // Resolve hostname asynchronously (avoid blocking the tokio runtime).
+        let Some(host) = self.url.host_str() else {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        };
         let port = self.url.port().unwrap_or(80);
 
-        let mut stream = TcpStream::connect((host, port))
+        let addr = lookup_host((host, port))
             .await
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?
+            .next()
+            .ok_or(Error::new(ErrorKind::TrackerRequestFailed))?;
 
         // Build host header
         let host_header = match self.url.port() {
@@ -43,28 +53,45 @@ impl HttpTracker {
         };
 
         // Build HTTP GET request
-        let path_and_query = announce_url[url::Position::BeforePath..].to_string();
         let request = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
             path_and_query, host_header
         );
-        stream
-            .write_all(request.as_bytes())
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
 
-        // Read response
-        let mut buf = Vec::new();
-        stream
-            .read_to_end(&mut buf)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+        // Perform the full HTTP round-trip with a single timeout guard.
+        let response = tokio::time::timeout(TIMEOUT, async {
+            let mut stream = TcpStream::connect(addr)
+                .await
+                .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+
+            stream
+                .write_all(request.as_bytes())
+                .await
+                .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+
+            // Limit read size to prevent OOM.
+            let mut buf = Vec::new();
+            let mut limited = AsyncReadExt::take(&mut stream, MAX_RESPONSE_SIZE);
+
+            limited
+                .read_to_end(&mut buf)
+                .await
+                .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+
+            Ok(buf)
+        })
+        .await;
+
+        let buf = match response {
+            Ok(Ok(buf)) => buf,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(Error::new(ErrorKind::TrackerRequestFailed)),
+        };
 
         // Parse HTTP response: find "\r\n\r\n" separator
-        let header_end = buf
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .ok_or(Error::new(ErrorKind::TrackerInvalidResponse))?;
+        let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return Err(Error::new(ErrorKind::TrackerInvalidResponse));
+        };
 
         let body = &buf[header_end + 4..];
 
@@ -72,26 +99,14 @@ impl HttpTracker {
         let headers_str = std::str::from_utf8(&buf[..header_end])
             .map_err(|_| Error::new(ErrorKind::TrackerInvalidResponse))?;
         let first_line = headers_str.lines().next().unwrap_or("");
-        if first_line.contains("301") || first_line.contains("302") {
-            return Err(Error::new(ErrorKind::TrackerProtocolError));
-        }
+        let status_code = first_line.split_whitespace().nth(1).unwrap_or("");
 
-        if !first_line.contains("200") {
-            return Err(Error::new(ErrorKind::TrackerRequestFailed));
+        match status_code {
+            "301" | "302" => Err(Error::new(ErrorKind::TrackerProtocolError)),
+            "200" => AnnounceResponse::from_bencode(body),
+            _ => Err(Error::new(ErrorKind::TrackerRequestFailed)),
         }
-
-        AnnounceResponse::from_bencode(body)
     }
-}
-
-/// Build the full announce URL with query parameters.
-fn build_announce_url(base: &Url, req: &AnnounceRequest) -> Url {
-    let mut url = base.clone();
-
-    let query = build_query_string(req);
-    url.set_query(Some(&query));
-
-    url
 }
 
 /// Build the query string with correct percent-encoding for binary fields
@@ -121,6 +136,7 @@ fn build_query_string(req: &AnnounceRequest) -> String {
         AnnounceEvent::Stopped => "stopped",
         AnnounceEvent::Completed => "completed",
         AnnounceEvent::None => "empty",
+        _ => "empty", // unknown future variants
     };
     q.push_str("&event=");
     q.push_str(event_str);
@@ -145,29 +161,17 @@ mod tests {
     use crate::peer::PeerId;
 
     #[test]
-    fn test_build_announce_url() {
-        let base = Url::parse("http://tracker.example.com:6969/announce").unwrap();
-        let req = AnnounceRequest {
-            info_hash: [0x01; 20],
-            peer_id: PeerId::random(),
-            port: 6881,
-            uploaded: 0,
-            downloaded: 0,
-            left: 1024,
-            event: AnnounceEvent::Started,
-            compact: true,
-            numwant: Some(50),
-            key: None,
-            trackerid: None,
-        };
-        let url = build_announce_url(&base, &req);
-        assert_eq!(url.host_str().unwrap(), "tracker.example.com");
-        assert_eq!(url.port().unwrap(), 6969);
-        assert!(url.as_str().contains("info_hash="));
-        assert!(url.as_str().contains("&peer_id="));
-        assert!(url.as_str().contains("&port=6881"));
-        assert!(url.as_str().contains("&compact=1"));
-        assert!(url.as_str().contains("&event=started"));
+    fn test_build_query_string() {
+        let mut req = AnnounceRequest::new([0x01; 20], PeerId::random(), 6881);
+        req.left = 1024;
+        req.event = AnnounceEvent::Started;
+        let q = build_query_string(&req);
+        assert!(q.starts_with("info_hash="));
+        assert!(q.contains("&peer_id="));
+        assert!(q.contains("&port=6881"));
+        assert!(q.contains("&compact=1"));
+        assert!(q.contains("&event=started"));
+        assert!(q.contains("&left=1024"));
     }
 
     #[test]
@@ -176,26 +180,17 @@ mod tests {
     }
 
     #[test]
-    fn test_build_announce_url_binary_info_hash() {
-        let base = Url::parse("http://tracker.example.com/announce").unwrap();
-        let req = AnnounceRequest {
-            info_hash: [
-                0x00, 0x01, 0x7F, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            ],
-            peer_id: PeerId::random(),
-            port: 6881,
-            uploaded: 0,
-            downloaded: 0,
-            left: 100,
-            event: AnnounceEvent::None,
-            compact: false,
-            numwant: None,
-            key: None,
-            trackerid: None,
-        };
-        let url = build_announce_url(&base, &req);
+    fn test_build_query_string_binary_info_hash() {
+        let info_hash = [
+            0x00, 0x01, 0x7F, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let mut req = AnnounceRequest::new(info_hash, PeerId::random(), 6881);
+        req.compact = false;
+        req.numwant = None;
+        req.left = 100;
+        let q = build_query_string(&req);
         // Binary bytes should be percent-encoded by byte_serialize
-        assert!(url.as_str().contains("%00%01%7F%FF"));
+        assert!(q.contains("%00%01%7F%FF"));
     }
 }

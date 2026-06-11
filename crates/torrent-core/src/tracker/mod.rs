@@ -15,6 +15,7 @@ use crate::peer::PeerId;
 
 /// Event sent to the tracker during an announce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AnnounceEvent {
     Started,
     Stopped,
@@ -24,6 +25,7 @@ pub enum AnnounceEvent {
 
 /// Parameters for a tracker announce request.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AnnounceRequest {
     /// The info_hash identifying the torrent.
     pub info_hash: [u8; 20],
@@ -51,6 +53,7 @@ pub struct AnnounceRequest {
 
 /// Response from a tracker announce.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AnnounceResponse {
     /// Interval in seconds between announces.
     pub interval: u32,
@@ -66,6 +69,28 @@ pub struct AnnounceResponse {
     pub tracker_id: Option<String>,
     /// Minimum announce interval (optional).
     pub min_interval: Option<u32>,
+}
+
+impl AnnounceRequest {
+    /// Create a new `AnnounceRequest` with sensible defaults.
+    ///
+    /// Defaults: `uploaded = 0`, `downloaded = 0`, `left = 0`,
+    /// `event = AnnounceEvent::None`, `compact = true`, `numwant = Some(50)`.
+    pub fn new(info_hash: [u8; 20], peer_id: PeerId, port: u16) -> Self {
+        AnnounceRequest {
+            info_hash,
+            peer_id,
+            port,
+            uploaded: 0,
+            downloaded: 0,
+            left: 0,
+            event: AnnounceEvent::None,
+            compact: true,
+            numwant: Some(50),
+            key: None,
+            trackerid: None,
+        }
+    }
 }
 
 impl AnnounceResponse {
@@ -107,6 +132,26 @@ impl AnnounceResponse {
             tracker_id,
             min_interval,
         })
+    }
+
+    /// Construct an `AnnounceResponse` from raw UDP announce fields.
+    ///
+    /// Used by the UDP tracker parser in the `torrent` crate.
+    pub fn from_udp_fields(
+        interval: u32,
+        complete: u32,
+        incomplete: u32,
+        peers: Vec<SocketAddr>,
+    ) -> Self {
+        AnnounceResponse {
+            interval,
+            complete,
+            incomplete,
+            peers,
+            warning_message: None,
+            tracker_id: None,
+            min_interval: None,
+        }
     }
 }
 

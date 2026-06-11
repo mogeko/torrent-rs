@@ -8,8 +8,8 @@
 //! - [`PeerId`], [`Handshake`], [`PeerMessage`], [`PeerState`] — re-exported from `torrent_core`
 //! - [`PeerConnection`] — async TCP connection with buffered I/O
 
-pub use torrent_core::peer::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
-
 mod stream;
+
+pub use torrent_core::peer::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
 
 pub use self::stream::PeerConnection;

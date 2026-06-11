@@ -24,19 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Info hash: {:02x?}", info_hash);
 
     // Build an announce request
-    let req = AnnounceRequest {
-        info_hash,
-        peer_id: PeerId::random(),
-        port: 6881,
-        uploaded: 0,
-        downloaded: 0,
-        left: 0,
-        event: AnnounceEvent::Started,
-        compact: true,
-        numwant: Some(50),
-        key: None,
-        trackerid: None,
-    };
+    let mut req = AnnounceRequest::new(info_hash, PeerId::random(), 6881);
+    req.event = AnnounceEvent::Started;
 
     // --- Fallback: public UDP tracker ---
     // The Ubuntu torrent only has HTTPS trackers, so we add a public UDP

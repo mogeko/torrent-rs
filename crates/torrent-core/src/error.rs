@@ -95,7 +95,11 @@ impl fmt::Display for Error {
             ErrorKind::TrackerInvalidResponse => write!(f, "invalid tracker response"),
             ErrorKind::TrackerRequestFailed => write!(f, "tracker request failed"),
             ErrorKind::TrackerProtocolError => write!(f, "tracker protocol error"),
+        }?;
+        if let Some(ref source) = self.source {
+            write!(f, ": {source}")?;
         }
+        Ok(())
     }
 }
 

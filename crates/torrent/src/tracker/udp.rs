@@ -2,9 +2,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::net::{UdpSocket, lookup_host};
-use tokio_stream::StreamExt;
-use tokio_util::codec::BytesCodec;
-use tokio_util::udp::UdpFramed;
 
 use crate::error::{Error, ErrorKind};
 use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
@@ -12,11 +9,14 @@ use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, 
 /// Magic connection ID constant used during the connection phase.
 const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
 
-/// Connection timeout.
+/// Per-request timeout (connect + announce).
 const TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Max retries for connection.
+/// Max retries for connect and announce phases.
 const MAX_RETRIES: u32 = 3;
+
+/// Receive buffer size — enough for compact peer lists with ~200 peers.
+const RECV_BUF_SIZE: usize = 2048;
 
 /// UDP tracker client (BEP 15).
 #[derive(Debug, Clone)]
@@ -42,83 +42,72 @@ impl UdpTracker {
     /// Announce to the UDP tracker.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
         // Resolve hostname to SocketAddr (async, lazy)
-        let host = self
-            .url
-            .host_str()
-            .ok_or(Error::new(ErrorKind::InvalidInput))?;
+        let Some(host) = self.url.host_str() else {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        };
         let port = self.url.port().unwrap_or(80);
+
         let addr = lookup_host((host, port))
             .await
             .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?
             .next()
             .ok_or(Error::new(ErrorKind::TrackerRequestFailed))?;
 
-        let socket = UdpSocket::bind("0.0.0.0:0")
+        // Dual-stack socket: bind to IPv6 wildcard (accepts IPv4-mapped addresses too).
+        let socket = UdpSocket::bind("[::]:0")
             .await
             .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
 
-        let mut framed = UdpFramed::new(socket, BytesCodec::new());
-
         // Phase 1: Connect to get connection ID
-        let connection_id = connect(&mut framed, addr).await?;
+        let connection_id = connect(&socket, addr).await?;
 
-        // Phase 2: Announce
+        // Phase 2: Announce (with retries — UDP is unreliable)
         let event = match req.event {
             AnnounceEvent::None => 0u32,
             AnnounceEvent::Completed => 1u32,
             AnnounceEvent::Started => 2u32,
             AnnounceEvent::Stopped => 3u32,
+            _ => 0u32, // unknown future variants → treat as None
         };
 
         let transaction_id = rand::random::<u32>();
+        let announce_packet = build_announce_packet(connection_id, transaction_id, req, event);
 
-        // Build announce request packet (BEP 15)
-        let mut announce_packet = Vec::with_capacity(98);
-        announce_packet.extend_from_slice(&connection_id.to_be_bytes()); // 8
-        announce_packet.extend_from_slice(&1u32.to_be_bytes()); // action = 1 (announce), 4
-        announce_packet.extend_from_slice(&transaction_id.to_be_bytes()); // 4
-        announce_packet.extend_from_slice(&req.info_hash); // 20
-        announce_packet.extend_from_slice(&req.peer_id.0); // 20
-        announce_packet.extend_from_slice(&req.downloaded.to_be_bytes()); // 8
-        announce_packet.extend_from_slice(&req.left.to_be_bytes()); // 8
-        announce_packet.extend_from_slice(&req.uploaded.to_be_bytes()); // 8
-        announce_packet.extend_from_slice(&event.to_be_bytes()); // 4
-        announce_packet.extend_from_slice(&0u32.to_be_bytes()); // IP (0 = auto), 4
-        announce_packet.extend_from_slice(&req.key.unwrap_or(0).to_be_bytes()); // 4
-        announce_packet.extend_from_slice(&(req.numwant.unwrap_or(50) as i32).to_be_bytes()); // 4
-        announce_packet.extend_from_slice(&req.port.to_be_bytes()); // 2
+        for _ in 0..MAX_RETRIES {
+            socket
+                .send_to(&announce_packet, addr)
+                .await
+                .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
 
-        framed
-            .get_mut()
-            .send_to(&announce_packet, addr)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
-
-        match tokio::time::timeout(TIMEOUT, framed.next()).await {
-            Ok(Some(Ok((data, _src)))) => parse_announce_response(&data, transaction_id),
-            Ok(Some(Err(e))) => Err(Error::with_source(ErrorKind::TrackerRequestFailed, e)),
-            Ok(None) => Err(Error::new(ErrorKind::TrackerRequestFailed)),
-            Err(_) => Err(Error::new(ErrorKind::TrackerRequestFailed)),
+            let mut buf = vec![0u8; RECV_BUF_SIZE];
+            match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
+                Ok(Ok((len, _src))) => {
+                    return parse_announce_response(&buf[..len], transaction_id);
+                }
+                _ => continue,
+            }
         }
+
+        Err(Error::new(ErrorKind::TrackerRequestFailed))
     }
 }
 
 /// Connect phase: obtain a connection ID from the tracker.
-async fn connect(framed: &mut UdpFramed<BytesCodec>, addr: SocketAddr) -> Result<u64, Error> {
+async fn connect(socket: &UdpSocket, addr: SocketAddr) -> Result<u64, Error> {
     let transaction_id = rand::random::<u32>();
 
     let connect_packet = build_connect_packet(transaction_id);
 
     for _ in 0..MAX_RETRIES {
-        framed
-            .get_mut()
+        socket
             .send_to(&connect_packet, addr)
             .await
             .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
 
-        match tokio::time::timeout(TIMEOUT, framed.next()).await {
-            Ok(Some(Ok((data, _src)))) => {
-                return parse_connect_response(&data, transaction_id);
+        let mut buf = vec![0u8; 16];
+        match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
+            Ok(Ok((len, _src))) => {
+                return parse_connect_response(&buf[..len], transaction_id);
             }
             _ => continue,
         }
@@ -133,6 +122,30 @@ fn build_connect_packet(transaction_id: u32) -> Vec<u8> {
     buf.extend_from_slice(&INITIAL_CONNECTION_ID.to_be_bytes()); // connection_id (magic)
     buf.extend_from_slice(&0u32.to_be_bytes()); // action = 0 (connect)
     buf.extend_from_slice(&transaction_id.to_be_bytes());
+    buf
+}
+
+/// Build a UDP announce request packet (BEP 15).
+fn build_announce_packet(
+    connection_id: u64,
+    transaction_id: u32,
+    req: &AnnounceRequest,
+    event: u32,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(98);
+    buf.extend_from_slice(&connection_id.to_be_bytes()); // 8
+    buf.extend_from_slice(&1u32.to_be_bytes()); // action = 1 (announce), 4
+    buf.extend_from_slice(&transaction_id.to_be_bytes()); // 4
+    buf.extend_from_slice(&req.info_hash); // 20
+    buf.extend_from_slice(&req.peer_id.0); // 20
+    buf.extend_from_slice(&req.downloaded.to_be_bytes()); // 8
+    buf.extend_from_slice(&req.left.to_be_bytes()); // 8
+    buf.extend_from_slice(&req.uploaded.to_be_bytes()); // 8
+    buf.extend_from_slice(&event.to_be_bytes()); // 4
+    buf.extend_from_slice(&0u32.to_be_bytes()); // IP (0 = auto), 4
+    buf.extend_from_slice(&req.key.unwrap_or(0).to_be_bytes()); // 4
+    buf.extend_from_slice(&(req.numwant.unwrap_or(50) as i32).to_be_bytes()); // 4
+    buf.extend_from_slice(&req.port.to_be_bytes()); // 2
     buf
 }
 
@@ -179,15 +192,9 @@ fn parse_announce_response(
 
     let peers = super::parse_compact_peers_ipv4(peer_data)?;
 
-    Ok(AnnounceResponse {
-        interval,
-        complete: seeders,
-        incomplete: leechers,
-        peers,
-        warning_message: None,
-        tracker_id: None,
-        min_interval: None,
-    })
+    Ok(AnnounceResponse::from_udp_fields(
+        interval, seeders, leechers, peers,
+    ))
 }
 
 #[cfg(test)]

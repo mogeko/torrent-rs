@@ -51,19 +51,8 @@ use crate::error::{Error, ErrorKind};
 /// # use torrent::peer::PeerId;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let tracker = Tracker::single("http://tracker.example.com:6969/announce")?;
-/// let req = AnnounceRequest {
-///     info_hash: [0u8; 20],
-///     peer_id: PeerId::random(),
-///     port: 6881,
-///     uploaded: 0,
-///     downloaded: 0,
-///     left: 0,
-///     event: AnnounceEvent::Started,
-///     compact: true,
-///     numwant: Some(50),
-///     key: None,
-///     trackerid: None,
-/// };
+/// let mut req = AnnounceRequest::new([0u8; 20], PeerId::random(), 6881);
+/// req.event = AnnounceEvent::Started;
 /// let resp = tracker.announce(&req).await?;
 /// # Ok(())
 /// # }
@@ -252,19 +241,9 @@ mod tests {
         let urls: Vec<&str> = Vec::new();
         let t = Tracker::multi(urls).unwrap();
         assert_eq!(t.trackers.len(), 0);
-        let req = AnnounceRequest {
-            info_hash: [0u8; 20],
-            peer_id: PeerId::random(),
-            port: 6881,
-            uploaded: 0,
-            downloaded: 0,
-            left: 0,
-            event: AnnounceEvent::None,
-            compact: false,
-            numwant: None,
-            key: None,
-            trackerid: None,
-        };
+        let mut req = AnnounceRequest::new([0u8; 20], PeerId::random(), 6881);
+        req.compact = false;
+        req.numwant = None;
         let result = t.announce_first(&req).await;
         assert!(result.is_err());
     }
@@ -273,19 +252,9 @@ mod tests {
     async fn test_tracker_announce_into_set_type() {
         // Verify the method compiles and returns the right type
         let t = Tracker::single("http://tracker.example.com/announce").unwrap();
-        let req = AnnounceRequest {
-            info_hash: [0u8; 20],
-            peer_id: PeerId::random(),
-            port: 6881,
-            uploaded: 0,
-            downloaded: 0,
-            left: 0,
-            event: AnnounceEvent::None,
-            compact: false,
-            numwant: None,
-            key: None,
-            trackerid: None,
-        };
+        let mut req = AnnounceRequest::new([0u8; 20], PeerId::random(), 6881);
+        req.compact = false;
+        req.numwant = None;
         let set: JoinSet<Result<AnnounceResponse, Error>> = t.announce_into_set(&req);
         // Just verify it's not empty when there are trackers
         assert!(!set.is_empty());

@@ -9,10 +9,10 @@
 //! - [`Storage`], [`PieceManager`], [`PieceSelector`], etc. — re-exported from `torrent_core`
 //! - [`FileStorage`] — async file-based storage backend
 
+mod file_backend;
+
 pub use torrent_core::storage::{
     EndGame, PieceManager, PieceSelector, RandomFirst, RarestFirst, Sequential, Storage,
 };
-
-mod file_backend;
 
 pub use self::file_backend::FileStorage;
