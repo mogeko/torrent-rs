@@ -61,12 +61,13 @@ use crate::error::{Error, ErrorKind};
 /// ```no_run
 /// # use torrent::tracker::{Tracker, AnnounceRequest, AnnounceEvent};
 /// # use torrent::peer::PeerId;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let tracker = Tracker::single("http://tracker.example.com:6969/announce")?;
+/// # async fn example() {
+/// let Some(tracker) = Tracker::single("http://tracker.example.com:6969/announce") else {
+///     return;
+/// };
 /// let mut req = AnnounceRequest::new([0u8; 20], PeerId::random(), 6881);
 /// req.event = AnnounceEvent::Started;
-/// let resp = tracker.announce(&req).await?;
-/// # Ok(())
+/// let _resp = tracker.announce(&req).await;
 /// # }
 /// ```
 #[derive(Debug, Clone)]
@@ -83,36 +84,41 @@ impl Tracker {
     /// - `udp://` → [`UdpTracker`]
     ///
     /// Accepts `&str`, `String`, `&String`, or [`Url`].
-    pub fn single(url: impl IntoUrl) -> Result<Self, Error> {
-        let url = url.into_url()?;
-        let inner = Inner::from_url(url)?;
-        Ok(Tracker {
+    /// Returns `None` if the URL is invalid or uses an unsupported scheme.
+    pub fn single(url: impl IntoUrl) -> Option<Self> {
+        let inner = Inner::from_url(url.into_url().ok()?).ok()?;
+        Some(Tracker {
             trackers: vec![inner],
         })
     }
 
     /// Create a `Tracker` from multiple tracker URLs.
     ///
-    /// Each URL is parsed and validated. Returns an error if any URL is invalid.
-    pub fn multi<I: IntoIterator>(urls: I) -> Result<Self, Error>
+    /// Invalid or unsupported URLs are silently skipped.
+    /// Returns `None` if **all** URLs are invalid.
+    pub fn multi<I: IntoIterator>(urls: I) -> Option<Self>
     where
         I::Item: IntoUrl,
     {
-        let trackers = urls
+        let trackers: Vec<Inner> = urls
             .into_iter()
-            .map(|u| Inner::from_url(u.into_url()?))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Tracker { trackers })
+            .filter_map(|u| Inner::from_url(u.into_url().ok()?).ok())
+            .collect();
+
+        if trackers.is_empty() {
+            None
+        } else {
+            Some(Tracker { trackers })
+        }
     }
 
     /// Create a `Tracker` from a parsed [`Metainfo`].
     ///
     /// Collects all tracker URLs from `announce` and `announce_list` (BEP 12),
     /// deduplicates them, and returns a single-tracker or multi-tracker as
-    /// appropriate.  Accepts `&Metainfo` or `Metainfo`.
-    ///
-    /// Returns an error if any embedded URL is invalid.
-    pub fn from_metainfo(meta: &Metainfo) -> Result<Self, Error> {
+    /// appropriate. Invalid or unsupported URLs are silently skipped.
+    /// Returns `None` if no valid tracker URLs were found.
+    pub fn from_metainfo(meta: &Metainfo) -> Option<Self> {
         let mut urls: BTreeSet<&str> = BTreeSet::new();
 
         urls.insert(&meta.announce);
@@ -122,11 +128,7 @@ impl Tracker {
             }
         }
 
-        if urls.len() == 1 {
-            Self::single(*(urls.first().unwrap()))
-        } else {
-            Self::multi(urls)
-        }
+        Self::multi(urls)
     }
 
     /// Returns the number of trackers.
@@ -300,18 +302,18 @@ mod tests {
             "http://tracker.a.com/announce",
             "https://tracker.b.com/announce",
         ]);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().trackers.len(), 2);
+        let t = result.unwrap();
+        assert_eq!(t.trackers.len(), 2);
     }
 
     #[test]
     fn test_tracker_single_invalid_scheme() {
-        assert!(Tracker::single("ftp://tracker.example.com").is_err());
+        assert!(Tracker::single("ftp://tracker.example.com").is_none());
     }
 
     #[test]
     fn test_tracker_single_invalid_url() {
-        assert!(Tracker::single("not a url").is_err());
+        assert!(Tracker::single("not a url").is_none());
     }
 
     #[test]
@@ -322,27 +324,21 @@ mod tests {
     }
 
     #[test]
-    fn test_tracker_multi_invalid() {
-        let result = Tracker::multi(["http://tracker.a.com/announce", "not a url"]);
-        assert!(result.is_err());
+    fn test_tracker_multi_skips_invalid() {
+        // Invalid URLs are silently skipped; valid ones remain.
+        let t = Tracker::multi(["http://tracker.a.com/announce", "not a url"]).unwrap();
+        assert_eq!(t.trackers.len(), 1);
     }
 
     #[test]
     fn test_tracker_multi_all_invalid_scheme() {
-        let result = Tracker::multi(["ftp://tracker.example.com"]);
-        assert!(result.is_err());
+        assert!(Tracker::multi(["ftp://tracker.example.com"]).is_none());
     }
 
     #[tokio::test]
     async fn test_tracker_multi_empty() {
         let urls: Vec<&str> = Vec::new();
-        let t = Tracker::multi(urls).unwrap();
-        assert_eq!(t.trackers.len(), 0);
-        let mut req = AnnounceRequest::new([0u8; 20], PeerId::random(), 6881);
-        req.compact = false;
-        req.numwant = None;
-        let result = t.announce_first(&req).await;
-        assert!(result.is_err());
+        assert!(Tracker::multi(urls).is_none());
     }
 
     #[tokio::test]
@@ -400,6 +396,35 @@ mod tests {
 
         let t = Tracker::from_metainfo(&meta).unwrap();
         assert_eq!(t.trackers.len(), 2);
+    }
+
+    #[test]
+    fn test_tracker_from_metainfo_skip_invalid() {
+        use torrent_core::metainfo::{Info, Metainfo, Mode};
+
+        let info = Info {
+            piece_length: 262144,
+            pieces: vec![[0u8; 20]],
+            mode: Mode::Single {
+                name: "test.txt".into(),
+                length: 1024,
+            },
+            raw_info: bytes::Bytes::new(),
+        };
+        // announce has invalid scheme; announce_list is valid
+        let meta = Metainfo {
+            announce: "ftp://tracker.a.com/announce".into(),
+            announce_list: vec![vec!["http://tracker.b.com/announce".into()]],
+            info,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+
+        let t = Tracker::from_metainfo(&meta).unwrap();
+        assert_eq!(t.trackers.len(), 1);
+        assert_eq!(t.urls(), &["http://tracker.b.com/announce"]);
     }
 
     #[test]

@@ -24,7 +24,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     req.event = AnnounceEvent::Started;
 
     // --- Tracker from Metainfo (collects announce + announce_list URLs) ---
-    let tracker = Tracker::from_metainfo(&meta)?;
+    let Some(tracker) = Tracker::from_metainfo(&meta) else {
+        eprintln!("no valid trackers found in metainfo");
+        return Ok(());
+    };
     println!("\n=== Built-in Trackers (Tracker::from_metainfo) ===");
     match tracker.announce(&req).await {
         Ok(resp) => print_response(&resp),
