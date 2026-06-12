@@ -75,7 +75,6 @@ pub(crate) struct ActiveDownload {
 }
 
 /// The core download engine for a single torrent.
-#[allow(dead_code)]
 pub(crate) struct DownloadLoop {
     pub info_hash: [u8; 20],
     pub metainfo: Metainfo,

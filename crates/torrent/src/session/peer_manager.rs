@@ -9,7 +9,6 @@ use crate::error::Error;
 use crate::peer::{PeerConnection, PeerId, PeerMessage};
 
 /// Manages peer connections for a single torrent.
-#[allow(dead_code)]
 pub(crate) struct PeerManager {
     /// Our peer ID.
     peer_id: PeerId,
@@ -25,7 +24,6 @@ pub(crate) struct PeerManager {
     last_connect_attempt: Option<Instant>,
 }
 
-#[allow(dead_code)]
 impl PeerManager {
     /// Create a new PeerManager.
     pub fn new(info_hash: [u8; 20], peer_id: PeerId, max_connections: u32) -> Self {

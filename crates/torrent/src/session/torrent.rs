@@ -16,7 +16,6 @@ use super::upload::UploadManager;
 use super::{SessionConfig, TorrentState, TorrentStatus};
 
 /// Commands sent to the download loop.
-#[allow(dead_code)]
 pub(crate) enum TorrentCommand {
     Pause,
     Resume,
