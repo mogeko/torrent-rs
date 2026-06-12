@@ -44,7 +44,7 @@ pub use self::http::HttpTracker;
 pub use self::into_url::IntoUrl;
 pub use self::udp::UdpTracker;
 
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::task::JoinSet;
@@ -102,10 +102,19 @@ impl Tracker {
     where
         I::Item: IntoUrl,
     {
-        let trackers: Vec<Inner> = urls
-            .into_iter()
-            .filter_map(|u| Inner::from_url(u.into_url().ok()?).ok())
-            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut trackers: Vec<Inner> = Vec::new();
+
+        for url in urls {
+            if let Ok(url) = url.into_url() {
+                // Keep first occurrence; skip duplicates
+                if seen.insert(url.as_str().into())
+                    && let Ok(inner) = Inner::from_url(url)
+                {
+                    trackers.push(inner);
+                }
+            }
+        }
 
         if trackers.is_empty() {
             None
@@ -122,16 +131,7 @@ impl Tracker {
     ///
     /// Returns `None` if no valid tracker URLs were found.
     pub fn from_metainfo(meta: &Metainfo) -> Option<Self> {
-        let mut urls: BTreeSet<&str> = BTreeSet::new();
-
-        urls.insert(&meta.announce);
-        for tier in &meta.announce_list {
-            for url in tier {
-                urls.insert(url);
-            }
-        }
-
-        Self::multi(urls)
+        Self::multi(std::iter::once(&meta.announce).chain(meta.announce_list.iter().flatten()))
     }
 
     /// Returns the number of trackers.
@@ -149,6 +149,10 @@ impl Tracker {
     /// Returns an error if the URL is invalid or has an unsupported scheme.
     pub fn add(&mut self, url: impl IntoUrl) -> Result<(), Error> {
         let url = url.into_url()?;
+        // Silently skip if the URL is already registered
+        if self.trackers.iter().any(|t| t.url() == url.as_str()) {
+            return Ok(());
+        }
         self.trackers.push(Inner::from_url(url)?);
         Ok(())
     }
@@ -160,9 +164,15 @@ impl Tracker {
     where
         I::Item: IntoUrl,
     {
+        let mut seen: HashSet<String> = self.trackers.iter().map(|t| t.url().into()).collect();
+
         for url in urls {
-            self.add(url)?;
+            let url = url.into_url()?;
+            if seen.insert(url.as_str().into()) {
+                self.trackers.push(Inner::from_url(url)?);
+            }
         }
+
         Ok(())
     }
 
@@ -451,5 +461,79 @@ mod tests {
         t.clear();
         assert!(t.is_empty());
         assert!(t.urls().is_empty());
+    }
+
+    #[test]
+    fn test_tracker_multi_dedup() {
+        // Duplicate URLs are deduplicated (keep first occurrence)
+        let t = Tracker::multi([
+            "http://tracker.a.com/announce",
+            "udp://tracker.b.com:6969",
+            "http://tracker.a.com/announce", // duplicate
+        ])
+        .unwrap();
+        assert_eq!(t.trackers.len(), 2);
+        assert_eq!(
+            t.urls(),
+            &["http://tracker.a.com/announce", "udp://tracker.b.com:6969"]
+        );
+    }
+
+    #[test]
+    fn test_tracker_multi_dedup_all_same() {
+        // All URLs identical → single tracker
+        let t = Tracker::multi([
+            "http://tracker.a.com/announce",
+            "http://tracker.a.com/announce",
+            "http://tracker.a.com/announce",
+        ])
+        .unwrap();
+        assert_eq!(t.trackers.len(), 1);
+    }
+
+    #[test]
+    fn test_tracker_add_dedup() {
+        let mut t = Tracker::single("http://tracker.a.com/announce").unwrap();
+        assert_eq!(t.len(), 1);
+
+        // Adding the same URL again should silently succeed without increasing count
+        t.add("http://tracker.a.com/announce").unwrap();
+        assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn test_tracker_from_metainfo_dedup_across_tiers() {
+        use torrent_core::metainfo::{Info, Metainfo, Mode};
+
+        let info = Info {
+            piece_length: 262144,
+            pieces: vec![[0u8; 20]],
+            mode: Mode::Single {
+                name: "test.txt".into(),
+                length: 1024,
+            },
+            raw_info: bytes::Bytes::new(),
+        };
+        // announce and announce_list[0] share the same URL
+        let meta = Metainfo {
+            announce: "http://tracker.a.com/announce".into(),
+            announce_list: vec![
+                vec!["http://tracker.a.com/announce".into()], // duplicate
+                vec!["udp://tracker.b.com:6969".into()],
+            ],
+            info,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+
+        let t = Tracker::from_metainfo(&meta).unwrap();
+        assert_eq!(t.trackers.len(), 2);
+        // announce (top-level) is kept first; duplicate from announce_list is skipped
+        assert_eq!(
+            t.urls(),
+            &["http://tracker.a.com/announce", "udp://tracker.b.com:6969"]
+        );
     }
 }
