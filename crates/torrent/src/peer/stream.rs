@@ -7,13 +7,14 @@ use crate::error::{Error, ErrorKind};
 use crate::peer::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
 
 /// A managed peer connection with buffered message I/O.
-#[allow(dead_code)]
 pub struct PeerConnection {
     stream: BufReader<BufWriter<TcpStream>>,
     state: PeerState,
     /// Info hash expected for this connection.
+    #[allow(dead_code)]
     info_hash: [u8; 20],
     /// Our peer ID.
+    #[allow(dead_code)]
     our_peer_id: PeerId,
     /// The remote peer's ID (set after handshake).
     remote_peer_id: Option<PeerId>,

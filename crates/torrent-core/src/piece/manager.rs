@@ -28,6 +28,11 @@ impl PieceManager {
         i < self.num_pieces && self.bitfield[i]
     }
 
+    /// Return a reference to the raw bitfield (for piece selection).
+    pub fn bitfield(&self) -> &[bool] {
+        &self.bitfield
+    }
+
     /// Return all completed piece indices.
     pub fn completed_pieces(&self) -> Vec<u32> {
         self.bitfield
@@ -69,5 +74,109 @@ impl PieceManager {
             }
         }
         bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_creates_empty_manager() {
+        let pm = PieceManager::new(5);
+        assert_eq!(pm.num_pieces, 5);
+        assert_eq!(pm.missing_pieces().len(), 5);
+        assert!(pm.completed_pieces().is_empty());
+    }
+
+    #[test]
+    fn new_zero_pieces() {
+        let pm = PieceManager::new(0);
+        assert_eq!(pm.num_pieces, 0);
+        assert_eq!(pm.progress(), 1.0);
+    }
+
+    #[test]
+    fn set_piece_and_check() {
+        let mut pm = PieceManager::new(10);
+        pm.set_piece(0);
+        pm.set_piece(3);
+        assert!(pm.has_piece(0));
+        assert!(pm.has_piece(3));
+        assert!(!pm.has_piece(1));
+        assert!(!pm.has_piece(9));
+    }
+
+    #[test]
+    fn set_piece_out_of_range() {
+        let mut pm = PieceManager::new(5);
+        pm.set_piece(100); // should not panic
+        assert!(pm.missing_pieces().len() == 5);
+    }
+
+    #[test]
+    fn completed_and_missing_pieces() {
+        let mut pm = PieceManager::new(5);
+        pm.set_piece(0);
+        pm.set_piece(2);
+        pm.set_piece(4);
+        let completed = pm.completed_pieces();
+        assert_eq!(completed.len(), 3);
+        assert!(completed.contains(&0));
+        assert!(completed.contains(&2));
+        assert!(completed.contains(&4));
+        let missing = pm.missing_pieces();
+        assert_eq!(missing.len(), 2);
+        assert!(missing.contains(&1));
+        assert!(missing.contains(&3));
+    }
+
+    #[test]
+    fn progress_calculation() {
+        let mut pm = PieceManager::new(10);
+        for i in 0..5 {
+            pm.set_piece(i);
+        }
+        assert!((pm.progress() - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn to_bitfield_bytes() {
+        let mut pm = PieceManager::new(16);
+        pm.set_piece(0); // 10000000 00000000
+        let bf = pm.to_bitfield();
+        assert_eq!(bf.len(), 2);
+        assert_eq!(bf[0], 0x80);
+        assert_eq!(bf[1], 0x00);
+
+        pm.set_piece(7); // 10000001 00000000
+        let bf = pm.to_bitfield();
+        assert_eq!(bf[0], 0x81);
+    }
+
+    #[test]
+    fn bitfield_reflects_set_piece() {
+        let mut pm = PieceManager::new(3);
+        pm.set_piece(1);
+        let bf = pm.bitfield();
+        assert_eq!(bf.len(), 3);
+        assert!(!bf[0]);
+        assert!(bf[1]);
+        assert!(!bf[2]);
+    }
+
+    #[test]
+    fn progress_zero_completed() {
+        let pm = PieceManager::new(10);
+        assert!((pm.progress() - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn progress_all_completed() {
+        let mut pm = PieceManager::new(5);
+        for i in 0..5 {
+            pm.set_piece(i);
+        }
+        assert!((pm.progress() - 1.0).abs() < 1e-10);
     }
 }

@@ -1,7 +1,7 @@
 use rand::RngExt;
 
 /// Trait for piece selection strategies (BEP 3).
-pub trait PieceSelector: Send {
+pub trait PieceSelector: Send + Sync {
     /// Select the next piece to download from the available candidates.
     ///
     /// `candidates` is a bitfield from a single peer (true = peer has piece).

@@ -12,7 +12,7 @@
 mod query;
 mod rpc;
 
-pub use torrent_core::dht::{Node, RoutingTable, krpc};
+pub use torrent_core::dht::{Node, RoutingTable, generate_node_id, krpc};
 
 pub use self::query::{announce_peer, find_node, get_peers};
 pub use self::rpc::DhtRpc;

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{RwLock, mpsc};
@@ -5,15 +6,16 @@ use tokio::sync::{RwLock, mpsc};
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Metainfo, Mode};
 use crate::peer::PeerId;
-use crate::piece::PieceManager;
+use crate::piece::{PieceManager, RarestFirst};
 use crate::storage::FileStorage;
+use crate::tracker::Tracker;
 
 use super::download::DownloadLoop;
 use super::peer_manager::PeerManager;
+use super::upload::UploadManager;
 use super::{SessionConfig, TorrentState, TorrentStatus};
 
 /// Commands sent to the download loop.
-#[allow(dead_code)]
 pub(crate) enum TorrentCommand {
     Pause,
     Resume,
@@ -49,9 +51,12 @@ impl TorrentHandle {
         };
 
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
+        let peer_id = PeerId::random();
+        let tracker = Tracker::from_metainfo(&metainfo);
+        let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
         let peer_mgr = Arc::new(RwLock::new(PeerManager::new(
             info_hash,
-            PeerId::random(),
+            peer_id,
             config.max_connections,
         )));
 
@@ -67,6 +72,7 @@ impl TorrentHandle {
         }));
 
         let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
+        let (peer_msg_tx, peer_msg_rx) = mpsc::unbounded_channel();
 
         let mut download_loop = DownloadLoop {
             info_hash,
@@ -76,6 +82,28 @@ impl TorrentHandle {
             peer_mgr: peer_mgr.clone(),
             status: status.clone(),
             control_rx,
+            peer_id,
+            listen_port: config.listen_port,
+            tracker,
+            next_announce: None,
+            has_announced: false,
+            announced_completed: false,
+            peers: HashMap::new(),
+            active_downloads: HashMap::new(),
+            selector: Box::new(RarestFirst),
+            peer_msg_rx,
+            peer_msg_tx,
+            upload_mgr: upload_mgr.clone(),
+            total_downloaded: 0,
+            total_uploaded: 0,
+            last_downloaded: 0,
+            last_uploaded: 0,
+            tick_count: 0,
+            enable_dht: config.enable_dht,
+            piece_cache: HashMap::new(),
+            dht_rpc: None,
+            dht_node_id: [0u8; 20],
+            next_dht_search: None,
         };
 
         let task = tokio::spawn(async move {
@@ -118,5 +146,22 @@ impl TorrentHandle {
     /// Get the current status.
     pub async fn status(&self) -> TorrentStatus {
         self.status.read().await.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn torrent_command_variants() {
+        // Verify all enum variants are constructible
+        let pause = TorrentCommand::Pause;
+        let resume = TorrentCommand::Resume;
+        let cancel = TorrentCommand::Cancel;
+        match pause {
+            TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Cancel => {}
+        }
+        let _ = (pause, resume, cancel);
     }
 }

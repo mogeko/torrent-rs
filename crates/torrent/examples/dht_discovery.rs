@@ -1,75 +1,109 @@
 //! Discover peers via the Kademlia DHT (BEP 5).
 //!
-//! This example shows the DHT API: routing table management, KRPC message
-//! building, and the async RPC / query interface. Network calls are
-//! commented out — bootstrap against a real DHT node to try it live.
+//! Bootstraps against public DHT nodes, then runs find_node and get_peers
+//! queries to demonstrate the full DHT discovery flow. Requires internet.
 //!
 //! Run with: `cargo run -p torrent --example dht_discovery`
 
-use torrent::dht::{DhtRpc, Node, RoutingTable, krpc};
+use torrent::dht::{DhtRpc, Node, RoutingTable, get_peers, krpc};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // -- Sync: routing table --
-    let mut rt = RoutingTable::new();
-    println!("Empty routing table: {} nodes", rt.num_nodes());
+    let node_id = [0x42u8; 20];
+    let target = [0x99u8; 20]; // arbitrary target for find_node
 
-    // Insert some bootstrap nodes
-    let bootstrap = vec![
-        ("router.bittorrent.com", 6881),
-        ("router.utorrent.com", 6881),
-    ];
-    for (host, port) in &bootstrap {
-        let node = Node {
-            id: [0u8; 20], // real ID would come from a ping response
-            addr: format!("{}:{}", host, port).parse().unwrap(),
-        };
-        rt.insert(node);
-    }
-    println!("After bootstrap: {} nodes", rt.num_nodes());
-
-    // Find closest nodes to a target
-    let target = [0x42u8; 20];
-    let closest = rt.find_closest(&target, 8);
-    println!("Closest {} nodes to {:02x?}:", closest.len(), &target[..4]);
-    for n in &closest {
-        println!("  {} @ {}", hex::encode(&n.id[..4]), n.addr);
-    }
-
-    // -- KRPC message building (sync) --
-    let tid: krpc::TransactionId = rand::random();
-    let node_id = [0xABu8; 20];
-    let ping = krpc::build_ping(tid, &node_id);
-    println!("\nPing message: {} bytes", ping.len());
-    assert!(krpc::KrpcMessage::from_bytes(&ping).is_ok());
-
-    // -- Async: DHT RPC --
+    // -- Step 1: Bootstrap via ping --
+    println!("=== DHT Bootstrap ===\n");
     let rpc = DhtRpc::new("0.0.0.0:0".parse().unwrap())
         .await
         .expect("failed to bind DHT socket");
-    println!("DHT RPC bound: OK");
 
-    // Uncomment to send real queries to a bootstrap node:
-    //
-    // let info_hash = [0xABu8; 20];
-    // for node in closest {
-    //     let tid = rand::random();
-    //     match dht::find_node(&rpc, node.addr, tid, &node_id, &target).await {
-    //         Ok(nodes) => println!("find_node → {} closer nodes", nodes.len()),
-    //         Err(e) => eprintln!("find_node failed: {}", e),
-    //     }
-    //     let tid = rand::random();
-    //     match dht::get_peers(&rpc, node.addr, tid, &node_id, &info_hash).await {
-    //         Ok(result) => println!("get_peers → {:?}", result),
-    //         Err(e) => eprintln!("get_peers failed: {}", e),
-    //     }
-    // }
-    let _ = rpc; // silence unused warning
+    let bootstrap = [
+        ("router.bittorrent.com", 6881),
+        ("dht.transmissionbt.com", 6881),
+    ];
+
+    let mut rt = RoutingTable::new();
+    for (host, port) in &bootstrap {
+        let addr: std::net::SocketAddr = match format!("{}:{}", host, port).parse() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let tid: krpc::TransactionId = rand::random();
+        match rpc.ping(addr, tid, &node_id).await {
+            Ok(resp) => {
+                let real_id = match krpc::parse_ping_response(&resp) {
+                    Ok(id) => id,
+                    Err(_) => continue,
+                };
+                rt.insert(Node { id: real_id, addr });
+                println!("  ✓ {} (id: {}...)", host, hex4(&real_id[..4]));
+            }
+            Err(e) => {
+                println!("  ✗ {} — {}", host, e);
+            }
+        }
+    }
+    println!("\nRouting table: {} nodes\n", rt.num_nodes());
+
+    if rt.num_nodes() == 0 {
+        println!("No reachable bootstrap nodes. Are you online?");
+        return;
+    }
+
+    // -- Step 2: find_node — discover closer nodes --
+    println!("=== find_node ===\n");
+    let closest = rt.find_closest(&target, 8);
+    for node in &closest {
+        let tid = rand::random();
+        match find_node(&rpc, node, tid, &node_id, &target).await {
+            Ok(nodes) => {
+                println!("  {} → {} closer nodes", node.addr, nodes.len());
+                for n in &nodes[..nodes.len().min(3)] {
+                    println!("    - {}... @ {}", hex4(&n.id[..4]), n.addr);
+                }
+            }
+            Err(e) => {
+                println!("  {} → failed: {}", node.addr, e);
+            }
+        }
+    }
+
+    // -- Step 3: get_peers — find peers for a torrent --
+    println!("\n=== get_peers ===\n");
+    let info_hash: [u8; 20] = rand::random();
+    for node in &closest {
+        let tid = rand::random();
+        match get_peers(&rpc, node.addr, tid, &node_id, &info_hash).await {
+            Ok(krpc::GetPeersResult::Values { peers, .. }) => {
+                println!("  {} → {} peers", node.addr, peers.len());
+            }
+            Ok(krpc::GetPeersResult::Nodes(nodes)) => {
+                println!("  {} → gave {} closer nodes", node.addr, nodes.len());
+            }
+            Err(e) => {
+                println!("  {} → failed: {}", node.addr, e);
+            }
+        }
+    }
+
+    println!("\n=== Done ===");
 }
 
-/// Minimal hex encode for display — you can replace this with the `hex` crate.
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{:02x}", b)).collect()
-    }
+/// Call find_node with proper types.
+async fn find_node(
+    rpc: &DhtRpc,
+    node: &Node,
+    tid: krpc::TransactionId,
+    node_id: &[u8; 20],
+    target: &[u8; 20],
+) -> Result<Vec<Node>, Box<dyn std::error::Error>> {
+    Ok(torrent::dht::find_node(rpc, node.addr, tid, node_id, target).await?)
+}
+
+fn hex4(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>()
 }

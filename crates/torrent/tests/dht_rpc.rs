@@ -1,24 +1,8 @@
 //! Integration tests for async DHT RPC and query functions.
+//!
+//! Routing table unit tests live in crates/torrent-core/src/dht/mod.rs.
 
-use torrent::dht::{DhtRpc, Node, RoutingTable, krpc};
-
-#[test]
-fn routing_table_default_empty() {
-    let rt = RoutingTable::new();
-    assert_eq!(rt.num_nodes(), 0);
-}
-
-#[test]
-fn routing_table_insert_and_lookup() {
-    let mut rt = RoutingTable::new();
-    let node = Node {
-        id: [1u8; 20],
-        addr: "127.0.0.1:6881".parse().unwrap(),
-    };
-    rt.insert(node.clone());
-    assert_eq!(rt.num_nodes(), 1);
-    assert!(!rt.find_closest(&node.id, 8).is_empty());
-}
+use torrent::dht::{DhtRpc, krpc};
 
 #[test]
 fn krpc_ping_message_builds() {
@@ -63,7 +47,6 @@ fn krpc_message_encode_decode_roundtrip() {
     let tid: krpc::TransactionId = [0xAB, 0xCD];
     let node_id = [0x42u8; 20];
 
-    // Build and decode a ping query
     let ping_data = krpc::build_ping(tid, &node_id);
     let decoded = krpc::KrpcMessage::from_bytes(&ping_data).unwrap();
 
@@ -82,9 +65,7 @@ fn krpc_message_encode_decode_roundtrip() {
 
 #[test]
 fn parse_compact_nodes() {
-    // 26 bytes per node: 20 id + 4 ip + 2 port
     let mut data = Vec::new();
-    // Node 1: id=[1u8;20], ip=127.0.0.1, port=6881
     data.extend_from_slice(&[1u8; 20]);
     data.extend_from_slice(&[127, 0, 0, 1]);
     data.extend_from_slice(&0x1AE1u16.to_be_bytes());
@@ -103,7 +84,6 @@ fn parse_compact_nodes_empty() {
 
 #[tokio::test]
 async fn dht_rpc_creation() {
-    // DhtRpc can be created (binds to a port, no actual network traffic)
     let rpc = DhtRpc::new("127.0.0.1:0".parse().unwrap()).await;
     assert!(rpc.is_ok());
 }

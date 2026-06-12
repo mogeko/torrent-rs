@@ -23,8 +23,9 @@ use tokio::sync::RwLock;
 
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Metainfo, Mode, from_bytes as parse_metainfo};
-use crate::peer::PeerId;
 use crate::storage::FileStorage;
+
+use self::torrent::TorrentHandle;
 
 /// Unique identifier for a torrent (SHA-1 info hash).
 ///
@@ -62,13 +63,10 @@ pub type InfoHash = [u8; 20];
 /// # }
 /// ```
 pub struct Session {
-    /// Our peer ID.
-    #[allow(dead_code)]
-    peer_id: PeerId,
     /// Session configuration.
     config: SessionConfig,
     /// Active torrents, keyed by info_hash.
-    torrents: RwLock<HashMap<InfoHash, torrent::TorrentHandle>>,
+    torrents: RwLock<HashMap<InfoHash, TorrentHandle>>,
 }
 
 /// Session configuration.
@@ -138,7 +136,6 @@ impl Session {
     /// Create a new session with the given configuration.
     pub async fn new(config: SessionConfig) -> Result<Self, Error> {
         Ok(Session {
-            peer_id: PeerId::random(),
             config,
             torrents: RwLock::new(HashMap::new()),
         })
@@ -154,7 +151,7 @@ impl Session {
         // Create FileStorage
         let storage = Arc::new(FileStorage::new(&meta.info, &self.config.download_dir).await?);
 
-        let handle = torrent::TorrentHandle::new(meta, info_hash, storage, &self.config);
+        let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
         self.torrents.write().await.insert(info_hash, handle);
 
         Ok(info_hash)

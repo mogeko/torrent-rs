@@ -80,12 +80,6 @@ fn main() {
     }
 
     // --- Async PeerConnection ---
-    // Uncomment to connect to a real peer:
-    //
-    // use torrent::peer::PeerConnection;
-    // let addr = "192.168.1.100:6881".parse().unwrap();
-    // let mut conn = PeerConnection::connect(addr, info_hash, our_id).await?;
-    // conn.send(&PeerMessage::Interested).await?;
-    // let msg = conn.recv().await?;
-    // println!("Received: {:?}", msg);
+    // For an end-to-end local peer connection demo, see the `peer_pair` example:
+    //   cargo run -p torrent --example peer_pair
 }

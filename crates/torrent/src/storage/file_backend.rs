@@ -8,9 +8,6 @@ use crate::storage::Storage;
 
 /// File-based storage backend.
 pub struct FileStorage {
-    /// Root directory for downloaded data.
-    #[allow(dead_code)]
-    root: PathBuf,
     /// Number of pieces.
     num_pieces: usize,
     /// Size of each piece in bytes.
@@ -79,7 +76,6 @@ impl FileStorage {
         };
 
         Ok(FileStorage {
-            root,
             num_pieces,
             piece_length,
             total_size,
