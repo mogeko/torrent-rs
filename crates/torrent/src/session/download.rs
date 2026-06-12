@@ -28,13 +28,13 @@ pub(crate) enum PeerEvent {
 }
 
 /// Per-peer protocol state tracked by the download loop.
-#[allow(dead_code)]
 pub(crate) struct PeerInfo {
     /// Which pieces this peer has (from bitfield + have messages).
     bitfield: Vec<bool>,
     /// We are choked by this peer.
     am_choked: bool,
     /// We've sent Interested to this peer.
+    #[allow(dead_code)]
     am_interested: bool,
     /// This peer has sent Interested to us.
     peer_interested: bool,
@@ -58,9 +58,9 @@ impl PeerInfo {
 }
 
 /// An in-progress piece download, assembling blocks from peers.
-#[allow(dead_code)]
 pub(crate) struct ActiveDownload {
     /// Piece index being downloaded.
+    #[allow(dead_code)]
     index: u32,
     /// Full piece data buffer (allocated upfront, piece_length bytes).
     data: Vec<u8>,
@@ -69,6 +69,7 @@ pub(crate) struct ActiveDownload {
     /// Block size in bytes (default 16 KB).
     block_size: u32,
     /// Number of blocks per piece.
+    #[allow(dead_code)]
     num_blocks: usize,
     /// Peers we've sent requests to for this piece.
     requested_from: HashSet<SocketAddr>,
@@ -119,6 +120,8 @@ pub(crate) struct DownloadLoop {
     pub(crate) tick_count: usize,
     /// Enable DHT peer discovery.
     pub(crate) enable_dht: bool,
+    /// Cached completed pieces for upload serving (avoid repeated disk reads).
+    pub(crate) piece_cache: HashMap<u32, Arc<Vec<u8>>>,
     /// DHT RPC client.
     pub(crate) dht_rpc: Option<Arc<DhtRpc>>,
     /// Our DHT node ID.
@@ -327,6 +330,9 @@ impl DownloadLoop {
                 // Write to storage
                 self.storage.write_block(index, begin, &data).await?;
                 self.total_downloaded += data.len() as u64;
+                if let Some(peer) = self.peers.get_mut(&addr) {
+                    peer.downloaded_bytes += data.len() as u64;
+                }
 
                 // Update active download
                 let piece_complete = if let Some(dl) = self.active_downloads.get_mut(&index) {
@@ -362,15 +368,20 @@ impl DownloadLoop {
                     return Ok(());
                 }
 
-                // Read the full piece, then extract the requested block
-                let piece_len = self.piece_len_for_index(index) as usize;
-                let mut piece_buf = vec![0u8; piece_len];
-                self.storage.read_piece(index, &mut piece_buf).await?;
+                // Read the piece data (from cache if available, otherwise disk)
+                let piece_data = if let Some(cached) = self.piece_cache.get(&index) {
+                    Arc::clone(cached)
+                } else {
+                    let piece_len = self.piece_len_for_index(index) as usize;
+                    let mut piece_buf = vec![0u8; piece_len];
+                    self.storage.read_piece(index, &mut piece_buf).await?;
+                    Arc::new(piece_buf)
+                };
 
                 let start = begin as usize;
-                let end = (start + length as usize).min(piece_len);
+                let end = (start + length as usize).min(piece_data.len());
                 if start < end {
-                    let block_data = piece_buf[start..end].to_vec();
+                    let block_data = piece_data[start..end].to_vec();
                     let msg = PeerMessage::Piece {
                         index,
                         begin,
@@ -521,6 +532,7 @@ impl DownloadLoop {
                 let mut pm = self.piece_mgr.write().await;
                 pm.set_piece(index);
             }
+            self.piece_cache.insert(index, Arc::new(data));
             self.active_downloads.remove(&index);
             Ok(true)
         } else {

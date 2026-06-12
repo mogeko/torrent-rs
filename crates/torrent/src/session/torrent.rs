@@ -16,6 +16,7 @@ use super::upload::UploadManager;
 use super::{SessionConfig, TorrentState, TorrentStatus};
 
 /// Commands sent to the download loop.
+#[allow(dead_code)]
 pub(crate) enum TorrentCommand {
     Pause,
     Resume,
@@ -100,6 +101,7 @@ impl TorrentHandle {
             last_uploaded: 0,
             tick_count: 0,
             enable_dht: config.enable_dht,
+            piece_cache: HashMap::new(),
             dht_rpc: None,
             dht_node_id: [0u8; 20],
             next_dht_search: None,

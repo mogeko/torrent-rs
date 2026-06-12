@@ -120,9 +120,7 @@ impl Metainfo {
 
     /// Serialize back to bencoded bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        // TODO: implement serialization in Phase 2.1+
-        // For now, this is a placeholder.
-        todo!("Metainfo::to_bytes not yet implemented")
+        unimplemented!("Metainfo::to_bytes is not yet supported")
     }
 }
 

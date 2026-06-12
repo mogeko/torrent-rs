@@ -23,7 +23,6 @@ use tokio::sync::RwLock;
 
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Metainfo, Mode, from_bytes as parse_metainfo};
-use crate::peer::PeerId;
 use crate::storage::FileStorage;
 
 /// Unique identifier for a torrent (SHA-1 info hash).
@@ -62,9 +61,6 @@ pub type InfoHash = [u8; 20];
 /// # }
 /// ```
 pub struct Session {
-    /// Our peer ID.
-    #[allow(dead_code)]
-    peer_id: PeerId,
     /// Session configuration.
     config: SessionConfig,
     /// Active torrents, keyed by info_hash.
@@ -138,7 +134,6 @@ impl Session {
     /// Create a new session with the given configuration.
     pub async fn new(config: SessionConfig) -> Result<Self, Error> {
         Ok(Session {
-            peer_id: PeerId::random(),
             config,
             torrents: RwLock::new(HashMap::new()),
         })

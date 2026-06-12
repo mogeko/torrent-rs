@@ -2,23 +2,18 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 
 /// Manages uploads: choke/unchoke logic, responding to piece requests.
-#[allow(dead_code)]
 pub(crate) struct UploadManager {
     max_uploads: u32,
     /// Peers we have unchoked.
     unchoked: HashSet<SocketAddr>,
-    /// Current optimistic unchoke peer.
-    optimistic_unchoke: Option<SocketAddr>,
 }
 
-#[allow(dead_code)]
 impl UploadManager {
     /// Create a new UploadManager.
     pub fn new(max_uploads: u32) -> Self {
         UploadManager {
             max_uploads,
             unchoked: HashSet::new(),
-            optimistic_unchoke: None,
         }
     }
 
@@ -40,6 +35,7 @@ impl UploadManager {
     }
 
     /// Get the number of unchoked peers.
+    #[allow(dead_code)]
     pub fn num_unchoked(&self) -> usize {
         self.unchoked.len()
     }
