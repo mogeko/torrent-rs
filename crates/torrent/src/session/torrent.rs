@@ -8,6 +8,7 @@ use crate::metainfo::{Metainfo, Mode};
 use crate::peer::PeerId;
 use crate::piece::{PieceManager, RarestFirst};
 use crate::storage::FileStorage;
+use crate::tracker::Tracker;
 
 use super::download::DownloadLoop;
 use super::peer_manager::PeerManager;
@@ -50,9 +51,11 @@ impl TorrentHandle {
         };
 
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
+        let peer_id = PeerId::random();
+        let tracker = Tracker::from_metainfo(&metainfo);
         let peer_mgr = Arc::new(RwLock::new(PeerManager::new(
             info_hash,
-            PeerId::random(),
+            peer_id,
             config.max_connections,
         )));
 
@@ -78,6 +81,12 @@ impl TorrentHandle {
             peer_mgr: peer_mgr.clone(),
             status: status.clone(),
             control_rx,
+            peer_id,
+            listen_port: config.listen_port,
+            tracker,
+            next_announce: None,
+            has_announced: false,
+            announced_completed: false,
             peers: HashMap::new(),
             active_downloads: HashMap::new(),
             selector: Box::new(RarestFirst),

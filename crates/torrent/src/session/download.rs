@@ -1,15 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error::Error;
 use crate::metainfo::Metainfo;
-use crate::peer::{PeerConnection, PeerMessage};
+use crate::peer::{PeerConnection, PeerId, PeerMessage};
 use crate::piece::{EndGame, PieceManager, PieceSelector};
 use crate::storage::{FileStorage, Storage};
+use crate::tracker::{AnnounceEvent, AnnounceRequest, Tracker};
 
 use super::peer_manager::PeerManager;
 use super::torrent::TorrentCommand;
@@ -74,6 +75,18 @@ pub(crate) struct DownloadLoop {
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
     pub control_rx: mpsc::Receiver<TorrentCommand>,
+    /// Our peer ID.
+    pub(crate) peer_id: PeerId,
+    /// TCP listen port.
+    pub(crate) listen_port: u16,
+    /// Tracker client for peer discovery.
+    pub(crate) tracker: Option<Tracker>,
+    /// Next announce time.
+    pub(crate) next_announce: Option<Instant>,
+    /// Have we sent the first announce?
+    pub(crate) has_announced: bool,
+    /// Have we sent the Completed event?
+    pub(crate) announced_completed: bool,
     /// Per-peer protocol state.
     pub(crate) peers: HashMap<SocketAddr, PeerInfo>,
     /// Currently active piece downloads.
@@ -112,7 +125,11 @@ impl DownloadLoop {
                             let mut status = self.status.write().await;
                             status.state = TorrentState::Downloading;
                         }
-                        Some(TorrentCommand::Cancel) | None => break,
+                        Some(TorrentCommand::Cancel) | None => {
+                            // Best-effort: send Stopped event to tracker
+                            let _ = self.announce_to_tracker(AnnounceEvent::Stopped).await;
+                            break;
+                        }
                     }
                 }
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
@@ -129,8 +146,11 @@ impl DownloadLoop {
         }
     }
 
-    /// Process one tick: connect peers, request pieces, update status.
+    /// Process one tick: announce to tracker, connect peers, request pieces, update status.
     async fn tick(&mut self) -> Result<(), Error> {
+        // 0. Announce to tracker if needed
+        self.announce_if_needed().await;
+
         // 1. Connect to pending peers
         let newly_connected = {
             let mut pm = self.peer_mgr.write().await;
@@ -156,15 +176,22 @@ impl DownloadLoop {
         }
 
         // 4. Update status
-        {
+        let is_seeding = {
             let mut status = self.status.write().await;
             let pm = self.piece_mgr.read().await;
             status.progress = pm.progress();
             status.num_peers = self.peer_mgr.read().await.num_connections();
 
-            if pm.missing_pieces().is_empty() {
+            let complete = pm.missing_pieces().is_empty();
+            if complete {
                 status.state = TorrentState::Seeding;
             }
+            complete
+        };
+
+        if is_seeding && !self.announced_completed {
+            let _ = self.announce_to_tracker(AnnounceEvent::Completed).await;
+            self.announced_completed = true;
         }
 
         Ok(())
@@ -410,6 +437,84 @@ impl DownloadLoop {
             let _ = pm.send_to(&addr, &msg).await;
         }
         Ok(())
+    }
+
+    // ── Tracker announce ─────────────────────────────────────────
+
+    /// Announce to the tracker if it's time.
+    async fn announce_if_needed(&mut self) {
+        if self.tracker.is_none() {
+            return;
+        }
+
+        let should_announce = match self.next_announce {
+            None => true, // First announce
+            Some(t) => Instant::now() >= t,
+        };
+
+        if !should_announce {
+            return;
+        }
+
+        let event = if !self.has_announced {
+            AnnounceEvent::Started
+        } else {
+            AnnounceEvent::None
+        };
+
+        match self.announce_to_tracker(event).await {
+            Ok(()) => {
+                self.has_announced = true;
+            }
+            Err(e) => {
+                // Log error; retry after backoff (set by announce_to_tracker)
+                let _ = e;
+            }
+        }
+    }
+
+    /// Announce to the tracker with a specific event.
+    async fn announce_to_tracker(&mut self, event: AnnounceEvent) -> Result<(), Error> {
+        let tracker = match self.tracker.as_ref() {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        // Calculate downloaded/left bytes (approximate)
+        let (downloaded, left) = {
+            let pm = self.piece_mgr.read().await;
+            let have = pm.completed_pieces().len() as u64;
+            let piece_len = self.metainfo.info.piece_length;
+            let total_size = self.metainfo.info.total_size();
+            let d = have * piece_len;
+            let l = total_size.saturating_sub(d);
+            (d, l)
+        };
+
+        let mut req = AnnounceRequest::new(self.info_hash, self.peer_id, self.listen_port);
+        req.downloaded = downloaded;
+        req.uploaded = 0; // Phase 4
+        req.left = left;
+        req.event = event;
+
+        match tracker.announce(&req).await {
+            Ok(resp) => {
+                let interval = resp.min_interval.unwrap_or(resp.interval);
+                self.next_announce = Some(Instant::now() + Duration::from_secs(interval as u64));
+
+                if !resp.peers.is_empty() {
+                    let mut pm = self.peer_mgr.write().await;
+                    pm.add_peers(resp.peers);
+                }
+
+                Ok(())
+            }
+            Err(e) => {
+                // Backoff on failure
+                self.next_announce = Some(Instant::now() + Duration::from_secs(30));
+                Err(e)
+            }
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────
