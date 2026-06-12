@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
@@ -20,6 +21,8 @@ pub(crate) struct PeerManager {
     pending: VecDeque<SocketAddr>,
     /// Maximum connections.
     max_connections: u32,
+    /// Last connect attempt for backoff.
+    last_connect_attempt: Option<Instant>,
 }
 
 #[allow(dead_code)]
@@ -32,6 +35,7 @@ impl PeerManager {
             connections: HashMap::new(),
             pending: VecDeque::new(),
             max_connections,
+            last_connect_attempt: None,
         }
     }
 
@@ -90,8 +94,18 @@ impl PeerManager {
     /// Connect to multiple pending peers.
     ///
     /// Returns the addresses of all newly connected peers.
+    /// Includes backoff: if ALL attempts fail, wait 5 seconds before retrying.
     pub async fn connect_pending(&mut self) -> Vec<SocketAddr> {
+        // Backoff check
+        if let Some(last) = self.last_connect_attempt
+            && last.elapsed() < Duration::from_secs(5)
+        {
+            return vec![];
+        }
+
+        let had_pending = !self.pending.is_empty();
         let mut connected = Vec::new();
+
         while (self.connections.len() as u32) < self.max_connections {
             match self.connect_next().await {
                 Ok(Some(addr)) => connected.push(addr),
@@ -99,6 +113,14 @@ impl PeerManager {
                 Err(_) => continue,
             }
         }
+
+        // If we had pending peers but connected none, start backoff
+        if had_pending && connected.is_empty() && self.pending.is_empty() {
+            self.last_connect_attempt = Some(Instant::now());
+        } else if !connected.is_empty() {
+            self.last_connect_attempt = None;
+        }
+
         connected
     }
 

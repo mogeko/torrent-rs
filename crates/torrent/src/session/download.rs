@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rand::RngExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
+use crate::dht::{DhtRpc, generate_node_id, get_peers, krpc};
 use crate::error::Error;
 use crate::metainfo::Metainfo;
 use crate::peer::{PeerConnection, PeerId, PeerMessage};
@@ -116,15 +118,34 @@ pub(crate) struct DownloadLoop {
     pub(crate) last_uploaded: u64,
     /// Tick counter for periodic tasks.
     pub(crate) tick_count: usize,
+    /// Enable DHT peer discovery.
+    pub(crate) enable_dht: bool,
+    /// DHT RPC client.
+    pub(crate) dht_rpc: Option<Arc<DhtRpc>>,
+    /// Our DHT node ID.
+    pub(crate) dht_node_id: [u8; 20],
+    /// Next DHT search time.
+    pub(crate) next_dht_search: Option<Instant>,
 }
 
 /// When fewer than this many pieces remain, switch to EndGame mode
 /// (send duplicate requests to multiple peers simultaneously).
 const ENDGAME_THRESHOLD: usize = 10;
 
+/// Well-known DHT bootstrap nodes (router.bittorrent.com, etc.).
+const DHT_BOOTSTRAP: &[(&str, u16)] = &[
+    ("router.bittorrent.com", 6881),
+    ("dht.transmissionbt.com", 6881),
+];
+
 impl DownloadLoop {
     /// Run the main download loop.
     pub async fn run(&mut self) {
+        // Initialize DHT if enabled
+        if self.enable_dht {
+            self.init_dht().await;
+        }
+
         {
             let mut status = self.status.write().await;
             status.state = TorrentState::Downloading;
@@ -169,6 +190,11 @@ impl DownloadLoop {
     async fn tick(&mut self) -> Result<(), Error> {
         // 0. Announce to tracker if needed
         self.announce_if_needed().await;
+
+        // 0a. DHT peer search (every 30 seconds)
+        if self.enable_dht {
+            self.dht_search_if_needed().await;
+        }
 
         // 1. Connect to pending peers
         let newly_connected = {
@@ -620,13 +646,11 @@ impl DownloadLoop {
             peer_stats.iter().take(top_count).map(|(a, _)| *a).collect();
 
         // Optimistic unchoke: pick a random peer not in the top set
-        if let Some(&(opt_addr, _)) = peer_stats
-            .iter()
-            .skip(top_count)
-            .collect::<Vec<_>>()
-            .first()
-        {
-            to_unchoke.insert(*opt_addr);
+        let candidates: Vec<SocketAddr> =
+            peer_stats.iter().skip(top_count).map(|(a, _)| *a).collect();
+        if !candidates.is_empty() {
+            let idx = rand::rng().random_range(0..candidates.len());
+            to_unchoke.insert(candidates[idx]);
         }
 
         // Also unchoke any newly connected peer (with zero uploaded)
@@ -659,6 +683,66 @@ impl DownloadLoop {
         }
 
         Ok(())
+    }
+
+    // ── DHT peer discovery ───────────────────────────────────────
+
+    /// Initialize the DHT node (called once on startup if `enable_dht`).
+    async fn init_dht(&mut self) {
+        let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
+        match DhtRpc::new(bind_addr).await {
+            Ok(rpc) => {
+                self.dht_node_id = generate_node_id();
+                self.dht_rpc = Some(Arc::new(rpc));
+                self.next_dht_search = Some(Instant::now());
+            }
+            Err(_) => {
+                // DHT unavailable; silently disabled
+            }
+        }
+    }
+
+    /// Search for peers via DHT (called from tick).
+    async fn dht_search_if_needed(&mut self) {
+        let should_search = match self.next_dht_search {
+            None => return,
+            Some(t) => Instant::now() >= t,
+        };
+        if !should_search {
+            return;
+        }
+
+        let rpc = match self.dht_rpc.as_ref() {
+            Some(r) => Arc::clone(r),
+            None => return,
+        };
+
+        // Bootstrap / query well-known DHT nodes
+        for (host, port) in DHT_BOOTSTRAP {
+            let addr = match tokio::net::lookup_host((*host, *port)).await {
+                Ok(mut addrs) => match addrs.next() {
+                    Some(a) => a,
+                    None => continue,
+                },
+                Err(_) => continue,
+            };
+
+            let tid: krpc::TransactionId = rand::random();
+            match get_peers(&rpc, addr, tid, &self.dht_node_id, &self.info_hash).await {
+                Ok(krpc::GetPeersResult::Values { peers, .. }) => {
+                    if !peers.is_empty() {
+                        self.peer_mgr.write().await.add_peers(peers);
+                    }
+                }
+                Ok(krpc::GetPeersResult::Nodes(_nodes)) => {
+                    // Bootstrapping with returned nodes would require routing
+                    // table maintenance; deferred for future enhancement.
+                }
+                Err(_) => continue,
+            }
+        }
+
+        self.next_dht_search = Some(Instant::now() + Duration::from_secs(30));
     }
 
     // ── Helpers ───────────────────────────────────────────────────
