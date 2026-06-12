@@ -43,4 +43,14 @@ impl UploadManager {
     pub fn num_unchoked(&self) -> usize {
         self.unchoked.len()
     }
+
+    /// Get an iterator over all unchoked peer addresses.
+    pub fn unchoked_peers(&self) -> impl Iterator<Item = &SocketAddr> {
+        self.unchoked.iter()
+    }
+
+    /// Get the configured maximum upload slots.
+    pub fn max_uploads(&self) -> u32 {
+        self.max_uploads
+    }
 }

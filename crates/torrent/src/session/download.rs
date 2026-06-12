@@ -14,6 +14,7 @@ use crate::tracker::{AnnounceEvent, AnnounceRequest, Tracker};
 
 use super::peer_manager::PeerManager;
 use super::torrent::TorrentCommand;
+use super::upload::UploadManager;
 use super::{TorrentState, TorrentStatus};
 
 /// Event from a peer reader task.
@@ -35,6 +36,10 @@ pub(crate) struct PeerInfo {
     am_interested: bool,
     /// This peer has sent Interested to us.
     peer_interested: bool,
+    /// Bytes uploaded to this peer.
+    uploaded_bytes: u64,
+    /// Bytes downloaded from this peer.
+    downloaded_bytes: u64,
 }
 
 impl PeerInfo {
@@ -44,6 +49,8 @@ impl PeerInfo {
             am_choked: true,
             am_interested: false,
             peer_interested: false,
+            uploaded_bytes: 0,
+            downloaded_bytes: 0,
         }
     }
 }
@@ -97,6 +104,18 @@ pub(crate) struct DownloadLoop {
     pub(crate) peer_msg_rx: mpsc::UnboundedReceiver<(SocketAddr, PeerEvent)>,
     /// Clone for spawning new reader tasks.
     pub(crate) peer_msg_tx: mpsc::UnboundedSender<(SocketAddr, PeerEvent)>,
+    /// Upload slot manager.
+    pub(crate) upload_mgr: Arc<RwLock<UploadManager>>,
+    /// Total bytes downloaded.
+    pub(crate) total_downloaded: u64,
+    /// Total bytes uploaded.
+    pub(crate) total_uploaded: u64,
+    /// Previous downloaded count for rate calc.
+    pub(crate) last_downloaded: u64,
+    /// Previous uploaded count for rate calc.
+    pub(crate) last_uploaded: u64,
+    /// Tick counter for periodic tasks.
+    pub(crate) tick_count: usize,
 }
 
 /// When fewer than this many pieces remain, switch to EndGame mode
@@ -175,15 +194,28 @@ impl DownloadLoop {
             self.maybe_request_piece().await?;
         }
 
-        // 4. Update status
-        let is_seeding = {
+        // 4. Update status with rate stats
+        self.tick_count += 1;
+
+        {
             let mut status = self.status.write().await;
             let pm = self.piece_mgr.read().await;
             status.progress = pm.progress();
             status.num_peers = self.peer_mgr.read().await.num_connections();
 
+            // Rate calculation (bytes per second, tick runs every 1s)
+            status.download_rate = (self.total_downloaded - self.last_downloaded) as f64;
+            status.upload_rate = (self.total_uploaded - self.last_uploaded) as f64;
+            self.last_downloaded = self.total_downloaded;
+            self.last_uploaded = self.total_uploaded;
+        }
+
+        // Check seeding state + announce
+        let is_seeding = {
+            let pm = self.piece_mgr.read().await;
             let complete = pm.missing_pieces().is_empty();
             if complete {
+                let mut status = self.status.write().await;
                 status.state = TorrentState::Seeding;
             }
             complete
@@ -192,6 +224,11 @@ impl DownloadLoop {
         if is_seeding && !self.announced_completed {
             let _ = self.announce_to_tracker(AnnounceEvent::Completed).await;
             self.announced_completed = true;
+        }
+
+        // 5. Periodic choke/unchoke round
+        if self.tick_count.is_multiple_of(10) {
+            self.run_choke_unchoke().await?;
         }
 
         Ok(())
@@ -264,6 +301,7 @@ impl DownloadLoop {
             PeerMessage::Piece { index, begin, data } => {
                 // Write to storage
                 self.storage.write_block(index, begin, &data).await?;
+                self.total_downloaded += data.len() as u64;
 
                 // Update active download
                 let piece_complete = if let Some(dl) = self.active_downloads.get_mut(&index) {
@@ -285,8 +323,45 @@ impl DownloadLoop {
                     self.broadcast_have(index).await?;
                 }
             }
-            PeerMessage::Request { .. } | PeerMessage::Cancel { .. } | PeerMessage::Port(_) => {
-                // Ignored for now (upload in Phase 4)
+            PeerMessage::Request {
+                index,
+                begin,
+                length,
+            } => {
+                // Only serve data if the peer is unchoked
+                let is_unchoked = {
+                    let um = self.upload_mgr.read().await;
+                    um.is_unchoked(&addr)
+                };
+                if !is_unchoked {
+                    return Ok(());
+                }
+
+                // Read the full piece, then extract the requested block
+                let piece_len = self.piece_len_for_index(index) as usize;
+                let mut piece_buf = vec![0u8; piece_len];
+                self.storage.read_piece(index, &mut piece_buf).await?;
+
+                let start = begin as usize;
+                let end = (start + length as usize).min(piece_len);
+                if start < end {
+                    let block_data = piece_buf[start..end].to_vec();
+                    let msg = PeerMessage::Piece {
+                        index,
+                        begin,
+                        data: block_data,
+                    };
+                    self.peer_mgr.read().await.send_to(&addr, &msg).await?;
+                    self.total_uploaded += (end - start) as u64;
+
+                    // Track per-peer upload stats
+                    if let Some(peer) = self.peers.get_mut(&addr) {
+                        peer.uploaded_bytes += (end - start) as u64;
+                    }
+                }
+            }
+            PeerMessage::Cancel { .. } | PeerMessage::Port(_) => {
+                // Cancel and Port messages are not handled yet
             }
         }
 
@@ -493,7 +568,7 @@ impl DownloadLoop {
 
         let mut req = AnnounceRequest::new(self.info_hash, self.peer_id, self.listen_port);
         req.downloaded = downloaded;
-        req.uploaded = 0; // Phase 4
+        req.uploaded = self.total_uploaded;
         req.left = left;
         req.event = event;
 
@@ -515,6 +590,75 @@ impl DownloadLoop {
                 Err(e)
             }
         }
+    }
+
+    // ── Upload / choke-unchoke ────────────────────────────────────
+
+    /// Run a choke/unchoke round: select top uploaders + optimistic unchoke.
+    async fn run_choke_unchoke(&mut self) -> Result<(), Error> {
+        let max_uploads = {
+            let um = self.upload_mgr.read().await;
+            um.max_uploads()
+        };
+        if max_uploads == 0 {
+            return Ok(());
+        }
+
+        // Collect peer addresses and upload stats
+        let mut peer_stats: Vec<(SocketAddr, u64)> = self
+            .peers
+            .iter()
+            .map(|(addr, info)| (*addr, info.uploaded_bytes))
+            .collect();
+
+        // Sort by uploaded bytes descending
+        peer_stats.sort_by_key(|(_, u)| std::cmp::Reverse(*u));
+
+        // Select top (max_uploads - 1), plus one random optimistic unchoke
+        let top_count = ((max_uploads - 1) as usize).min(peer_stats.len());
+        let mut to_unchoke: HashSet<SocketAddr> =
+            peer_stats.iter().take(top_count).map(|(a, _)| *a).collect();
+
+        // Optimistic unchoke: pick a random peer not in the top set
+        if let Some(&(opt_addr, _)) = peer_stats
+            .iter()
+            .skip(top_count)
+            .collect::<Vec<_>>()
+            .first()
+        {
+            to_unchoke.insert(*opt_addr);
+        }
+
+        // Also unchoke any newly connected peer (with zero uploaded)
+        for addr in self.peers.keys() {
+            if to_unchoke.len() >= max_uploads as usize {
+                break;
+            }
+            to_unchoke.insert(*addr);
+        }
+
+        // Apply changes
+        let mut um = self.upload_mgr.write().await;
+        let pm = self.peer_mgr.read().await;
+
+        // Unchoke selected peers
+        for addr in &to_unchoke {
+            if !um.is_unchoked(addr) {
+                um.unchoke(*addr);
+                let _ = pm.send_to(addr, &PeerMessage::Unchoke).await;
+            }
+        }
+
+        // Choke previously unchoked peers that aren't in the new set
+        let previously_unchoked: Vec<SocketAddr> = um.unchoked_peers().copied().collect();
+        for addr in previously_unchoked {
+            if !to_unchoke.contains(&addr) {
+                um.choke(&addr);
+                let _ = pm.send_to(&addr, &PeerMessage::Choke).await;
+            }
+        }
+
+        Ok(())
     }
 
     // ── Helpers ───────────────────────────────────────────────────

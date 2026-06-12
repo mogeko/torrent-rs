@@ -12,6 +12,7 @@ use crate::tracker::Tracker;
 
 use super::download::DownloadLoop;
 use super::peer_manager::PeerManager;
+use super::upload::UploadManager;
 use super::{SessionConfig, TorrentState, TorrentStatus};
 
 /// Commands sent to the download loop.
@@ -53,6 +54,7 @@ impl TorrentHandle {
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
         let peer_id = PeerId::random();
         let tracker = Tracker::from_metainfo(&metainfo);
+        let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
         let peer_mgr = Arc::new(RwLock::new(PeerManager::new(
             info_hash,
             peer_id,
@@ -92,6 +94,12 @@ impl TorrentHandle {
             selector: Box::new(RarestFirst),
             peer_msg_rx,
             peer_msg_tx,
+            upload_mgr: upload_mgr.clone(),
+            total_downloaded: 0,
+            total_uploaded: 0,
+            last_downloaded: 0,
+            last_uploaded: 0,
+            tick_count: 0,
         };
 
         let task = tokio::spawn(async move {
