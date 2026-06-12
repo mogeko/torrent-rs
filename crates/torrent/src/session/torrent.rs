@@ -5,8 +5,8 @@ use tokio::sync::{RwLock, mpsc};
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Metainfo, Mode};
 use crate::peer::PeerId;
+use crate::piece::PieceManager;
 use crate::storage::FileStorage;
-use crate::storage::PieceManager;
 
 use super::download::DownloadLoop;
 use super::peer_manager::PeerManager;

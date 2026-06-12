@@ -11,8 +11,8 @@
 //! - [`metainfo`] — .torrent parsing (BEP 3/12/52)
 //! - [`magnet`] — Magnet URI (BEP 9)
 //! - [`peer`] — handshake, message types, PeerId
-//! - [`dht`] — KRPC, RoutingTable (sync)
-//! - [`storage`] — Storage trait, PieceManager, piece_selector
+//! - [`piece`] — PieceManager, piece selection strategies (BEP 3)
+//! - [`storage`] — Storage trait
 //! - [`tracker`] — Announce data types and parsing (sync)
 
 pub mod bencode;
@@ -21,5 +21,6 @@ pub mod error;
 pub mod magnet;
 pub mod metainfo;
 pub mod peer;
+pub mod piece;
 pub mod storage;
 pub mod tracker;
