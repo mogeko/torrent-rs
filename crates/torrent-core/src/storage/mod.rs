@@ -42,9 +42,6 @@ pub trait Storage: Send + Sync {
         data: &[u8],
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Check if a piece is fully downloaded and verified.
-    fn has_piece(&self, index: u32) -> bool;
-
     /// Total number of pieces.
     fn num_pieces(&self) -> usize;
 

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
@@ -19,8 +19,6 @@ pub struct FileStorage {
     total_size: u64,
     /// File layout mode (single or multi-file).
     mode: StorageMode,
-    /// Piece manager tracking download progress.
-    piece_mgr: std::sync::Mutex<super::PieceManager>,
 }
 
 enum StorageMode {
@@ -35,7 +33,7 @@ struct StorageFile {
 
 impl FileStorage {
     /// Create a new FileStorage from metainfo info.
-    pub async fn new(info: &Info, download_dir: &std::path::Path) -> Result<Self, Error> {
+    pub async fn new(info: &Info, download_dir: &Path) -> Result<Self, Error> {
         let root = download_dir.to_path_buf();
 
         let num_pieces = info.num_pieces();
@@ -86,7 +84,6 @@ impl FileStorage {
             piece_length,
             total_size,
             mode,
-            piece_mgr: std::sync::Mutex::new(super::PieceManager::new(num_pieces)),
         })
     }
 
@@ -106,10 +103,6 @@ impl Storage for FileStorage {
     async fn write_block(&self, piece: u32, offset: u32, data: &[u8]) -> Result<(), Error> {
         let global_offset = self.piece_offset(piece) + offset as u64;
         self.write_range(global_offset, data).await
-    }
-
-    fn has_piece(&self, index: u32) -> bool {
-        self.piece_mgr.lock().unwrap().has_piece(index)
     }
 
     fn num_pieces(&self) -> usize {
