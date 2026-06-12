@@ -96,6 +96,7 @@ impl Tracker {
     /// Create a `Tracker` from multiple tracker URLs.
     ///
     /// Invalid or unsupported URLs are silently skipped.
+    /// Duplicate URLs are silently skipped (the first occurrence is kept).
     ///
     /// Returns `None` if **all** URLs are invalid.
     pub fn multi<I: IntoIterator>(urls: I) -> Option<Self>
@@ -126,7 +127,8 @@ impl Tracker {
     /// Create a `Tracker` from a parsed [`Metainfo`].
     ///
     /// Collects all tracker URLs from `announce` and `announce_list` (BEP 12),
-    /// deduplicates them, and returns a single-tracker or multi-tracker as
+    /// deduplicates them (duplicates across announce and announce_list are
+    /// deduplicated), and returns a single-tracker or multi-tracker as
     /// appropriate. Invalid or unsupported URLs are silently skipped.
     ///
     /// Returns `None` if no valid tracker URLs were found.
@@ -146,6 +148,7 @@ impl Tracker {
 
     /// Add a single tracker URL.
     ///
+    /// If the URL is already registered, it is silently skipped.
     /// Returns an error if the URL is invalid or has an unsupported scheme.
     pub fn add(&mut self, url: impl IntoUrl) -> Result<(), Error> {
         let url = url.into_url()?;
@@ -159,6 +162,7 @@ impl Tracker {
 
     /// Add multiple tracker URLs.
     ///
+    /// Duplicate and already-registered URLs are silently skipped.
     /// Returns an error if any URL is invalid.
     pub fn add_all<I: IntoIterator>(&mut self, urls: I) -> Result<(), Error>
     where
@@ -535,5 +539,125 @@ mod tests {
             t.urls(),
             &["http://tracker.a.com/announce", "udp://tracker.b.com:6969"]
         );
+    }
+
+    #[test]
+    fn test_tracker_add_all_dedup() {
+        let mut t = Tracker::single("http://tracker.a.com/announce").unwrap();
+
+        t.add_all([
+            "udp://tracker.b.com:6969",
+            "http://tracker.c.com/announce",
+            "udp://tracker.b.com:6969", // duplicate in the same batch
+        ])
+        .unwrap();
+
+        assert_eq!(t.trackers.len(), 3);
+        assert_eq!(
+            t.urls(),
+            &[
+                "http://tracker.a.com/announce",
+                "udp://tracker.b.com:6969",
+                "http://tracker.c.com/announce"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tracker_add_all_dedup_with_existing() {
+        let mut t = Tracker::single("http://tracker.a.com/announce").unwrap();
+
+        // Some URLs already exist, some are new, some are duplicates within the batch
+        t.add_all([
+            "http://tracker.a.com/announce", // already exists
+            "udp://tracker.b.com:6969",      // new
+            "http://tracker.a.com/announce", // duplicate (existing + same batch)
+            "udp://tracker.b.com:6969",      // duplicate
+            "http://tracker.c.com/announce", // new
+        ])
+        .unwrap();
+
+        assert_eq!(t.trackers.len(), 3);
+    }
+
+    #[test]
+    fn test_tracker_add_all_invalid_url() {
+        let mut t = Tracker::single("http://tracker.a.com/announce").unwrap();
+
+        // Invalid URL should cause early Err (short-circuit)
+        let result = t.add_all([
+            "udp://tracker.b.com:6969",
+            "not a url",
+            "http://tracker.c.com/announce",
+        ]);
+
+        assert!(result.is_err());
+        // The valid URL before the invalid one should NOT have been added
+        // (short-circuit after the invalid parse failure)
+    }
+
+    #[test]
+    fn test_tracker_add_all_empty() {
+        let mut t = Tracker::single("http://tracker.a.com/announce").unwrap();
+        let urls: Vec<&str> = Vec::new();
+
+        t.add_all(urls).unwrap();
+        assert_eq!(t.trackers.len(), 1); // unchanged
+    }
+
+    #[test]
+    fn test_tracker_from_metainfo_preserves_order() {
+        use torrent_core::metainfo::{Info, Metainfo, Mode};
+
+        let info = Info {
+            piece_length: 262144,
+            pieces: vec![[0u8; 20]],
+            mode: Mode::Single {
+                name: "test.txt".into(),
+                length: 1024,
+            },
+            raw_info: bytes::Bytes::new(),
+        };
+        // Multiple tiers with unique URLs; order should be preserved
+        let meta = Metainfo {
+            announce: "http://tracker.a.com/announce".into(),
+            announce_list: vec![
+                vec!["udp://tracker.b.com:6969".into()],
+                vec!["http://tracker.c.com/announce".into()],
+            ],
+            info,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+
+        let t = Tracker::from_metainfo(&meta).unwrap();
+        assert_eq!(t.trackers.len(), 3);
+        assert_eq!(
+            t.urls(),
+            &[
+                "http://tracker.a.com/announce",
+                "udp://tracker.b.com:6969",
+                "http://tracker.c.com/announce"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tracker_remove_nonexistent() {
+        let mut t = Tracker::single("http://tracker.a.com/announce").unwrap();
+
+        // Remove existing
+        assert!(t.remove("http://tracker.a.com/announce"));
+        assert!(t.is_empty());
+
+        // Remove already-removed URL — should be idempotent
+        assert!(!t.remove("http://tracker.a.com/announce"));
+        assert!(t.is_empty());
+
+        // Remove URL that was never added
+        assert!(!t.remove("udp://tracker.b.com:6969"));
+        assert!(t.is_empty());
     }
 }
