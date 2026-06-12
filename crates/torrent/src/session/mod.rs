@@ -25,6 +25,8 @@ use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Metainfo, Mode, from_bytes as parse_metainfo};
 use crate::storage::FileStorage;
 
+use self::torrent::TorrentHandle;
+
 /// Unique identifier for a torrent (SHA-1 info hash).
 ///
 /// This is the 20-byte hash used throughout the BitTorrent protocol
@@ -64,7 +66,7 @@ pub struct Session {
     /// Session configuration.
     config: SessionConfig,
     /// Active torrents, keyed by info_hash.
-    torrents: RwLock<HashMap<InfoHash, torrent::TorrentHandle>>,
+    torrents: RwLock<HashMap<InfoHash, TorrentHandle>>,
 }
 
 /// Session configuration.
@@ -149,7 +151,7 @@ impl Session {
         // Create FileStorage
         let storage = Arc::new(FileStorage::new(&meta.info, &self.config.download_dir).await?);
 
-        let handle = torrent::TorrentHandle::new(meta, info_hash, storage, &self.config);
+        let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
         self.torrents.write().await.insert(info_hash, handle);
 
         Ok(info_hash)

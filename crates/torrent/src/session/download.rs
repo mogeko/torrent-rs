@@ -826,6 +826,41 @@ fn verify_piece_hash(data: &[u8], expected: [u8; 20]) -> bool {
     computed == expected
 }
 
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn peer_info_default_state() {
+        let pi = PeerInfo::new();
+        assert!(pi.am_choked);
+        assert!(!pi.am_interested);
+        assert!(!pi.peer_interested);
+        assert!(pi.bitfield.is_empty());
+        assert_eq!(pi.uploaded_bytes, 0);
+        assert_eq!(pi.downloaded_bytes, 0);
+    }
+
+    #[test]
+    fn active_download_has_expected_fields() {
+        let dl = ActiveDownload {
+            index: 42,
+            data: vec![0u8; 16000],
+            received: vec![false; 1],
+            block_size: 16384,
+            num_blocks: 1,
+            requested_from: HashSet::new(),
+        };
+        // Verify the index and block metadata are set correctly
+        assert_eq!(dl.index, 42);
+        assert_eq!(dl.num_blocks, 1);
+        assert_eq!(dl.block_size, 16384);
+        assert_eq!(dl.data.len(), 16000);
+        assert_eq!(dl.received.len(), 1);
+        assert_eq!(dl.requested_from.len(), 0);
+    }
+}
+
 /// Parse bitfield bytes into a `Vec<bool>`.
 fn parse_bitfield(bytes: &[u8], num_pieces: usize) -> Vec<bool> {
     let mut bf = vec![false; num_pieces];

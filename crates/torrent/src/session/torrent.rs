@@ -16,7 +16,6 @@ use super::upload::UploadManager;
 use super::{SessionConfig, TorrentState, TorrentStatus};
 
 /// Commands sent to the download loop.
-#[allow(dead_code)]
 pub(crate) enum TorrentCommand {
     Pause,
     Resume,
@@ -147,5 +146,22 @@ impl TorrentHandle {
     /// Get the current status.
     pub async fn status(&self) -> TorrentStatus {
         self.status.read().await.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn torrent_command_variants() {
+        // Verify all enum variants are constructible
+        let pause = TorrentCommand::Pause;
+        let resume = TorrentCommand::Resume;
+        let cancel = TorrentCommand::Cancel;
+        match pause {
+            TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Cancel => {}
+        }
+        let _ = (pause, resume, cancel);
     }
 }

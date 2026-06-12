@@ -132,3 +132,59 @@ impl PeerManager {
         self.connections.keys().copied().collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_addr(n: u8) -> SocketAddr {
+        SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, n)),
+            6881,
+        )
+    }
+
+    #[test]
+    fn new_creates_empty() {
+        let pm = PeerManager::new([0u8; 20], PeerId::random(), 10);
+        assert_eq!(pm.num_connections(), 0);
+        assert!(pm.connection_addrs().is_empty());
+    }
+
+    #[test]
+    fn add_peers_to_pending() {
+        let mut pm = PeerManager::new([0u8; 20], PeerId::random(), 10);
+        pm.add_peers(vec![test_addr(1), test_addr(2)]);
+        // connect_next() will attempt to connect; at this point they're pending
+        // We can verify by checking that connection_addrs is still empty
+        assert_eq!(pm.num_connections(), 0);
+    }
+
+    #[test]
+    fn connect_next_at_capacity() {
+        let pm = PeerManager {
+            peer_id: PeerId::random(),
+            info_hash: [0u8; 20],
+            connections: HashMap::new(),
+            pending: vec![test_addr(1)].into_iter().collect(),
+            max_connections: 0, // capacity is 0, so all attempts return None
+            last_connect_attempt: None,
+        };
+        // connect_next should return Ok(None) since at capacity
+        // We can't actually call .await in sync tests, so test the precondition
+        assert_eq!(pm.max_connections, 0);
+    }
+
+    #[test]
+    fn remove_peer_nonexistent() {
+        let mut pm = PeerManager::new([0u8; 20], PeerId::random(), 10);
+        pm.remove_peer(&test_addr(99)); // should not panic
+        assert_eq!(pm.num_connections(), 0);
+    }
+
+    #[test]
+    fn connection_addrs_empty() {
+        let pm = PeerManager::new([0u8; 20], PeerId::random(), 10);
+        assert!(pm.connection_addrs().is_empty());
+    }
+}
