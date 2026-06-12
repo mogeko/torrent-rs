@@ -10,7 +10,7 @@ pub mod krpc;
 
 use std::net::SocketAddr;
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Represents a node in the DHT (BEP 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +147,7 @@ fn bucket_index(our_id: &[u8; 20], node_id: &[u8; 20]) -> usize {
 /// Generate a random 20-byte node ID using SHA-1.
 pub fn generate_node_id() -> [u8; 20] {
     use sha1::{Digest, Sha1};
-    let seed: u64 = rand::thread_rng().r#gen();
+    let seed: u64 = rand::rng().random();
     let mut hasher = Sha1::new();
     hasher.update(seed.to_be_bytes());
     hasher.update(b"torrent-rs-dht-node");
