@@ -8,9 +8,8 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use crate::error::Error;
 use crate::metainfo::Metainfo;
 use crate::peer::{PeerConnection, PeerMessage};
-use crate::piece::{PieceManager, PieceSelector};
-use crate::storage::FileStorage;
-use crate::storage::Storage;
+use crate::piece::{EndGame, PieceManager, PieceSelector};
+use crate::storage::{FileStorage, Storage};
 
 use super::peer_manager::PeerManager;
 use super::torrent::TorrentCommand;
@@ -86,6 +85,10 @@ pub(crate) struct DownloadLoop {
     /// Clone for spawning new reader tasks.
     pub(crate) peer_msg_tx: mpsc::UnboundedSender<(SocketAddr, PeerEvent)>,
 }
+
+/// When fewer than this many pieces remain, switch to EndGame mode
+/// (send duplicate requests to multiple peers simultaneously).
+const ENDGAME_THRESHOLD: usize = 10;
 
 impl DownloadLoop {
     /// Run the main download loop.
@@ -236,7 +239,7 @@ impl DownloadLoop {
                 self.storage.write_block(index, begin, &data).await?;
 
                 // Update active download
-                if let Some(dl) = self.active_downloads.get_mut(&index) {
+                let piece_complete = if let Some(dl) = self.active_downloads.get_mut(&index) {
                     let block_idx = (begin / dl.block_size) as usize;
                     if block_idx < dl.received.len() {
                         let start = begin as usize;
@@ -245,13 +248,14 @@ impl DownloadLoop {
                             dl.data[start..end].copy_from_slice(&data);
                         }
                         dl.received[block_idx] = true;
-
-                        // Check if all blocks received
-                        if dl.received.iter().all(|&r| r) {
-                            self.active_downloads.remove(&index);
-                            // TODO Phase 2: SHA-1 verification and set_piece()
-                        }
                     }
+                    dl.received.iter().all(|&r| r)
+                } else {
+                    false
+                };
+
+                if piece_complete && self.verify_and_complete_piece(index).await? {
+                    self.broadcast_have(index).await?;
                 }
             }
             PeerMessage::Request { .. } | PeerMessage::Cancel { .. } | PeerMessage::Port(_) => {
@@ -265,7 +269,10 @@ impl DownloadLoop {
     // ── Piece requesting ──────────────────────────────────────────
 
     /// If no active download and not complete, select the next piece
-    /// and request its blocks from a suitable peer.
+    /// and request its blocks from suitable peers.
+    ///
+    /// In EndGame mode (fewer than `ENDGAME_THRESHOLD` pieces remaining),
+    /// requests are sent to multiple peers simultaneously.
     async fn maybe_request_piece(&mut self) -> Result<(), Error> {
         let missing = {
             let pm = self.piece_mgr.read().await;
@@ -275,25 +282,56 @@ impl DownloadLoop {
             return Ok(());
         }
 
+        // Check EndGame threshold
+        let remaining = missing.len();
+        let in_endgame = remaining < ENDGAME_THRESHOLD;
+        if in_endgame {
+            self.selector = Box::new(EndGame);
+        }
+
         let local_bf = {
             let pm = self.piece_mgr.read().await;
             pm.bitfield().to_vec()
         };
 
-        // Find a suitable piece-peer pair
-        let mut selected: Option<(SocketAddr, u32)> = None;
-        for (addr, peer) in &self.peers {
+        // Find a suitable piece
+        let mut piece_idx: Option<u32> = None;
+        for peer in self.peers.values() {
             if peer.am_choked || peer.bitfield.is_empty() {
                 continue;
             }
             if let Some(idx) = self.selector.select(&peer.bitfield, &local_bf) {
-                selected = Some((*addr, idx));
+                piece_idx = Some(idx);
                 break;
             }
         }
 
-        if let Some((addr, idx)) = selected {
-            self.request_piece_from(&addr, idx).await?;
+        if let Some(idx) = piece_idx {
+            if in_endgame {
+                // EndGame: request from ALL peers that have this piece
+                let request_addrs: Vec<SocketAddr> = self
+                    .peers
+                    .iter()
+                    .filter(|(_, p)| {
+                        !p.am_choked
+                            && !p.bitfield.is_empty()
+                            && (idx as usize) < p.bitfield.len()
+                            && p.bitfield[idx as usize]
+                    })
+                    .map(|(a, _)| *a)
+                    .collect();
+                for addr in &request_addrs {
+                    self.request_piece_from(addr, idx).await?;
+                }
+            } else if let Some((addr, _)) = self.peers.iter().find(|(_, p)| {
+                !p.am_choked
+                    && !p.bitfield.is_empty()
+                    && (idx as usize) < p.bitfield.len()
+                    && p.bitfield[idx as usize]
+            }) {
+                let addr = *addr;
+                self.request_piece_from(&addr, idx).await?;
+            }
         }
 
         Ok(())
@@ -332,6 +370,45 @@ impl DownloadLoop {
         }
 
         self.active_downloads.insert(index, dl);
+        Ok(())
+    }
+
+    // ── Piece verification ───────────────────────────────────────
+
+    /// Verify SHA-1 hash of a completed piece and mark it as done.
+    ///
+    /// Returns `true` if the piece passed verification and was marked complete.
+    /// Returns `false` if verification failed (the download will be discarded).
+    async fn verify_and_complete_piece(&mut self, index: u32) -> Result<bool, Error> {
+        let piece_len = self.piece_len_for_index(index) as usize;
+
+        let data = match self.active_downloads.get(&index) {
+            Some(dl) => dl.data[..piece_len].to_vec(),
+            None => return Ok(false),
+        };
+
+        let expected = self.metainfo.info.pieces[index as usize];
+
+        if verify_piece_hash(&data, expected) {
+            {
+                let mut pm = self.piece_mgr.write().await;
+                pm.set_piece(index);
+            }
+            self.active_downloads.remove(&index);
+            Ok(true)
+        } else {
+            self.active_downloads.remove(&index);
+            Ok(false)
+        }
+    }
+
+    /// Send a Have message to all connected peers.
+    async fn broadcast_have(&self, index: u32) -> Result<(), Error> {
+        let msg = PeerMessage::Have(index);
+        let pm = self.peer_mgr.read().await;
+        for addr in pm.connection_addrs() {
+            let _ = pm.send_to(&addr, &msg).await;
+        }
         Ok(())
     }
 
@@ -396,6 +473,15 @@ impl DownloadLoop {
     }
 }
 
+/// Compute SHA-1 of `data` and compare with `expected`.
+fn verify_piece_hash(data: &[u8], expected: [u8; 20]) -> bool {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    let computed: [u8; 20] = hasher.finalize().into();
+    computed == expected
+}
+
 /// Parse bitfield bytes into a `Vec<bool>`.
 fn parse_bitfield(bytes: &[u8], num_pieces: usize) -> Vec<bool> {
     let mut bf = vec![false; num_pieces];
@@ -407,4 +493,105 @@ fn parse_bitfield(bytes: &[u8], num_pieces: usize) -> Vec<bool> {
         }
     }
     bf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_piece_hash_match() {
+        let data = b"hello world test piece data";
+        let expected = {
+            use sha1::{Digest, Sha1};
+            let mut h = Sha1::new();
+            h.update(data);
+            h.finalize().into()
+        };
+        assert!(verify_piece_hash(data, expected));
+    }
+
+    #[test]
+    fn verify_piece_hash_mismatch() {
+        let data = b"hello world";
+        let expected = [0xFFu8; 20];
+        assert!(!verify_piece_hash(data, expected));
+    }
+
+    #[test]
+    fn verify_piece_hash_empty() {
+        let data = b"";
+        let expected = {
+            use sha1::{Digest, Sha1};
+            let mut h = Sha1::new();
+            h.update(b"");
+            h.finalize().into()
+        };
+        assert!(verify_piece_hash(data, expected));
+    }
+
+    #[test]
+    fn verify_piece_hash_binary_data() {
+        let data = [0x00u8, 0xFF, 0x42, 0x7F, 0x80];
+        let expected = {
+            use sha1::{Digest, Sha1};
+            let mut h = Sha1::new();
+            h.update(&data);
+            h.finalize().into()
+        };
+        assert!(verify_piece_hash(&data, expected));
+    }
+
+    #[test]
+    fn verify_piece_hash_wrong_hash() {
+        let data = b"correct data";
+        let wrong_data = b"wrong data";
+        let wrong_hash = {
+            use sha1::{Digest, Sha1};
+            let mut h = Sha1::new();
+            h.update(wrong_data);
+            h.finalize().into()
+        };
+        assert!(!verify_piece_hash(data, wrong_hash));
+    }
+
+    #[test]
+    fn parse_bitfield_all_set() {
+        let bytes = vec![0xFF, 0xFF];
+        let bf = parse_bitfield(&bytes, 16);
+        assert_eq!(bf.len(), 16);
+        assert!(bf.iter().all(|&b| b));
+    }
+
+    #[test]
+    fn parse_bitfield_none_set() {
+        let bytes = vec![0x00, 0x00];
+        let bf = parse_bitfield(&bytes, 16);
+        assert_eq!(bf.len(), 16);
+        assert!(bf.iter().all(|&b| !b));
+    }
+
+    #[test]
+    fn parse_bitfield_partial() {
+        // 0x80 = 10000000 → only first piece set
+        let bytes = vec![0x80, 0x00];
+        let bf = parse_bitfield(&bytes, 16);
+        assert_eq!(bf.len(), 16);
+        assert!(bf[0]);
+        assert!(!bf[1]);
+        assert!(!bf[7]);
+        assert!(!bf[8]);
+    }
+
+    #[test]
+    fn parse_bitfield_shorter_than_requested() {
+        // Only 1 byte provided, but asking for 16 pieces
+        let bytes = vec![0xFF];
+        let bf = parse_bitfield(&bytes, 16);
+        assert_eq!(bf.len(), 16);
+        // First 8 pieces should be set (from 0xFF)
+        assert!(bf[0..8].iter().all(|&b| b));
+        // Last 8 pieces should be false (no data)
+        assert!(bf[8..16].iter().all(|&b| !b));
+    }
 }
