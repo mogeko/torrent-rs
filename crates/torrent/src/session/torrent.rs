@@ -3,10 +3,10 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::error::{Error, ErrorKind};
-use crate::metainfo::Metainfo;
+use crate::metainfo::{Metainfo, Mode};
 use crate::peer::PeerId;
+use crate::piece::PieceManager;
 use crate::storage::FileStorage;
-use crate::storage::PieceManager;
 
 use super::download::DownloadLoop;
 use super::peer_manager::PeerManager;
@@ -45,8 +45,7 @@ impl TorrentHandle {
     ) -> Self {
         let num_pieces = metainfo.info.num_pieces();
         let name = match &metainfo.info.mode {
-            crate::metainfo::Mode::Single { name, .. }
-            | crate::metainfo::Mode::Multiple { name, .. } => name.clone(),
+            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
         };
 
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));

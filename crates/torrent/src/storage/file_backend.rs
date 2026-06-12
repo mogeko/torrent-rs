@@ -1,8 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::Error;
 use crate::metainfo::{Info, Mode};
 use crate::storage::Storage;
 
@@ -19,8 +19,6 @@ pub struct FileStorage {
     total_size: u64,
     /// File layout mode (single or multi-file).
     mode: StorageMode,
-    /// Piece manager tracking download progress.
-    piece_mgr: std::sync::Mutex<super::PieceManager>,
 }
 
 enum StorageMode {
@@ -35,7 +33,7 @@ struct StorageFile {
 
 impl FileStorage {
     /// Create a new FileStorage from metainfo info.
-    pub async fn new(info: &Info, download_dir: &std::path::Path) -> Result<Self, Error> {
+    pub async fn new(info: &Info, download_dir: &Path) -> Result<Self, Error> {
         let root = download_dir.to_path_buf();
 
         let num_pieces = info.num_pieces();
@@ -43,27 +41,19 @@ impl FileStorage {
         let total_size = info.total_size();
 
         // Create download directory
-        fs::create_dir_all(&root)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+        fs::create_dir_all(&root).await?;
 
         let mode = match &info.mode {
             Mode::Single { name, length } => {
                 let path = root.join(name);
                 // Create and preallocate
-                let f = fs::File::create_new(&path)
-                    .await
-                    .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
-                f.set_len(*length)
-                    .await
-                    .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                let f = fs::File::create_new(&path).await?;
+                f.set_len(*length).await?;
                 StorageMode::SingleFile { path }
             }
             Mode::Multiple { name, files } => {
                 let dir = root.join(name);
-                fs::create_dir_all(&dir)
-                    .await
-                    .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                fs::create_dir_all(&dir).await?;
 
                 let mut storage_files = Vec::with_capacity(files.len());
                 for file_info in files {
@@ -73,16 +63,10 @@ impl FileStorage {
                     }
                     // Ensure parent directories exist
                     if let Some(parent) = file_path.parent() {
-                        fs::create_dir_all(parent)
-                            .await
-                            .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                        fs::create_dir_all(parent).await?;
                     }
-                    let f = fs::File::create_new(&file_path)
-                        .await
-                        .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
-                    f.set_len(file_info.length)
-                        .await
-                        .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                    let f = fs::File::create_new(&file_path).await?;
+                    f.set_len(file_info.length).await?;
                     storage_files.push(StorageFile {
                         path: file_path,
                         length: file_info.length,
@@ -100,7 +84,6 @@ impl FileStorage {
             piece_length,
             total_size,
             mode,
-            piece_mgr: std::sync::Mutex::new(super::PieceManager::new(num_pieces)),
         })
     }
 
@@ -120,10 +103,6 @@ impl Storage for FileStorage {
     async fn write_block(&self, piece: u32, offset: u32, data: &[u8]) -> Result<(), Error> {
         let global_offset = self.piece_offset(piece) + offset as u64;
         self.write_range(global_offset, data).await
-    }
-
-    fn has_piece(&self, index: u32) -> bool {
-        self.piece_mgr.lock().unwrap().has_piece(index)
     }
 
     fn num_pieces(&self) -> usize {
@@ -154,29 +133,23 @@ impl FileStorage {
     async fn read_range(&self, offset: u64, len: usize, buf: &mut [u8]) -> Result<(), Error> {
         match &self.mode {
             StorageMode::SingleFile { path } => {
-                let f = fs::File::open(path)
-                    .await
-                    .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                let f = fs::File::open(path).await?;
                 let sync_f = f.into_std().await;
-                std::os::unix::fs::FileExt::read_exact_at(&sync_f, buf, offset)
-                    .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                std::os::unix::fs::FileExt::read_exact_at(&sync_f, buf, offset)?;
                 Ok(())
             }
             StorageMode::MultiFile { files } => {
                 let ranges = map_byte_range(offset, len as u64, files);
                 let mut buf_offset = 0;
                 for (path, file_offset, read_len) in ranges {
-                    let f = fs::File::open(&path)
-                        .await
-                        .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                    let f = fs::File::open(&path).await?;
                     let sync_f = f.into_std().await;
                     let end = std::cmp::min(buf_offset + read_len as usize, buf.len());
                     std::os::unix::fs::FileExt::read_exact_at(
                         &sync_f,
                         &mut buf[buf_offset..end],
                         file_offset,
-                    )
-                    .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                    )?;
                     buf_offset += read_len as usize;
                 }
                 Ok(())
@@ -188,33 +161,23 @@ impl FileStorage {
     async fn write_range(&self, offset: u64, data: &[u8]) -> Result<(), Error> {
         match &self.mode {
             StorageMode::SingleFile { path } => {
-                let f = fs::OpenOptions::new()
-                    .write(true)
-                    .open(path)
-                    .await
-                    .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                let f = fs::OpenOptions::new().write(true).open(path).await?;
                 let sync_f = f.into_std().await;
-                std::os::unix::fs::FileExt::write_all_at(&sync_f, data, offset)
-                    .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                std::os::unix::fs::FileExt::write_all_at(&sync_f, data, offset)?;
                 Ok(())
             }
             StorageMode::MultiFile { files } => {
                 let ranges = map_byte_range(offset, data.len() as u64, files);
                 let mut data_offset = 0;
                 for (path, file_offset, write_len) in ranges {
-                    let f = fs::OpenOptions::new()
-                        .write(true)
-                        .open(&path)
-                        .await
-                        .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                    let f = fs::OpenOptions::new().write(true).open(&path).await?;
                     let sync_f = f.into_std().await;
                     let end = std::cmp::min(data_offset + write_len as usize, data.len());
                     std::os::unix::fs::FileExt::write_all_at(
                         &sync_f,
                         &data[data_offset..end],
                         file_offset,
-                    )
-                    .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+                    )?;
                     data_offset += write_len as usize;
                 }
                 Ok(())

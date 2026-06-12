@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::error::Error;
-use crate::metainfo::{Metainfo, from_bytes as parse_metainfo};
+use crate::error::{Error, ErrorKind};
+use crate::metainfo::{Metainfo, Mode, from_bytes as parse_metainfo};
 use crate::peer::PeerId;
 use crate::storage::FileStorage;
 
@@ -148,8 +148,7 @@ impl Session {
     pub async fn add_torrent(&self, meta: Metainfo) -> Result<InfoHash, Error> {
         let info_hash = meta.info_hash();
         let _name = match &meta.info.mode {
-            crate::metainfo::Mode::Single { name, .. }
-            | crate::metainfo::Mode::Multiple { name, .. } => name.clone(),
+            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
         };
 
         // Create FileStorage
@@ -181,7 +180,7 @@ impl Session {
         let torrents = self.torrents.read().await;
         let handle = torrents
             .get(info_hash)
-            .ok_or(Error::new(crate::error::ErrorKind::InvalidInput))?;
+            .ok_or(Error::new(ErrorKind::InvalidInput))?;
         Ok(handle.status().await)
     }
 

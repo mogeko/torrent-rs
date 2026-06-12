@@ -68,7 +68,7 @@ impl UdpTracker {
         // Resolve hostname — try every address returned by DNS.
         for addr in lookup_host((host, port))
             .await
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?
+            .map_err(Error::tracker_failed)?
         {
             // Bind a socket matching this address family.
             let bind_addr = SocketAddr::new(
@@ -82,7 +82,7 @@ impl UdpTracker {
             let socket = match UdpSocket::bind(bind_addr).await {
                 Ok(s) => s,
                 Err(e) => {
-                    last_err = Some(Error::with_source(ErrorKind::TrackerRequestFailed, e));
+                    last_err = Some(Error::tracker_failed(e));
                     continue;
                 }
             };
@@ -102,7 +102,7 @@ impl UdpTracker {
 
             for _ in 0..MAX_RETRIES {
                 if let Err(e) = socket.send_to(&announce_packet, addr).await {
-                    last_err = Some(Error::with_source(ErrorKind::TrackerRequestFailed, e));
+                    last_err = Some(Error::tracker_failed(e));
                     break;
                 }
 
@@ -130,7 +130,7 @@ async fn connect(socket: &UdpSocket, addr: SocketAddr) -> Result<u64, Error> {
         socket
             .send_to(&connect_packet, addr)
             .await
-            .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+            .map_err(Error::tracker_failed)?;
 
         let mut buf = vec![0u8; 16];
         match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {

@@ -7,7 +7,7 @@
 //! # Re-exports
 //!
 //! Commonly used core types are re-exported for convenience:
-//! - [`bencode`], [`error`], [`metainfo`], [`magnet`] from `torrent_core`
+//! - [`bencode`], [`error`], [`magnet`], [`metainfo`], [`piece`] from `torrent_core`
 //!
 //! # Quick Start
 //!
@@ -28,7 +28,7 @@
 //! ```
 
 // Re-export key core types so users only need `torrent` as a dependency.
-pub use torrent_core::{bencode, error, magnet, metainfo};
+pub use torrent_core::{bencode, error, magnet, metainfo, piece};
 
 pub mod dht;
 pub mod peer;

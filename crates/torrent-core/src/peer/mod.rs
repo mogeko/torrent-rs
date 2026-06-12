@@ -17,7 +17,7 @@ pub use self::message::{PeerMessage, decode, encode};
 
 use std::fmt;
 
-use rand::Rng;
+use rand::RngExt;
 
 /// A 20-byte peer identifier (BEP 3).
 ///
@@ -42,13 +42,13 @@ impl PeerId {
     ///
     /// Format: `-TR1000-<12 random alphanumeric chars>`.
     pub fn random() -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut bytes = [0u8; 20];
         let prefix = b"-TR1000-";
         bytes[..8].copy_from_slice(prefix);
         const CHARSET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
         for byte in bytes.iter_mut().skip(8) {
-            let idx = rng.gen_range(0..CHARSET.len());
+            let idx = rng.random_range(0..CHARSET.len());
             *byte = CHARSET[idx];
         }
         PeerId(bytes)

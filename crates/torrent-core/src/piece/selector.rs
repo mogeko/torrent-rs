@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 
 /// Trait for piece selection strategies (BEP 3).
 pub trait PieceSelector: Send {
@@ -54,7 +54,7 @@ impl PieceSelector for RandomFirst {
             return None;
         }
 
-        let idx = rand::thread_rng().gen_range(0..available.len());
+        let idx = rand::rng().random_range(0..available.len());
         Some(available[idx])
     }
 }

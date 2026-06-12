@@ -1,0 +1,73 @@
+/// Tracks which pieces have been downloaded and manages the bitfield.
+pub struct PieceManager {
+    pub num_pieces: usize,
+    /// Bitfield: true = have the piece, false = missing.
+    bitfield: Vec<bool>,
+}
+
+impl PieceManager {
+    /// Create a new PieceManager with all pieces marked as missing.
+    pub fn new(num_pieces: usize) -> Self {
+        PieceManager {
+            num_pieces,
+            bitfield: vec![false; num_pieces],
+        }
+    }
+
+    /// Mark a piece as completed.
+    pub fn set_piece(&mut self, index: u32) {
+        let i = index as usize;
+        if i < self.num_pieces {
+            self.bitfield[i] = true;
+        }
+    }
+
+    /// Check if a piece is completed.
+    pub fn has_piece(&self, index: u32) -> bool {
+        let i = index as usize;
+        i < self.num_pieces && self.bitfield[i]
+    }
+
+    /// Return all completed piece indices.
+    pub fn completed_pieces(&self) -> Vec<u32> {
+        self.bitfield
+            .iter()
+            .enumerate()
+            .filter(|&(_, have)| *have)
+            .map(|(i, _)| i as u32)
+            .collect()
+    }
+
+    /// Return all missing piece indices.
+    pub fn missing_pieces(&self) -> Vec<u32> {
+        self.bitfield
+            .iter()
+            .enumerate()
+            .filter(|&(_, have)| !*have)
+            .map(|(i, _)| i as u32)
+            .collect()
+    }
+
+    /// Progress as a float 0.0..=1.0.
+    pub fn progress(&self) -> f64 {
+        if self.num_pieces == 0 {
+            return 1.0;
+        }
+        let have = self.bitfield.iter().filter(|&&b| b).count();
+        have as f64 / self.num_pieces as f64
+    }
+
+    /// Export bitfield as bytes (for Bitfield message).
+    pub fn to_bitfield(&self) -> Vec<u8> {
+        let byte_count = self.num_pieces.div_ceil(8);
+        let mut bytes = vec![0u8; byte_count];
+        for (i, &have) in self.bitfield.iter().enumerate() {
+            if have {
+                let byte = i / 8;
+                let bit = 7 - (i % 8);
+                bytes[byte] |= 1 << bit;
+            }
+        }
+        bytes
+    }
+}

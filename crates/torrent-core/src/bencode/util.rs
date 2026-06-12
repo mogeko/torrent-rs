@@ -1,13 +1,13 @@
 use bytes::Bytes;
 
-use crate::bencode::Bencode;
+use crate::bencode::{self, Bencode};
 use crate::error::{Error, ErrorKind};
 
 /// Decode a bencoded byte string directly to a `String`.
 ///
 /// Returns an error if the value is not a byte string or contains invalid UTF-8.
 pub fn decode_str(data: &[u8]) -> Result<String, Error> {
-    let (val, _rest) = crate::bencode::decode(data)?;
+    let (val, _rest) = bencode::decode(data)?;
     match val {
         Bencode::Bytes(b) => {
             String::from_utf8(b.to_vec()).map_err(|_| Error::new(ErrorKind::InvalidInput))
@@ -18,7 +18,7 @@ pub fn decode_str(data: &[u8]) -> Result<String, Error> {
 
 /// Encode a `&str` as a bencoded byte string.
 pub fn encode_str(s: &str) -> Vec<u8> {
-    crate::bencode::encode(&Bencode::Bytes(Bytes::copy_from_slice(s.as_bytes())))
+    bencode::encode(&Bencode::Bytes(Bytes::copy_from_slice(s.as_bytes())))
 }
 
 /// Get a value by key from a bencoded dictionary.

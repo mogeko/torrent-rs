@@ -11,16 +11,17 @@ also be used standalone when only low-level parsing or encoding is needed.
 
 ## Modules
 
-| Module                       | Description                                         | BEP           |
-| ---------------------------- | --------------------------------------------------- | ------------- |
-| [`bencode`](./src/bencode)   | Bencode encoding/decoding with strict validation    | BEP 3         |
-| [`error`](./src/error.rs)    | Error + ErrorKind (kind + source pattern)           | —             |
-| [`metainfo`](./src/metainfo) | `.torrent` file parsing, `info_hash()`              | BEP 3, 12, 52 |
-| [`magnet`](./src/magnet)     | Magnet URI parsing (hex + base32)                   | BEP 9         |
-| [`peer`](./src/peer)         | Handshake, 11 wire message types, PeerId            | BEP 3         |
-| [`dht`](./src/dht)           | KRPC message format, Kademlia RoutingTable          | BEP 5         |
-| [`tracker`](./src/tracker)   | Announce request/response data types                | BEP 3, 15, 23 |
-| [`storage`](./src/storage)   | Storage trait, PieceManager, 4 selection strategies | BEP 3         |
+| Module                       | Description                                           | BEP           |
+| ---------------------------- | ----------------------------------------------------- | ------------- |
+| [`bencode`](./src/bencode)   | Bencode encoding/decoding with strict validation      | BEP 3         |
+| [`error`](./src/error.rs)    | Error + ErrorKind (kind + source pattern)             | —             |
+| [`metainfo`](./src/metainfo) | `.torrent` file parsing, `info_hash()`                | BEP 3, 12, 52 |
+| [`magnet`](./src/magnet)     | Magnet URI parsing (hex + base32)                     | BEP 9         |
+| [`peer`](./src/peer)         | Handshake, 11 wire message types, PeerId              | BEP 3         |
+| [`dht`](./src/dht)           | KRPC message format, Kademlia RoutingTable            | BEP 5         |
+| [`tracker`](./src/tracker)   | Announce request/response data types                  | BEP 3, 15, 23 |
+| [`piece`](./src/piece)       | PieceManager (bitfield), PieceSelector + 4 strategies | BEP 3         |
+| [`storage`](./src/storage)   | Storage trait for piece read/write                    | BEP 3         |
 
 ## Quick Start
 
@@ -110,7 +111,7 @@ assert_eq!(rt.num_nodes(), 1);
 ### Storage
 
 ```rust
-use torrent_core::storage::PieceManager;
+use torrent_core::piece::PieceManager;
 
 let mut pm = PieceManager::new(10);
 pm.set_piece(0);
