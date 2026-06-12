@@ -17,9 +17,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 impl DhtRpc {
     /// Create a new DHT RPC client bound to a local address.
     pub async fn new(bind_addr: SocketAddr) -> Result<Self, Error> {
-        let socket = UdpSocket::bind(bind_addr)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::Io, e))?;
+        let socket = UdpSocket::bind(bind_addr).await?;
         Ok(DhtRpc { socket })
     }
 
@@ -34,16 +32,15 @@ impl DhtRpc {
         expected_tid: TransactionId,
         data: &[u8],
     ) -> Result<KrpcMessage, Error> {
-        self.socket
-            .send_to(data, addr)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::Protocol, e))?;
+        if let Err(e) = self.socket.send_to(data, addr).await {
+            return Err(Error::with_source(ErrorKind::Protocol, e));
+        }
 
         let mut buf = [0u8; 2048];
         let (len, _src) = tokio::time::timeout(RPC_TIMEOUT, self.socket.recv_from(&mut buf))
             .await
             .map_err(|_| Error::new(ErrorKind::Protocol))?
-            .map_err(|e| Error::with_source(ErrorKind::Protocol, e))?;
+            .map_err(Error::protocol)?;
 
         let response = KrpcMessage::from_bytes(&buf[..len])?;
 

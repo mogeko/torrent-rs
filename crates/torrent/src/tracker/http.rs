@@ -100,7 +100,7 @@ impl HttpTracker {
         let response = tokio::time::timeout(TIMEOUT, async move {
             let tcp_stream = TcpStream::connect((host, port))
                 .await
-                .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+                .map_err(Error::tracker_failed)?;
 
             // Conditionally wrap the TCP stream in TLS for `https://` URLs.
             let mut stream: Box<dyn TrackerStream> = if let Some(ref connector) = tls {
@@ -109,7 +109,7 @@ impl HttpTracker {
                 let tls_stream = connector
                     .connect(domain, tcp_stream)
                     .await
-                    .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+                    .map_err(Error::tracker_failed)?;
                 Box::new(tls_stream)
             } else {
                 Box::new(tcp_stream)
@@ -118,7 +118,7 @@ impl HttpTracker {
             stream
                 .write_all(request.as_bytes())
                 .await
-                .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+                .map_err(Error::tracker_failed)?;
 
             // Limit read size to prevent OOM.
             let mut buf = Vec::new();
@@ -127,7 +127,7 @@ impl HttpTracker {
             limited
                 .read_to_end(&mut buf)
                 .await
-                .map_err(|e| Error::with_source(ErrorKind::TrackerRequestFailed, e))?;
+                .map_err(Error::tracker_failed)?;
 
             Ok(buf)
         })
@@ -166,9 +166,7 @@ fn build_tls_connector() -> Result<tokio_rustls::TlsConnector, Error> {
 
     let native_certs = rustls_native_certs::load_native_certs();
     for cert in native_certs.certs {
-        root_store
-            .add(cert)
-            .map_err(|e| Error::with_source(ErrorKind::InvalidInput, e))?;
+        root_store.add(cert).map_err(Error::invalid_input)?;
     }
 
     let config = rustls::ClientConfig::builder()

@@ -1,4 +1,4 @@
-use crate::error::{Error, ErrorKind};
+use crate::error::Error;
 use crate::tracker::Url;
 
 /// Convert a type into a tracker URL.
@@ -19,7 +19,7 @@ impl IntoUrl for Url {
 
 impl IntoUrl for &str {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse(self).map_err(|e| Error::with_source(ErrorKind::InvalidInput, e))
+        Url::parse(self).map_err(Error::invalid_input)
     }
 }
 

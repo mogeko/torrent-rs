@@ -26,9 +26,7 @@ impl PeerConnection {
         info_hash: [u8; 20],
         our_peer_id: PeerId,
     ) -> Result<Self, Error> {
-        let raw_stream = TcpStream::connect(addr)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+        let raw_stream = TcpStream::connect(addr).await.map_err(Error::peer_closed)?;
 
         let stream = BufReader::new(BufWriter::new(raw_stream));
 
@@ -43,16 +41,14 @@ impl PeerConnection {
         // Send our handshake
         let handshake = Handshake::new(info_hash, our_peer_id.0);
         let handshake_bytes = handshake.to_bytes();
-        conn.stream
-            .get_mut()
-            .write_all(&handshake_bytes)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
-        conn.stream
-            .get_mut()
-            .flush()
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+
+        if let Err(e) = conn.stream.get_mut().write_all(&handshake_bytes).await {
+            return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
+        }
+
+        if let Err(e) = conn.stream.get_mut().flush().await {
+            return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
+        }
 
         // Read remote handshake
         let mut buf = [0u8; 68];
@@ -73,16 +69,15 @@ impl PeerConnection {
     /// Send a message to the peer.
     pub async fn send(&mut self, msg: &PeerMessage) -> Result<(), Error> {
         let data = encode(msg);
-        self.stream
-            .get_mut()
-            .write_all(&data)
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
-        self.stream
-            .get_mut()
-            .flush()
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+
+        if let Err(e) = self.stream.get_mut().write_all(&data).await {
+            return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
+        }
+
+        if let Err(e) = self.stream.get_mut().flush().await {
+            return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
+        }
+
         Ok(())
     }
 
@@ -128,9 +123,9 @@ impl PeerConnection {
 
 /// Read exactly `n` bytes from the buffered stream.
 async fn read_exact(conn: &mut PeerConnection, buf: &mut [u8]) -> Result<(), Error> {
-    conn.stream
-        .read_exact(buf)
-        .await
-        .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+    if let Err(e) = conn.stream.read_exact(buf).await {
+        return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
+    }
+
     Ok(())
 }

@@ -45,8 +45,8 @@ use std::fmt;
 /// ```
 #[derive(Debug)]
 pub struct Error {
-    kind: ErrorKind,
     source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    kind: ErrorKind,
 }
 
 /// Categorization of errors produced by the torrent library.
@@ -58,10 +58,6 @@ pub enum ErrorKind {
     BencodeInvalidInteger,
     BencodeUnexpectedEof,
     BencodeIntegerOverflow,
-    // Placeholder categories for future phases
-    Io,
-    InvalidInput,
-    Protocol,
     // Metainfo errors
     MetainfoMissingField,
     MetainfoInvalidField,
@@ -74,6 +70,10 @@ pub enum ErrorKind {
     TrackerInvalidResponse,
     TrackerRequestFailed,
     TrackerProtocolError,
+    // Placeholder categories for future phases
+    Io,
+    InvalidInput,
+    Protocol,
 }
 
 impl fmt::Display for Error {
@@ -83,9 +83,6 @@ impl fmt::Display for Error {
             ErrorKind::BencodeInvalidInteger => write!(f, "invalid bencode integer"),
             ErrorKind::BencodeUnexpectedEof => write!(f, "unexpected end of bencode data"),
             ErrorKind::BencodeIntegerOverflow => write!(f, "bencode integer overflow"),
-            ErrorKind::Io => write!(f, "I/O error"),
-            ErrorKind::InvalidInput => write!(f, "invalid input"),
-            ErrorKind::Protocol => write!(f, "protocol error"),
             ErrorKind::MetainfoMissingField => write!(f, "missing required metainfo field"),
             ErrorKind::MetainfoInvalidField => write!(f, "invalid metainfo field"),
             ErrorKind::MetainfoInvalidPieces => write!(f, "invalid pieces length in metainfo"),
@@ -95,6 +92,9 @@ impl fmt::Display for Error {
             ErrorKind::TrackerInvalidResponse => write!(f, "invalid tracker response"),
             ErrorKind::TrackerRequestFailed => write!(f, "tracker request failed"),
             ErrorKind::TrackerProtocolError => write!(f, "tracker protocol error"),
+            ErrorKind::Io => write!(f, "I/O error"),
+            ErrorKind::InvalidInput => write!(f, "invalid input"),
+            ErrorKind::Protocol => write!(f, "protocol error"),
         }?;
         if let Some(ref source) = self.source {
             write!(f, ": {source}")?;
@@ -110,9 +110,6 @@ impl fmt::Display for ErrorKind {
             ErrorKind::BencodeInvalidInteger => write!(f, "BencodeInvalidInteger"),
             ErrorKind::BencodeUnexpectedEof => write!(f, "BencodeUnexpectedEof"),
             ErrorKind::BencodeIntegerOverflow => write!(f, "BencodeIntegerOverflow"),
-            ErrorKind::Io => write!(f, "Io"),
-            ErrorKind::InvalidInput => write!(f, "InvalidInput"),
-            ErrorKind::Protocol => write!(f, "Protocol"),
             ErrorKind::MetainfoMissingField => write!(f, "MetainfoMissingField"),
             ErrorKind::MetainfoInvalidField => write!(f, "MetainfoInvalidField"),
             ErrorKind::MetainfoInvalidPieces => write!(f, "MetainfoInvalidPieces"),
@@ -122,6 +119,9 @@ impl fmt::Display for ErrorKind {
             ErrorKind::TrackerInvalidResponse => write!(f, "TrackerInvalidResponse"),
             ErrorKind::TrackerRequestFailed => write!(f, "TrackerRequestFailed"),
             ErrorKind::TrackerProtocolError => write!(f, "TrackerProtocolError"),
+            ErrorKind::Io => write!(f, "Io"),
+            ErrorKind::InvalidInput => write!(f, "InvalidInput"),
+            ErrorKind::Protocol => write!(f, "Protocol"),
         }
     }
 }
@@ -129,6 +129,21 @@ impl fmt::Display for ErrorKind {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|e| &**e as _)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Self {
+            source: Some(Box::new(e)),
+            kind: ErrorKind::Io,
+        }
+    }
+}
+
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Self {
+        Self { kind, source: None }
     }
 }
 
@@ -152,5 +167,30 @@ impl Error {
     /// Returns the `ErrorKind` of this error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
+    }
+
+    /// Creates an I/O error with the given source.
+    pub fn io(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self::with_source(ErrorKind::Io, source)
+    }
+
+    /// Creates a peer connection closed error.
+    pub fn peer_closed(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self::with_source(ErrorKind::PeerConnectionClosed, source)
+    }
+
+    /// Creates a tracker request failed error.
+    pub fn tracker_failed(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self::with_source(ErrorKind::TrackerRequestFailed, source)
+    }
+
+    /// Creates a protocol error.
+    pub fn protocol(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self::with_source(ErrorKind::Protocol, source)
+    }
+
+    /// Creates an invalid input error.
+    pub fn invalid_input(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self::with_source(ErrorKind::InvalidInput, source)
     }
 }
