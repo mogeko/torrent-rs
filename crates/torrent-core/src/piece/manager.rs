@@ -28,6 +28,11 @@ impl PieceManager {
         i < self.num_pieces && self.bitfield[i]
     }
 
+    /// Return a reference to the raw bitfield (for piece selection).
+    pub fn bitfield(&self) -> &[bool] {
+        &self.bitfield
+    }
+
     /// Return all completed piece indices.
     pub fn completed_pieces(&self) -> Vec<u32> {
         self.bitfield

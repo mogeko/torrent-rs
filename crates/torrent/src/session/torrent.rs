@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{RwLock, mpsc};
@@ -5,7 +6,7 @@ use tokio::sync::{RwLock, mpsc};
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Metainfo, Mode};
 use crate::peer::PeerId;
-use crate::piece::PieceManager;
+use crate::piece::{PieceManager, RarestFirst};
 use crate::storage::FileStorage;
 
 use super::download::DownloadLoop;
@@ -67,6 +68,7 @@ impl TorrentHandle {
         }));
 
         let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
+        let (peer_msg_tx, peer_msg_rx) = mpsc::unbounded_channel();
 
         let mut download_loop = DownloadLoop {
             info_hash,
@@ -76,6 +78,11 @@ impl TorrentHandle {
             peer_mgr: peer_mgr.clone(),
             status: status.clone(),
             control_rx,
+            peers: HashMap::new(),
+            active_downloads: HashMap::new(),
+            selector: Box::new(RarestFirst),
+            peer_msg_rx,
+            peer_msg_tx,
         };
 
         let task = tokio::spawn(async move {

@@ -45,20 +45,23 @@ impl PeerManager {
     }
 
     /// Attempt to connect to the next pending peer.
-    pub async fn connect_next(&mut self) -> Result<(), Error> {
+    ///
+    /// Returns `Ok(Some(addr))` on success, `Ok(None)` if at capacity
+    /// or no pending peers, `Err` on connection failure.
+    pub async fn connect_next(&mut self) -> Result<Option<SocketAddr>, Error> {
         if self.connections.len() as u32 >= self.max_connections {
-            return Ok(()); // at capacity
+            return Ok(None); // at capacity
         }
 
         let addr = match self.pending.pop_front() {
             Some(a) => a,
-            None => return Ok(()), // no pending peers
+            None => return Ok(None), // no pending peers
         };
 
         match PeerConnection::connect(addr, self.info_hash, self.peer_id).await {
             Ok(conn) => {
                 self.connections.insert(addr, Arc::new(Mutex::new(conn)));
-                Ok(())
+                Ok(Some(addr))
             }
             Err(e) => Err(e),
         }
@@ -85,11 +88,27 @@ impl PeerManager {
     }
 
     /// Connect to multiple pending peers.
-    pub async fn connect_pending(&mut self) {
+    ///
+    /// Returns the addresses of all newly connected peers.
+    pub async fn connect_pending(&mut self) -> Vec<SocketAddr> {
+        let mut connected = Vec::new();
         while (self.connections.len() as u32) < self.max_connections {
-            if self.connect_next().await.is_err() {
-                continue;
+            match self.connect_next().await {
+                Ok(Some(addr)) => connected.push(addr),
+                Ok(None) => break,
+                Err(_) => continue,
             }
         }
+        connected
+    }
+
+    /// Get a clone of the connection Arc for a peer.
+    pub fn connection(&self, addr: &SocketAddr) -> Option<Arc<Mutex<PeerConnection>>> {
+        self.connections.get(addr).cloned()
+    }
+
+    /// Get all connected peer addresses.
+    pub fn connection_addrs(&self) -> Vec<SocketAddr> {
+        self.connections.keys().copied().collect()
     }
 }
