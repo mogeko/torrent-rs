@@ -1,7 +1,15 @@
 [package]
 name = "torrent"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+description = "High-level async BitTorrent library — session management, HTTP/UDP tracker communication, DHT networking, peer connections, and file storage. Built on torrent-core with tokio."
+edition.workspace = true
+rust-version = "1.87"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["bittorrent", "p2p", "torrent", "async", "tokio"]
+categories = ["network-programming", "asynchronous"]
+readme = "README.md"
 
 [dependencies]
 torrent-core = { path = "../torrent-core" }
@@ -13,7 +21,6 @@ sha1.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 url.workspace = true
-
 
 [dev-dependencies]
 tempfile.workspace = true
