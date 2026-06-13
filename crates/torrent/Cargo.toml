@@ -12,7 +12,7 @@ categories = ["network-programming", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
-torrent-core = { path = "../torrent-core" }
+torrent-core.workspace = true
 bytes.workspace = true
 rand.workspace = true
 rustls.workspace = true
