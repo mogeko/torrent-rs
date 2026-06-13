@@ -3,7 +3,7 @@ members = ["crates/torrent-core", "crates/torrent"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 repository = "https://github.com/mogeko/torrent-rs"
 homepage = "https://github.com/mogeko/torrent-rs"
 authors = ["Zheng Junyi <zhengjunyi@live.com>"]
@@ -12,7 +12,7 @@ license = "MIT"
 
 [workspace.dependencies.torrent-core]
 path = "crates/torrent-core"
-version = "0.1.0"
+version = "0.1.1"
 
 [workspace.dependencies]
 bytes = "1.11"
