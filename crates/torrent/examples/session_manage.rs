@@ -2,7 +2,7 @@
 //!
 //! Demonstrates the full lifecycle: configure a [`Session`], add a torrent
 //! from a `.torrent` file, query status, list active torrents, and remove.
-//! Uses the bundled Ubuntu 26.04 torrent file.
+//! Uses the bundled Debian 13.5 torrent file.
 //!
 //! Run with: `cargo run -p torrent --example session_manage`
 
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 3. Add a torrent from a real .torrent file (bundled at compile time).
-    let data = include_bytes!("data/ubuntu-26.04-live-server-amd64.iso.torrent");
+    let data = include_bytes!("data/debian-13.5.0-amd64-netinst.iso.torrent");
     let info_hash = session.add_torrent_bytes(data).await?;
     println!("\nTorrent added:");
     println!("  info_hash: {:02x?}", info_hash);

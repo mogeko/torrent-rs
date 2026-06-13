@@ -1,6 +1,6 @@
 //! End-to-end torrent download using the full Session API.
 //!
-//! Downloads a real torrent (bundled Ubuntu 26.04 server ISO) using tracker
+//! Downloads a real torrent (bundled Debian 13.5 server ISO) using tracker
 //! announce, peer connections, piece selection, SHA-1 verification, and
 //! disk I/O. Requires internet to reach trackers and peers.
 //!
@@ -30,8 +30,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let abs_dir = canonicalize(&download_dir).unwrap_or_else(|_| download_dir.clone());
     println!("Download dir: {}", abs_dir.display());
 
-    // 2. Add the bundled Ubuntu 26.04 torrent.
-    let data = include_bytes!("data/ubuntu-26.04-live-server-amd64.iso.torrent");
+    // 2. Add the bundled Debian 13.5 torrent.
+    let data = include_bytes!("data/debian-13.5.0-amd64-netinst.iso.torrent");
     let info_hash = session.add_torrent_bytes(data).await?;
     let status = session.torrent_status(&info_hash).await?;
     let total_bytes = {
