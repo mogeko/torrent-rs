@@ -38,6 +38,7 @@ pub enum KrpcMessage {
 impl KrpcMessage {
     /// Encode a KRPC message to bencoded bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
+        tracing::trace!("encoding KRPC message: {:?}", self);
         let dict = match self {
             KrpcMessage::Query {
                 transaction_id,
@@ -90,6 +91,7 @@ impl KrpcMessage {
 
     /// Decode a KRPC message from bencoded bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, Error> {
+        tracing::trace!("decoding KRPC message ({} bytes)", data.len());
         let (val, _rest) = bencode::decode(data)?;
         Self::from_bencode(&val)
     }

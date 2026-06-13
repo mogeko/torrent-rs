@@ -72,6 +72,7 @@ fn encode_dict(entries: &[(Bytes, Bencode)]) -> Vec<u8> {
     // BEP 3 requires dictionary keys to be sorted lexicographically.
     let mut sorted: Vec<_> = entries.iter().collect();
     sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+    tracing::debug!("encoding dict with {} keys", sorted.len());
 
     for (key, val) in &sorted {
         out.extend_from_slice(&encode(&Bencode::Bytes((*key).clone())));

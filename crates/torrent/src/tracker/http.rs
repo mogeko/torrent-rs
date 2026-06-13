@@ -68,6 +68,7 @@ impl HttpTracker {
 
     /// Announce to the HTTP tracker.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
+        tracing::info!("HTTP announce to {} (event: {:?})", self.url, req.event);
         // Build path + query string (avoid intermediate Url clone).
         let path_and_query = format!("{}?{}", self.url.path(), build_query_string(req));
 
@@ -141,6 +142,7 @@ impl HttpTracker {
 
         // Parse HTTP response: find "\r\n\r\n" separator
         let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            tracing::warn!("HTTP announce: missing header separator");
             return Err(Error::new(ErrorKind::TrackerInvalidResponse));
         };
 

@@ -1,4 +1,4 @@
-# torrent.rs
+# torrent-rs
 
 [![CI](https://github.com/mogeko/torrent.rs/actions/workflows/build+test.yml/badge.svg)](https://github.com/mogeko/torrent.rs/actions/workflows/build+test.yml)
 [![MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

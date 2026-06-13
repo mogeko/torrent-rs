@@ -179,9 +179,9 @@ impl DownloadLoop {
                 }
                 _ = tokio::time::sleep(tick_interval) => {
                     if let Err(e) = self.tick().await {
+                        tracing::warn!("download tick failed: {}", e);
                         let mut status = self.status.write().await;
                         status.state = TorrentState::Error;
-                        let _ = e;
                     }
                 }
             }
@@ -190,12 +190,13 @@ impl DownloadLoop {
 
     /// Process one tick: announce to tracker, connect peers, request pieces, update status.
     async fn tick(&mut self) -> Result<(), Error> {
+        tracing::debug!("download tick");
         // 0. Announce to tracker if needed
         self.announce_if_needed().await;
 
-        // 0a. DHT peer search (every 30 seconds)
+        // 0a. DHT peer search (every 30 seconds, fire-and-forget)
         if self.enable_dht {
-            self.dht_search_if_needed().await;
+            self.dht_search_if_needed();
         }
 
         // 1. Connect to pending peers
@@ -587,6 +588,7 @@ impl DownloadLoop {
 
     /// Announce to the tracker with a specific event.
     async fn announce_to_tracker(&mut self, event: AnnounceEvent) -> Result<(), Error> {
+        tracing::debug!("announcing to tracker (event: {:?})", event);
         let tracker = match self.tracker.as_ref() {
             Some(t) => t,
             None => return Ok(()),
@@ -611,6 +613,7 @@ impl DownloadLoop {
 
         match tracker.announce(&req).await {
             Ok(resp) => {
+                tracing::debug!("tracker announce: {} peers", resp.peers.len());
                 let interval = resp.min_interval.unwrap_or(resp.interval);
                 self.next_announce = Some(Instant::now() + Duration::from_secs(interval as u64));
 
@@ -624,6 +627,7 @@ impl DownloadLoop {
             Err(e) => {
                 // Backoff on failure
                 self.next_announce = Some(Instant::now() + Duration::from_secs(30));
+                tracing::warn!("tracker announce failed: {}", e);
                 Err(e)
             }
         }
@@ -714,11 +718,16 @@ impl DownloadLoop {
     }
 
     /// Search for peers via DHT (called from tick).
-    async fn dht_search_if_needed(&mut self) {
+    ///
+    /// Spawns a background task so the download loop is never blocked
+    /// by DHT network I/O. Results feed into [`PeerManager::add_peers`]
+    /// and are consumed by the next [`connect_pending`](super::peer_manager::PeerManager::connect_pending) call.
+    fn dht_search_if_needed(&mut self) {
         let should_search = match self.next_dht_search {
             None => return,
             Some(t) => Instant::now() >= t,
         };
+
         if !should_search {
             return;
         }
@@ -728,32 +737,39 @@ impl DownloadLoop {
             None => return,
         };
 
-        // Bootstrap / query well-known DHT nodes
-        for (host, port) in DHT_BOOTSTRAP {
-            let addr = match tokio::net::lookup_host((*host, *port)).await {
-                Ok(mut addrs) => match addrs.next() {
-                    Some(a) => a,
-                    None => continue,
-                },
-                Err(_) => continue,
-            };
-
-            let tid: krpc::TransactionId = rand::random();
-            match get_peers(&rpc, addr, tid, &self.dht_node_id, &self.info_hash).await {
-                Ok(krpc::GetPeersResult::Values { peers, .. }) => {
-                    if !peers.is_empty() {
-                        self.peer_mgr.write().await.add_peers(peers);
-                    }
-                }
-                Ok(krpc::GetPeersResult::Nodes(_nodes)) => {
-                    // Bootstrapping with returned nodes would require routing
-                    // table maintenance; deferred for future enhancement.
-                }
-                Err(_) => continue,
-            }
-        }
-
+        // Set next search time BEFORE spawning to prevent overlapping searches
         self.next_dht_search = Some(Instant::now() + Duration::from_secs(30));
+
+        let info_hash = self.info_hash;
+        let node_id = self.dht_node_id;
+        let peer_mgr = self.peer_mgr.clone();
+
+        tokio::spawn(async move {
+            // Bootstrap / query well-known DHT nodes
+            for (host, port) in DHT_BOOTSTRAP {
+                let addr = match tokio::net::lookup_host((*host, *port)).await {
+                    Ok(mut addrs) => match addrs.next() {
+                        Some(a) => a,
+                        None => continue,
+                    },
+                    Err(_) => continue,
+                };
+
+                let tid: krpc::TransactionId = rand::random();
+                match get_peers(&rpc, addr, tid, &node_id, &info_hash).await {
+                    Ok(krpc::GetPeersResult::Values { peers, .. }) => {
+                        if !peers.is_empty() {
+                            peer_mgr.write().await.add_peers(peers);
+                        }
+                    }
+                    Ok(krpc::GetPeersResult::Nodes(_nodes)) => {
+                        // Bootstrapping with returned nodes would require routing
+                        // table maintenance; deferred for future enhancement.
+                    }
+                    Err(_) => continue,
+                }
+            }
+        });
     }
 
     // ── Helpers ───────────────────────────────────────────────────

@@ -90,6 +90,7 @@ impl FromStr for MagnetUri {
     ///
     /// Format: `magnet:?xt=urn:btih:<info_hash>&dn=<name>&tr=<tracker>&...`
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        tracing::debug!("parsing magnet URI: {}", s);
         let s = s.trim();
 
         // Check prefix (case-insensitive)

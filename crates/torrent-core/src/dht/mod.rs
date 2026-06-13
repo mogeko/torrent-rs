@@ -84,6 +84,7 @@ impl RoutingTable {
     ///
     /// Returns true if the node was newly added, false if updated or rejected.
     pub fn insert(&mut self, node: Node) -> bool {
+        tracing::debug!("DHT insert: {}", node.addr);
         let bucket_idx = bucket_index(&self.node_id, &node.id);
         let bucket = &mut self.buckets[bucket_idx];
 

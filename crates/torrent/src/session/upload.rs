@@ -24,11 +24,13 @@ impl UploadManager {
 
     /// Choke a peer (stop sending data).
     pub fn choke(&mut self, addr: &SocketAddr) {
+        tracing::debug!("choke peer {}", addr);
         self.unchoked.remove(addr);
     }
 
     /// Unchoke a peer (allow sending data).
     pub fn unchoke(&mut self, addr: SocketAddr) {
+        tracing::debug!("unchoke peer {}", addr);
         if self.unchoked.len() < self.max_uploads as usize {
             self.unchoked.insert(addr);
         }

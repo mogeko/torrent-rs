@@ -68,7 +68,13 @@ impl Handshake {
 
     /// Deserialize a handshake from exactly 68 bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, Error> {
+        tracing::debug!("parsing handshake");
         if data.len() != HANDSHAKE_SIZE {
+            tracing::warn!(
+                "handshake: wrong size (expected {} got {})",
+                HANDSHAKE_SIZE,
+                data.len()
+            );
             return Err(Error::new(ErrorKind::PeerInvalidHandshake));
         }
         if data[0] != 19 {

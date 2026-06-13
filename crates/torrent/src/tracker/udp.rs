@@ -50,6 +50,7 @@ impl UdpTracker {
     /// tracker support).  Uses the BEP 15 two-phase connect+announce protocol
     /// with retries on both phases.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
+        tracing::info!("UDP announce to {}", self.url);
         let Some(host) = self.url.host_str() else {
             return Err(Error::new(ErrorKind::InvalidInput));
         };

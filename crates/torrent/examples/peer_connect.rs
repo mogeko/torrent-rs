@@ -7,8 +7,13 @@
 //! Run with: `cargo run -p torrent --example peer_connect`
 
 use torrent::peer::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
+use tracing_subscriber::EnvFilter;
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     let info_hash = [0x42u8; 20];
     let our_id = PeerId::random();
     println!("Our peer ID: {}", our_id);

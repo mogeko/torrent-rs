@@ -96,6 +96,7 @@ impl AnnounceRequest {
 impl AnnounceResponse {
     /// Parse an `AnnounceResponse` from a bencoded tracker response body.
     pub fn from_bencode(data: &[u8]) -> Result<Self, Error> {
+        tracing::debug!("parsing tracker response");
         let (val, _rest) = bencode::decode(data)?;
 
         let interval = dict_get_int(&val, b"interval")

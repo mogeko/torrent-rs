@@ -102,6 +102,7 @@ pub enum PeerMessage {
 /// Keep-alive: <4-byte 0>
 /// ```
 pub fn encode(msg: &PeerMessage) -> Vec<u8> {
+    tracing::trace!("encoding peer message: {:?}", msg);
     match msg {
         PeerMessage::KeepAlive => vec![0, 0, 0, 0],
         PeerMessage::Choke => vec![0, 0, 0, 1, 0],
@@ -173,6 +174,7 @@ pub fn decode(data: &[u8]) -> Result<PeerMessage, Error> {
 
     // Keep-alive
     if len == 0 {
+        tracing::trace!("decoded peer message: KeepAlive");
         return Ok(PeerMessage::KeepAlive);
     }
 

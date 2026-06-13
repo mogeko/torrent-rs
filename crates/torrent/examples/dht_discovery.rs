@@ -6,9 +6,14 @@
 //! Run with: `cargo run -p torrent --example dht_discovery`
 
 use torrent::dht::{DhtRpc, Node, RoutingTable, get_peers, krpc};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     let node_id = [0x42u8; 20];
     let target = [0x99u8; 20]; // arbitrary target for find_node
 
