@@ -13,6 +13,9 @@ use std::net::SocketAddr;
 use rand::RngExt;
 
 /// Represents a node in the DHT (BEP 5).
+///
+/// Each node is identified by a 20-byte Node ID (typically a SHA-1 hash)
+/// and reachable at a socket address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
     /// 20-byte Node ID.
@@ -24,7 +27,12 @@ pub struct Node {
 /// Kademlia routing table (BEP 5).
 ///
 /// Maintains 160 K-buckets, each holding up to K=8 nodes
-/// ordered by XOR distance from our node ID.
+/// ordered by XOR distance from our node ID. Nodes are inserted
+/// into the bucket determined by the first differing bit between
+/// their ID and ours.
+///
+/// Use [`find_closest`](RoutingTable::find_closest) to discover
+/// nodes near a target ID (used in recursive DHT lookups).
 pub struct RoutingTable {
     /// Our own node ID.
     pub node_id: [u8; 20],

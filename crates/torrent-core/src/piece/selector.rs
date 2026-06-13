@@ -1,6 +1,21 @@
 use rand::RngExt;
 
 /// Trait for piece selection strategies (BEP 3).
+///
+/// Implementations decide which piece to download next given the
+/// set of pieces a peer has (`candidates`) and the ones we already
+/// have (`bitfield`).
+///
+/// # Examples
+///
+/// ```
+/// use torrent_core::piece::{PieceSelector, Sequential};
+///
+/// let candidates = vec![true, false, true];
+/// let bitfield = vec![false, false, false];
+/// let next = Sequential.select(&candidates, &bitfield);
+/// assert_eq!(next, Some(0));
+/// ```
 pub trait PieceSelector: Send + Sync {
     /// Select the next piece to download from the available candidates.
     ///
@@ -10,6 +25,10 @@ pub trait PieceSelector: Send + Sync {
 }
 
 /// Select the rarest piece first (BEP 3 recommended default).
+///
+/// Picks the piece available from the fewest peers. This strategy
+/// maximizes piece diversity in the swarm and is the standard
+/// approach described in BEP 3.
 pub struct RarestFirst;
 
 impl PieceSelector for RarestFirst {
@@ -39,6 +58,9 @@ impl PieceSelector for RarestFirst {
 }
 
 /// Randomly select a piece from available candidates.
+///
+/// Useful for the initial download phase to quickly obtain a
+/// diverse set of pieces before switching to rarest-first.
 pub struct RandomFirst;
 
 impl PieceSelector for RandomFirst {
@@ -59,7 +81,10 @@ impl PieceSelector for RandomFirst {
     }
 }
 
-/// Select pieces in sequential order.
+/// Select pieces in sequential order (lowest index first).
+///
+/// Serves streaming-like download where pieces are consumed in order.
+/// Less efficient for swarm health than rarest-first.
 pub struct Sequential;
 
 impl PieceSelector for Sequential {
@@ -76,7 +101,8 @@ impl PieceSelector for Sequential {
 /// End-game mode: select any remaining missing piece.
 ///
 /// In endgame, we send duplicate requests to multiple peers simultaneously
-/// to speed up the final pieces. This selector just returns the first available.
+/// to speed up the final pieces. This selector just returns the first
+/// available piece; the caller handles sending requests to multiple peers.
 pub struct EndGame;
 
 impl PieceSelector for EndGame {

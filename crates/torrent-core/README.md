@@ -155,4 +155,4 @@ The following require async I/O and live in the [`torrent`](../torrent) crate:
 
 ## License
 
-MIT — see [LICENSE](../../LICENSE).
+MIT — see [LICENSE](LICENSE).

@@ -155,7 +155,10 @@ impl KrpcMessage {
 
 // ── Build helpers ────────────────────────────────────────────────────
 
-/// Build a ping query.
+/// Build a ping query (BEP 5).
+///
+/// Creates a KRPC `ping` query message with the given transaction ID
+/// and node ID. The result is bencoded bytes ready to send over UDP.
 pub fn build_ping(tid: TransactionId, node_id: &[u8; 20]) -> Vec<u8> {
     KrpcMessage::Query {
         transaction_id: tid,
@@ -168,7 +171,10 @@ pub fn build_ping(tid: TransactionId, node_id: &[u8; 20]) -> Vec<u8> {
     .to_bytes()
 }
 
-/// Build a find_node query.
+/// Build a find_node query (BEP 5).
+///
+/// Creates a KRPC `find_node` query for discovering nodes close to
+/// a target ID. Used during the DHT bootstrap and recursive lookup process.
 pub fn build_find_node(tid: TransactionId, node_id: &[u8; 20], target: &[u8; 20]) -> Vec<u8> {
     KrpcMessage::Query {
         transaction_id: tid,
@@ -181,7 +187,11 @@ pub fn build_find_node(tid: TransactionId, node_id: &[u8; 20], target: &[u8; 20]
     .to_bytes()
 }
 
-/// Build a get_peers query.
+/// Build a get_peers query (BEP 5).
+///
+/// Creates a KRPC `get_peers` query to discover peers sharing a torrent
+/// identified by `info_hash`. The response may contain peer addresses
+/// or closer DHT nodes.
 pub fn build_get_peers(tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 20]) -> Vec<u8> {
     KrpcMessage::Query {
         transaction_id: tid,
@@ -197,7 +207,11 @@ pub fn build_get_peers(tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 
     .to_bytes()
 }
 
-/// Build an announce_peer query.
+/// Build an announce_peer query (BEP 5).
+///
+/// Creates a KRPC `announce_peer` query that tells a DHT node we are
+/// downloading the torrent identified by `info_hash` on the given `port`.
+/// Requires a `token` obtained from a previous `get_peers` response.
 pub fn build_announce_peer(
     tid: TransactionId,
     node_id: &[u8; 20],
@@ -223,7 +237,13 @@ pub fn build_announce_peer(
 
 // ── Response parsing helpers ─────────────────────────────────────────
 
-/// Parse a ping response (expects {"id": <20-byte id>}).
+/// Parse a ping response.
+///
+/// Expects a response dict containing `{"id": <20-byte node ID>}`.
+///
+/// # Errors
+///
+/// Returns an error if the message is not a response or is missing the `id` field.
 pub fn parse_ping_response(msg: &KrpcMessage) -> Result<[u8; 20], Error> {
     match msg {
         KrpcMessage::Response { result, .. } => {
@@ -237,9 +257,13 @@ pub fn parse_ping_response(msg: &KrpcMessage) -> Result<[u8; 20], Error> {
     }
 }
 
-/// Parse a get_peers response.
+/// Result of a get_peers DHT query (BEP 5).
 ///
-/// Returns either a list of peers (compact format) or a list of nodes (closer).
+/// Two outcomes are possible:
+/// - [`Values`](GetPeersResult::Values): the node returned peer addresses
+///   and a token for later `announce_peer` calls
+/// - [`Nodes`](GetPeersResult::Nodes): the node returned closer DHT nodes
+///   for continued recursive lookup
 #[derive(Debug, Clone)]
 pub enum GetPeersResult {
     /// Token + list of SocketAddr.
@@ -251,7 +275,16 @@ pub enum GetPeersResult {
     Nodes(Vec<super::Node>),
 }
 
-/// Parse a get_peers response.
+/// Parse a get_peers response (BEP 5).
+///
+/// Handles both possible responses:
+/// - `values` key present → returns [`GetPeersResult::Values`] with token and peers
+/// - `nodes` key present → returns [`GetPeersResult::Nodes`] with closer nodes
+///
+/// # Errors
+///
+/// Returns an error if the message is not a response or contains neither
+/// `values` nor `nodes`.
 pub fn parse_get_peers_response(msg: &KrpcMessage) -> Result<GetPeersResult, Error> {
     match msg {
         KrpcMessage::Response { result, .. } => {
@@ -286,7 +319,10 @@ pub fn parse_get_peers_response(msg: &KrpcMessage) -> Result<GetPeersResult, Err
     }
 }
 
-/// Parse compact node info (26 bytes per node: 20 id + 4 ip + 2 port).
+/// Parse compact node info (BEP 5).
+///
+/// Each node is 26 bytes: 20-byte node ID + 4-byte IPv4 address + 2-byte port.
+/// Incomplete trailing bytes are silently ignored.
 pub fn parse_compact_nodes(data: &[u8]) -> Vec<super::Node> {
     data.chunks_exact(26)
         .map(|chunk| {
