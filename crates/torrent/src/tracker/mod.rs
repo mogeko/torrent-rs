@@ -162,21 +162,24 @@ impl Tracker {
 
     /// Add multiple tracker URLs.
     ///
+    /// All-or-nothing: if any URL is invalid, none are added
+    /// (the operation is atomic with respect to `self.trackers`).
     /// Duplicate and already-registered URLs are silently skipped.
-    /// Returns an error if any URL is invalid.
     pub fn add_all<I: IntoIterator>(&mut self, urls: I) -> Result<(), Error>
     where
         I::Item: IntoUrl,
     {
         let mut seen: HashSet<String> = self.trackers.iter().map(|t| t.url().into()).collect();
+        let mut new_trackers: Vec<Inner> = Vec::new();
 
         for url in urls {
             let url = url.into_url()?;
             if seen.insert(url.as_str().into()) {
-                self.trackers.push(Inner::from_url(url)?);
+                new_trackers.push(Inner::from_url(url)?);
             }
         }
 
+        self.trackers.extend(new_trackers);
         Ok(())
     }
 
@@ -584,7 +587,8 @@ mod tests {
     fn test_tracker_add_all_invalid_url() {
         let mut t = Tracker::single("http://tracker.a.com/announce").unwrap();
 
-        // Invalid URL should cause early Err (short-circuit)
+        // Invalid URL should cause early Err (short-circuit), and no URLs
+        // should be added — the operation is all-or-nothing.
         let result = t.add_all([
             "udp://tracker.b.com:6969",
             "not a url",
@@ -592,8 +596,8 @@ mod tests {
         ]);
 
         assert!(result.is_err());
-        // The valid URL before the invalid one should NOT have been added
-        // (short-circuit after the invalid parse failure)
+        // State must be unchanged (atomic semantics)
+        assert_eq!(t.len(), 1);
     }
 
     #[test]
