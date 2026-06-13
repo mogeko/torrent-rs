@@ -32,6 +32,7 @@ impl DhtRpc {
         expected_tid: TransactionId,
         data: &[u8],
     ) -> Result<KrpcMessage, Error> {
+        tracing::debug!("DHT query to {}", addr);
         if let Err(e) = self.socket.send_to(data, addr).await {
             return Err(Error::with_source(ErrorKind::Protocol, e));
         }

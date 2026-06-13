@@ -27,6 +27,7 @@ impl PeerConnection {
         info_hash: [u8; 20],
         our_peer_id: PeerId,
     ) -> Result<Self, Error> {
+        tracing::debug!("connecting to peer {}", addr);
         let raw_stream = TcpStream::connect(addr).await.map_err(Error::peer_closed)?;
 
         let stream = BufReader::new(BufWriter::new(raw_stream));
@@ -64,11 +65,14 @@ impl PeerConnection {
         conn.remote_peer_id = Some(PeerId(remote_handshake.peer_id));
         conn.state = PeerState::Init;
 
+        tracing::info!("handshake complete with {}", addr);
+
         Ok(conn)
     }
 
     /// Send a message to the peer.
     pub async fn send(&mut self, msg: &PeerMessage) -> Result<(), Error> {
+        tracing::trace!("sending {:?} to peer", msg);
         let data = encode(msg);
 
         if let Err(e) = self.stream.get_mut().write_all(&data).await {
@@ -92,6 +96,7 @@ impl PeerConnection {
 
         // Keep-alive
         if len == 0 {
+            tracing::trace!("received KeepAlive from peer");
             return Ok(PeerMessage::KeepAlive);
         }
 

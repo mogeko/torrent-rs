@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use torrent::peer::{Handshake, PeerId, PeerMessage, decode, encode};
+use tracing_subscriber::EnvFilter;
 
 const INFO_HASH: [u8; 20] = [0x42u8; 20];
 
@@ -88,6 +89,10 @@ async fn recv_msg(stream: &mut TcpStream) -> Result<PeerMessage, Box<dyn std::er
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     // 1. Start a local listener
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;

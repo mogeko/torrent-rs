@@ -11,9 +11,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use torrent::session::{Session, SessionConfig, TorrentState};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     // 1. Create a session. Files are saved to a `downloads` directory
     //    beside the torrent crate (created automatically if missing).
     let download_dir = PathBuf::from("crates/torrent/examples/data");

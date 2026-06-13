@@ -75,6 +75,12 @@ impl FileStorage {
             }
         };
 
+        tracing::info!(
+            "storage initialized: {} pieces, {} total bytes",
+            num_pieces,
+            total_size
+        );
+
         Ok(FileStorage {
             num_pieces,
             piece_length,
@@ -91,12 +97,19 @@ impl FileStorage {
 
 impl Storage for FileStorage {
     async fn read_piece(&self, index: u32, buf: &mut [u8]) -> Result<(), Error> {
+        tracing::trace!("reading piece {}", index);
         let offset = self.piece_offset(index);
         let read_len = self.piece_len_for_index(index);
         self.read_range(offset, read_len as usize, buf).await
     }
 
     async fn write_block(&self, piece: u32, offset: u32, data: &[u8]) -> Result<(), Error> {
+        tracing::trace!(
+            "writing block: piece {} offset {} ({} bytes)",
+            piece,
+            offset,
+            data.len()
+        );
         let global_offset = self.piece_offset(piece) + offset as u64;
         self.write_range(global_offset, data).await
     }

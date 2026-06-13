@@ -7,9 +7,14 @@
 //! Run with: `cargo run -p torrent --example session_manage`
 
 use torrent::session::{Session, SessionConfig};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     // 1. Configure the session with a temporary download directory.
     let download_dir = tempfile::tempdir()?;
     let config = SessionConfig {

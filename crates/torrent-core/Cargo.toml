@@ -15,6 +15,7 @@ readme = "README.md"
 bytes.workspace = true
 rand.workspace = true
 sha1.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

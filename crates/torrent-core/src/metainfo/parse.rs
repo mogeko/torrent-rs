@@ -29,26 +29,38 @@ use super::{FileInfo, Info, Metainfo, Mode};
 /// println!("Info hash: {:x?}", meta.info_hash());
 /// ```
 pub fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
+    tracing::debug!("parsing .torrent file ({} bytes)", data.len());
     let (val, _rest) = bencode::decode(data)?;
 
     // Validate that the root value is a Dict
     match val {
         Bencode::Dict(_) => {}
-        _ => return Err(Error::new(ErrorKind::MetainfoInvalidField)),
+        _ => {
+            tracing::warn!("metainfo: root is not a dict");
+            return Err(Error::new(ErrorKind::MetainfoInvalidField));
+        }
     }
 
     // --- Required fields ---
 
+    tracing::debug!("extracting announce URL");
     let announce = get_required_string(&val, b"announce")?;
 
     let info_val = dict_get(&val, b"info").ok_or(Error::new(ErrorKind::MetainfoMissingField))?;
 
+    tracing::debug!("parsing info dict");
     // Save the raw bytes of the info dict for info_hash calculation.
     // We need to find the exact byte range in the original input.
     // Re-encode it to get a canonical representation.
     let info_bytes = Bytes::from(bencode::encode(info_val));
 
     let info = parse_info(info_val, info_bytes)?;
+    tracing::debug!(
+        "metainfo parsed: announce={}, pieces={}, total_size={}",
+        announce,
+        info.num_pieces(),
+        info.total_size()
+    );
 
     // --- Optional fields ---
 

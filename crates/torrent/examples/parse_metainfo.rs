@@ -4,8 +4,13 @@
 //! Run with: `cargo run -p torrent --example parse_metainfo`
 
 use torrent::metainfo::from_bytes;
+use tracing_subscriber::EnvFilter;
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     // Load a real .torrent file (embedded at compile time)
     let data = include_bytes!("data/debian-13.5.0-amd64-netinst.iso.torrent");
 

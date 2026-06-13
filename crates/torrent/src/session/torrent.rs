@@ -50,6 +50,8 @@ impl TorrentHandle {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
         };
 
+        tracing::info!("torrent added: {} ({} pieces)", name, num_pieces);
+
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
         let peer_id = PeerId::random();
         let tracker = Tracker::from_metainfo(&metainfo);

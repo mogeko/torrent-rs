@@ -20,8 +20,13 @@ rustls-native-certs.workspace = true
 sha1.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+
+[dev-dependencies.tracing-subscriber]
+version = "0.3"
+features = ["env-filter"]

@@ -39,6 +39,7 @@ use crate::error::{Error, ErrorKind};
 /// assert!(rest.is_empty());
 /// ```
 pub fn decode(data: &[u8]) -> Result<(Bencode, &[u8]), Error> {
+    tracing::debug!("decoding bencode ({} bytes)", data.len());
     if data.is_empty() {
         return Err(Error::new(ErrorKind::BencodeUnexpectedEof));
     }

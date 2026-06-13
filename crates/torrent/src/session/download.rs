@@ -190,6 +190,7 @@ impl DownloadLoop {
 
     /// Process one tick: announce to tracker, connect peers, request pieces, update status.
     async fn tick(&mut self) -> Result<(), Error> {
+        tracing::debug!("download tick");
         // 0. Announce to tracker if needed
         self.announce_if_needed().await;
 
@@ -587,6 +588,7 @@ impl DownloadLoop {
 
     /// Announce to the tracker with a specific event.
     async fn announce_to_tracker(&mut self, event: AnnounceEvent) -> Result<(), Error> {
+        tracing::debug!("announcing to tracker (event: {:?})", event);
         let tracker = match self.tracker.as_ref() {
             Some(t) => t,
             None => return Ok(()),
@@ -624,6 +626,7 @@ impl DownloadLoop {
             Err(e) => {
                 // Backoff on failure
                 self.next_announce = Some(Instant::now() + Duration::from_secs(30));
+                tracing::warn!("tracker announce failed: {}", e);
                 Err(e)
             }
         }

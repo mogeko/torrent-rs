@@ -1,6 +1,6 @@
 ---
 name: documentation-writing
-description: "Standardized documentation writing for the torrent.rs codebase. Use when: writing or updating Rust doc comments (///, //!), adding module-level docs, creating README files, documenting public API, adding code examples in docs, writing architecture decision records, or updating AGENTS.md. Covers both Rustdoc and project Markdown conventions."
+description: "Standardized documentation writing for the torrent-rs codebase. Use when: writing or updating Rust doc comments (///, //!), adding module-level docs, creating README files, documenting public API, adding code examples in docs, writing architecture decision records, or updating AGENTS.md. Covers both Rustdoc and project Markdown conventions."
 argument-hint: "[file path or module to document]"
 ---
 

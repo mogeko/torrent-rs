@@ -20,6 +20,7 @@ pub async fn find_node(
     node_id: &[u8; 20],
     target: &[u8; 20],
 ) -> Result<Vec<Node>, Error> {
+    tracing::debug!("DHT find_node to {}", addr);
     let data = krpc::build_find_node(tid, node_id, target);
     let response = rpc.query(addr, tid, &data).await?;
 
@@ -51,6 +52,7 @@ pub async fn get_peers(
     node_id: &[u8; 20],
     info_hash: &[u8; 20],
 ) -> Result<krpc::GetPeersResult, Error> {
+    tracing::debug!("DHT get_peers to {}", addr);
     let data = krpc::build_get_peers(tid, node_id, info_hash);
     let response = rpc.query(addr, tid, &data).await?;
 
@@ -75,6 +77,7 @@ pub async fn announce_peer(
     port: u16,
     token: &[u8],
 ) -> Result<(), Error> {
+    tracing::debug!("DHT announce_peer to {} (port {})", addr, port);
     let data = krpc::build_announce_peer(tid, node_id, info_hash, port, token);
     let _response = rpc.query(addr, tid, &data).await?;
     Ok(())

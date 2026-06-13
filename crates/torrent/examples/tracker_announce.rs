@@ -8,9 +8,14 @@
 use torrent::metainfo::from_bytes;
 use torrent::peer::PeerId;
 use torrent::tracker::{AnnounceEvent, AnnounceRequest, Tracker};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     // Parse the real torrent to get info_hash and tracker URLs
     let data = include_bytes!("data/debian-13.5.0-amd64-netinst.iso.torrent");
     let meta = from_bytes(data)?;

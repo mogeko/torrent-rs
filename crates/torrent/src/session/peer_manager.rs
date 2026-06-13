@@ -60,8 +60,11 @@ impl PeerManager {
             None => return Ok(None), // no pending peers
         };
 
+        tracing::debug!("connecting to peer {}", addr);
+
         match PeerConnection::connect(addr, self.info_hash, self.peer_id).await {
             Ok(conn) => {
+                tracing::info!("peer connected: {}", addr);
                 self.connections.insert(addr, Arc::new(Mutex::new(conn)));
                 Ok(Some(addr))
             }
@@ -81,6 +84,7 @@ impl PeerManager {
 
     /// Remove a peer (disconnect).
     pub fn remove_peer(&mut self, addr: &SocketAddr) {
+        tracing::debug!("peer disconnected: {}", addr);
         self.connections.remove(addr);
     }
 
