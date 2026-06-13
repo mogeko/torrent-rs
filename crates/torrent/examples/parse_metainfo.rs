@@ -1,13 +1,13 @@
 //! Parse a .torrent file and inspect its metadata.
 //!
-//! Uses a real Ubuntu 26.04 torrent file bundled in `examples/data/`.
+//! Uses a real Debian 13.5 torrent file bundled in `examples/data/`.
 //! Run with: `cargo run -p torrent --example parse_metainfo`
 
 use torrent::metainfo::from_bytes;
 
 fn main() {
     // Load a real .torrent file (embedded at compile time)
-    let data = include_bytes!("data/ubuntu-26.04-live-server-amd64.iso.torrent");
+    let data = include_bytes!("data/debian-13.5.0-amd64-netinst.iso.torrent");
 
     // Parse it
     let meta = from_bytes(data).expect("failed to parse .torrent file");

@@ -196,6 +196,12 @@ fn parse_peers(val: &Bencode) -> Result<Vec<SocketAddr>, Error> {
 }
 
 /// Parse compact peer list (6 bytes per peer: 4 IPv4 + 2 port).
+///
+/// Implements BEP 23: Tracker Returns Compact Peer Lists.
+///
+/// # Errors
+///
+/// Returns an error if the data length is not a multiple of 6.
 pub fn parse_compact_peers_ipv4(data: &[u8]) -> Result<Vec<SocketAddr>, Error> {
     if !data.len().is_multiple_of(6) {
         return Err(Error::new(ErrorKind::TrackerInvalidResponse));

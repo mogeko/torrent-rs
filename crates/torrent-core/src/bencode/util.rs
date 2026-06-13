@@ -5,7 +5,23 @@ use crate::error::{Error, ErrorKind};
 
 /// Decode a bencoded byte string directly to a `String`.
 ///
-/// Returns an error if the value is not a byte string or contains invalid UTF-8.
+/// Convenience wrapper around [`bencode::decode`](crate::bencode::decode)
+/// that extracts a byte string and converts it to UTF-8.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The value is not a byte string (e.g., an integer, list, or dict)
+/// - The byte string contains invalid UTF-8
+///
+/// # Examples
+///
+/// ```
+/// use torrent_core::bencode::decode_str;
+///
+/// let s = decode_str(b"5:hello").unwrap();
+/// assert_eq!(s, "hello");
+/// ```
 pub fn decode_str(data: &[u8]) -> Result<String, Error> {
     let (val, _rest) = bencode::decode(data)?;
     match val {
@@ -17,6 +33,17 @@ pub fn decode_str(data: &[u8]) -> Result<String, Error> {
 }
 
 /// Encode a `&str` as a bencoded byte string.
+///
+/// Convenience wrapper that encodes a Rust string as a bencoded byte string
+/// (length-prefixed format).
+///
+/// # Examples
+///
+/// ```
+/// use torrent_core::bencode::encode_str;
+///
+/// assert_eq!(encode_str("spam"), b"4:spam");
+/// ```
 pub fn encode_str(s: &str) -> Vec<u8> {
     bencode::encode(&Bencode::Bytes(Bytes::copy_from_slice(s.as_bytes())))
 }
@@ -24,6 +51,22 @@ pub fn encode_str(s: &str) -> Vec<u8> {
 /// Get a value by key from a bencoded dictionary.
 ///
 /// Returns `None` if `val` is not a `Dict` or the key is not found.
+/// Uses a linear scan — acceptable for the small dictionaries typical
+/// of bencoded tracker responses and torrent files.
+///
+/// # Examples
+///
+/// ```
+/// use torrent_core::bencode::{Bencode, dict_get};
+/// use bytes::Bytes;
+///
+/// let dict = Bencode::Dict(vec![
+///     (Bytes::from("foo"), Bencode::Integer(42)),
+/// ]);
+///
+/// assert_eq!(dict_get(&dict, b"foo"), Some(&Bencode::Integer(42)));
+/// assert_eq!(dict_get(&dict, b"missing"), None);
+/// ```
 pub fn dict_get<'a>(val: &'a Bencode, key: &[u8]) -> Option<&'a Bencode> {
     match val {
         Bencode::Dict(entries) => {
@@ -38,6 +81,22 @@ pub fn dict_get<'a>(val: &'a Bencode, key: &[u8]) -> Option<&'a Bencode> {
 }
 
 /// Convenience: get an integer from a dict by key.
+///
+/// Returns `None` if the key is missing or the value is not an integer.
+///
+/// # Examples
+///
+/// ```
+/// use torrent_core::bencode::{Bencode, dict_get_int};
+/// use bytes::Bytes;
+///
+/// let dict = Bencode::Dict(vec![
+///     (Bytes::from("count"), Bencode::Integer(42)),
+/// ]);
+///
+/// assert_eq!(dict_get_int(&dict, b"count"), Some(42));
+/// assert_eq!(dict_get_int(&dict, b"missing"), None);
+/// ```
 pub fn dict_get_int(val: &Bencode, key: &[u8]) -> Option<i64> {
     match dict_get(val, key)? {
         Bencode::Integer(i) => Some(*i),
@@ -46,6 +105,22 @@ pub fn dict_get_int(val: &Bencode, key: &[u8]) -> Option<i64> {
 }
 
 /// Convenience: get a byte string from a dict by key.
+///
+/// Returns `None` if the key is missing or the value is not a byte string.
+///
+/// # Examples
+///
+/// ```
+/// use torrent_core::bencode::{Bencode, dict_get_bytes};
+/// use bytes::Bytes;
+///
+/// let dict = Bencode::Dict(vec![
+///     (Bytes::from("name"), Bencode::Bytes(Bytes::from("hello"))),
+/// ]);
+///
+/// assert_eq!(dict_get_bytes(&dict, b"name").map(|b| &b[..]), Some(&b"hello"[..]));
+/// assert_eq!(dict_get_bytes(&dict, b"missing"), None);
+/// ```
 pub fn dict_get_bytes<'a>(val: &'a Bencode, key: &[u8]) -> Option<&'a Bytes> {
     match dict_get(val, key)? {
         Bencode::Bytes(b) => Some(b),

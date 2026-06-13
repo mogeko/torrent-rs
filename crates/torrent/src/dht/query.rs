@@ -8,6 +8,11 @@ use crate::error::{Error, ErrorKind};
 /// Find nodes close to a target ID (BEP 5 find_node).
 ///
 /// Sends a find_node query and returns the list of closer nodes.
+/// Used during DHT bootstrapping and recursive node lookup.
+///
+/// # Errors
+///
+/// Returns an error if the RPC call fails or the response is malformed.
 pub async fn find_node(
     rpc: &DhtRpc,
     addr: SocketAddr,
@@ -31,6 +36,14 @@ pub async fn find_node(
 }
 
 /// Get peers for an info_hash from the DHT (BEP 5 get_peers).
+///
+/// Queries a DHT node for peers sharing the torrent identified by `info_hash`.
+/// The response may contain peer addresses (`Values` variant) or
+/// closer DHT nodes for continued recursive lookup (`Nodes` variant).
+///
+/// # Errors
+///
+/// Returns an error if the RPC call fails or the response is malformed.
 pub async fn get_peers(
     rpc: &DhtRpc,
     addr: SocketAddr,
@@ -45,6 +58,14 @@ pub async fn get_peers(
 }
 
 /// Announce that we are a peer for an info_hash (BEP 5 announce_peer).
+///
+/// Tells a DHT node that we are downloading the torrent identified by
+/// `info_hash` on the given `port`. Requires a `token` obtained from
+/// a previous `get_peers` response.
+///
+/// # Errors
+///
+/// Returns an error if the RPC call fails or the response is malformed.
 pub async fn announce_peer(
     rpc: &DhtRpc,
     addr: SocketAddr,

@@ -126,6 +126,9 @@ impl Metainfo {
 
 impl Info {
     /// Returns the total size of all files in bytes.
+    ///
+    /// For single-file torrents, this is the file length.
+    /// For multi-file torrents, this is the sum of all file lengths.
     pub fn total_size(&self) -> u64 {
         match &self.mode {
             Mode::Single { length, .. } => *length,
@@ -134,6 +137,8 @@ impl Info {
     }
 
     /// Returns the number of pieces.
+    ///
+    /// Each piece corresponds to a 20-byte SHA-1 hash in the `pieces` field.
     pub fn num_pieces(&self) -> usize {
         self.pieces.len()
     }

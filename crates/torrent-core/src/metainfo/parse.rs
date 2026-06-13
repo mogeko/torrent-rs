@@ -7,7 +7,27 @@ use super::{FileInfo, Info, Metainfo, Mode};
 
 /// Parse a `Metainfo` from raw bencoded bytes (the contents of a `.torrent` file).
 ///
-/// Performs all required validation per BEP 3.
+/// Performs all required validation per BEP 3:
+/// - Root value must be a bencoded dictionary
+/// - The `announce` and `info` keys are required
+/// - The `info` dict must contain `name`, `piece length`, and `pieces`
+/// - Either `length` (single-file) or `files` (multi-file) must be present
+/// - `pieces` must be a multiple of 20 bytes (SHA-1 hashes)
+///
+/// # Errors
+///
+/// Returns an error if the data is not valid bencode or if required
+/// metainfo fields are missing or invalid.
+///
+/// # Examples
+///
+/// ```no_run
+/// use torrent_core::metainfo::from_bytes;
+///
+/// let data = std::fs::read("debian.torrent").unwrap();
+/// let meta = from_bytes(&data).unwrap();
+/// println!("Info hash: {:x?}", meta.info_hash());
+/// ```
 pub fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
     let (val, _rest) = bencode::decode(data)?;
 

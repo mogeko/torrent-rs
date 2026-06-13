@@ -117,4 +117,4 @@ cargo clippy -p torrent -- -D warnings   # Lint
 
 ## License
 
-MIT — see [LICENSE](../../LICENSE).
+MIT — see [LICENSE](LICENSE).

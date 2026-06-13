@@ -1,4 +1,22 @@
 /// Tracks which pieces have been downloaded and manages the bitfield.
+///
+/// Implements BEP 3: The BitTorrent Protocol Specification.
+///
+/// The [`PieceManager`] maintains a bitfield indicating which pieces
+/// have been successfully downloaded and verified. It is used by the
+/// download loop to track progress and decide which pieces to request next.
+///
+/// # Examples
+///
+/// ```
+/// use torrent_core::piece::PieceManager;
+///
+/// let mut pm = PieceManager::new(10);
+/// pm.set_piece(0);
+/// pm.set_piece(5);
+/// assert_eq!(pm.progress(), 0.2);
+/// assert_eq!(pm.completed_pieces(), vec![0, 5]);
+/// ```
 pub struct PieceManager {
     pub num_pieces: usize,
     /// Bitfield: true = have the piece, false = missing.
@@ -15,6 +33,8 @@ impl PieceManager {
     }
 
     /// Mark a piece as completed.
+    ///
+    /// Does nothing if the index is out of range.
     pub fn set_piece(&mut self, index: u32) {
         let i = index as usize;
         if i < self.num_pieces {
@@ -23,6 +43,8 @@ impl PieceManager {
     }
 
     /// Check if a piece is completed.
+    ///
+    /// Returns `false` if the index is out of range.
     pub fn has_piece(&self, index: u32) -> bool {
         let i = index as usize;
         i < self.num_pieces && self.bitfield[i]
@@ -33,7 +55,7 @@ impl PieceManager {
         &self.bitfield
     }
 
-    /// Return all completed piece indices.
+    /// Return all completed piece indices, sorted ascending.
     pub fn completed_pieces(&self) -> Vec<u32> {
         self.bitfield
             .iter()
@@ -43,7 +65,7 @@ impl PieceManager {
             .collect()
     }
 
-    /// Return all missing piece indices.
+    /// Return all missing piece indices, sorted ascending.
     pub fn missing_pieces(&self) -> Vec<u32> {
         self.bitfield
             .iter()
@@ -54,6 +76,8 @@ impl PieceManager {
     }
 
     /// Progress as a float 0.0..=1.0.
+    ///
+    /// Returns 1.0 if there are no pieces.
     pub fn progress(&self) -> f64 {
         if self.num_pieces == 0 {
             return 1.0;
@@ -63,6 +87,9 @@ impl PieceManager {
     }
 
     /// Export bitfield as bytes (for Bitfield message).
+    ///
+    /// Each bit represents one piece: 1 = have, 0 = missing.
+    /// Bits are packed MSB-first per byte.
     pub fn to_bitfield(&self) -> Vec<u8> {
         let byte_count = self.num_pieces.div_ceil(8);
         let mut bytes = vec![0u8; byte_count];
