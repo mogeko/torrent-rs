@@ -1,10 +1,14 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 
 use crate::error::{Error, ErrorKind};
 use crate::peer::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
+
+/// Timeout for TCP connect + handshake exchange.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A managed peer connection with buffered message I/O.
 pub struct PeerConnection {
@@ -28,7 +32,13 @@ impl PeerConnection {
         our_peer_id: PeerId,
     ) -> Result<Self, Error> {
         tracing::debug!("connecting to peer {}", addr);
-        let raw_stream = TcpStream::connect(addr).await.map_err(Error::peer_closed)?;
+
+        // TCP connect with timeout
+        let raw_stream =
+            match tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(addr)).await {
+                Ok(Ok(s)) => s,
+                _ => return Err(Error::new(ErrorKind::PeerConnectionClosed)),
+            };
 
         let stream = BufReader::new(BufWriter::new(raw_stream));
 
@@ -52,9 +62,12 @@ impl PeerConnection {
             return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
         }
 
-        // Read remote handshake
+        // Read remote handshake with timeout
         let mut buf = [0u8; 68];
-        read_exact(&mut conn, &mut buf).await?;
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, read_exact(&mut conn, &mut buf)).await {
+            Ok(Ok(())) => {}
+            _ => return Err(Error::new(ErrorKind::PeerConnectionClosed)),
+        };
         let remote_handshake = Handshake::from_bytes(&buf)?;
 
         // Verify info_hash

@@ -8,6 +8,33 @@ use tokio::sync::Mutex;
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerId, PeerMessage};
 
+/// Maximum retry attempts per peer before discarding.
+const MAX_RETRIES: u32 = 3;
+
+/// Cooldown period before a failed peer can be retried.
+const PEER_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Per-peer backoff state tracking connection retries.
+#[derive(Debug)]
+struct BackoffState {
+    attempts: u32,
+    cooldown_until: Instant,
+}
+
+impl BackoffState {
+    fn new() -> Self {
+        BackoffState {
+            attempts: 1,
+            cooldown_until: Instant::now() + PEER_COOLDOWN,
+        }
+    }
+
+    fn increment(&mut self) {
+        self.attempts += 1;
+        self.cooldown_until = Instant::now() + PEER_COOLDOWN;
+    }
+}
+
 /// Manages peer connections for a single torrent.
 pub(crate) struct PeerManager {
     /// Our peer ID.
@@ -20,8 +47,8 @@ pub(crate) struct PeerManager {
     pending: VecDeque<SocketAddr>,
     /// Maximum connections.
     max_connections: u32,
-    /// Last connect attempt for backoff.
-    last_connect_attempt: Option<Instant>,
+    /// Per-peer backoff state (retry count + cooldown timer).
+    backoff: HashMap<SocketAddr, BackoffState>,
 }
 
 impl PeerManager {
@@ -33,42 +60,18 @@ impl PeerManager {
             connections: HashMap::new(),
             pending: VecDeque::new(),
             max_connections,
-            last_connect_attempt: None,
+            backoff: HashMap::new(),
         }
     }
 
     /// Add peers from tracker/DHT announce.
+    ///
+    /// Skips addresses already connected or already pending.
     pub fn add_peers(&mut self, addrs: Vec<SocketAddr>) {
         for addr in addrs {
-            if !self.connections.contains_key(&addr) {
+            if !self.connections.contains_key(&addr) && !self.pending.contains(&addr) {
                 self.pending.push_back(addr);
             }
-        }
-    }
-
-    /// Attempt to connect to the next pending peer.
-    ///
-    /// Returns `Ok(Some(addr))` on success, `Ok(None)` if at capacity
-    /// or no pending peers, `Err` on connection failure.
-    pub async fn connect_next(&mut self) -> Result<Option<SocketAddr>, Error> {
-        if self.connections.len() as u32 >= self.max_connections {
-            return Ok(None); // at capacity
-        }
-
-        let addr = match self.pending.pop_front() {
-            Some(a) => a,
-            None => return Ok(None), // no pending peers
-        };
-
-        tracing::debug!("connecting to peer {}", addr);
-
-        match PeerConnection::connect(addr, self.info_hash, self.peer_id).await {
-            Ok(conn) => {
-                tracing::info!("peer connected: {}", addr);
-                self.connections.insert(addr, Arc::new(Mutex::new(conn)));
-                Ok(Some(addr))
-            }
-            Err(e) => Err(e),
         }
     }
 
@@ -93,34 +96,77 @@ impl PeerManager {
         self.connections.len()
     }
 
-    /// Connect to multiple pending peers.
+    /// Connect to multiple pending peers in parallel.
     ///
-    /// Returns the addresses of all newly connected peers.
-    /// Includes backoff: if ALL attempts fail, wait 5 seconds before retrying.
+    /// Drains a batch of pending peers (up to available slots) and spawns
+    /// concurrent connection attempts. Peers still in cooldown are skipped
+    /// and kept in the queue. Failed peers are re-enqueued with a per-peer
+    /// cooldown for retry, up to [`MAX_RETRIES`] times.
     pub async fn connect_pending(&mut self) -> Vec<SocketAddr> {
-        // Backoff check
-        if let Some(last) = self.last_connect_attempt
-            && last.elapsed() < Duration::from_secs(5)
-        {
+        let batch_size = (self.max_connections as usize).saturating_sub(self.connections.len());
+        let raw_batch: Vec<SocketAddr> = self.pending.drain(..batch_size).collect();
+
+        if raw_batch.is_empty() {
             return vec![];
         }
 
-        let had_pending = !self.pending.is_empty();
-        let mut connected = Vec::new();
-
-        while (self.connections.len() as u32) < self.max_connections {
-            match self.connect_next().await {
-                Ok(Some(addr)) => connected.push(addr),
-                Ok(None) => break,
-                Err(_) => continue,
+        let now = Instant::now();
+        let mut batch = Vec::with_capacity(raw_batch.len());
+        for addr in raw_batch {
+            if let Some(state) = self.backoff.get(&addr) {
+                if state.cooldown_until > now {
+                    // Still in cooldown — put back for later
+                    self.pending.push_back(addr);
+                    continue;
+                }
             }
+            batch.push(addr);
         }
 
-        // If we had pending peers but connected none, start backoff
-        if had_pending && connected.is_empty() && self.pending.is_empty() {
-            self.last_connect_attempt = Some(Instant::now());
-        } else if !connected.is_empty() {
-            self.last_connect_attempt = None;
+        if batch.is_empty() {
+            return vec![];
+        }
+
+        let mut handles = Vec::with_capacity(batch.len());
+        for &addr in &batch {
+            let info_hash = self.info_hash;
+            let peer_id = self.peer_id;
+            handles.push(tokio::spawn(async move {
+                let result = PeerConnection::connect(addr, info_hash, peer_id).await;
+                (addr, result)
+            }));
+        }
+
+        let mut connected = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok((addr, Ok(conn))) => {
+                    tracing::info!("peer connected: {}", addr);
+                    self.connections.insert(addr, Arc::new(Mutex::new(conn)));
+                    self.backoff.remove(&addr); // clear backoff on success
+                    connected.push(addr);
+                }
+                Ok((addr, Err(_))) => {
+                    let state = self.backoff.entry(addr).or_insert_with(BackoffState::new);
+                    if state.attempts < MAX_RETRIES {
+                        state.increment();
+                        tracing::debug!(
+                            "re-enqueuing peer {} (attempt {}/{}, cooldown {}s)",
+                            addr,
+                            state.attempts,
+                            MAX_RETRIES,
+                            PEER_COOLDOWN.as_secs()
+                        );
+                        self.pending.push_back(addr);
+                    } else {
+                        tracing::debug!("peer {}: max retries reached, discarding", addr);
+                        self.backoff.remove(&addr);
+                    }
+                }
+                Err(_) => {
+                    // spawned task panicked — should not happen
+                }
+            }
         }
 
         connected
@@ -165,17 +211,16 @@ mod tests {
     }
 
     #[test]
-    fn connect_next_at_capacity() {
+    fn at_capacity_precondition() {
         let pm = PeerManager {
             peer_id: PeerId::random(),
             info_hash: [0u8; 20],
             connections: HashMap::new(),
             pending: vec![test_addr(1)].into_iter().collect(),
-            max_connections: 0, // capacity is 0, so all attempts return None
-            last_connect_attempt: None,
+            max_connections: 0,
+            backoff: HashMap::new(),
         };
-        // connect_next should return Ok(None) since at capacity
-        // We can't actually call .await in sync tests, so test the precondition
+        // Precondition: capacity 0 means no connections will be attempted
         assert_eq!(pm.max_connections, 0);
     }
 

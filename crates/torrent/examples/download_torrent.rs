@@ -23,6 +23,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    beside the torrent crate (created automatically if missing).
     let download_dir = PathBuf::from("crates/torrent/examples/data");
     std::fs::create_dir_all(&download_dir)?;
+
+    // 2. Clean up any residual ISO from a previous run.
+    let iso_path = download_dir.join("debian-13.5.0-amd64-netinst.iso");
+    if iso_path.exists() {
+        std::fs::remove_file(&iso_path)?;
+        println!("Cleaned up residual file: {}", iso_path.display());
+    }
+
     let config = SessionConfig {
         download_dir: download_dir.clone(),
         ..Default::default()
