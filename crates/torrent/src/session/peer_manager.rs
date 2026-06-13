@@ -104,7 +104,8 @@ impl PeerManager {
     /// cooldown for retry, up to [`MAX_RETRIES`] times.
     pub async fn connect_pending(&mut self) -> Vec<SocketAddr> {
         let batch_size = (self.max_connections as usize).saturating_sub(self.connections.len());
-        let raw_batch: Vec<SocketAddr> = self.pending.drain(..batch_size).collect();
+        let drain_count = batch_size.min(self.pending.len());
+        let raw_batch: Vec<SocketAddr> = self.pending.drain(..drain_count).collect();
 
         if raw_batch.is_empty() {
             return vec![];
