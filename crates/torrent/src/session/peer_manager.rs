@@ -119,7 +119,12 @@ impl PeerManager {
             if let Some(state) = self.backoff.get(&addr) {
                 if state.cooldown_until > now {
                     // Still in cooldown — put back for later
-                    self.pending.push_unique(addr);
+                    let re_enqueued = self.pending.push_unique(addr);
+                    debug_assert!(
+                        re_enqueued,
+                        "cooldown peer {} unexpectedly already in pending set",
+                        addr
+                    );
                     continue;
                 }
             }
@@ -160,7 +165,12 @@ impl PeerManager {
                             MAX_RETRIES,
                             PEER_COOLDOWN.as_secs()
                         );
-                        self.pending.push_unique(addr);
+                        let re_enqueued = self.pending.push_unique(addr);
+                        debug_assert!(
+                            re_enqueued,
+                            "retried peer {} unexpectedly already in pending set",
+                            addr
+                        );
                     } else {
                         tracing::debug!("peer {}: max retries reached, discarding", addr);
                         self.backoff.remove(&addr);
