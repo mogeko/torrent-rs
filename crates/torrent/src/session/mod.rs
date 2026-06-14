@@ -13,6 +13,7 @@
 mod download;
 mod peer_manager;
 mod torrent;
+mod unideque;
 mod upload;
 
 use std::collections::HashMap;
