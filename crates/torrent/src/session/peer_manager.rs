@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerId, PeerMessage};
 
-use super::unideque::UniDeque;
+use super::uni_deque::UniDeque;
 
 /// Maximum retry attempts per peer before discarding.
 const MAX_RETRIES: u32 = 3;
