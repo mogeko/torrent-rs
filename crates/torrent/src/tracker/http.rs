@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 
 use crate::error::{Error, ErrorKind};
 use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
@@ -24,7 +25,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> TrackerStream for T {}
 pub struct HttpTracker {
     url: Url,
     /// TLS connector for `https://` URLs; `None` for plain `http://`.
-    tls: Option<tokio_rustls::TlsConnector>,
+    tls: Option<TlsConnector>,
 }
 
 impl fmt::Debug for HttpTracker {
@@ -105,8 +106,9 @@ impl HttpTracker {
 
             // Conditionally wrap the TCP stream in TLS for `https://` URLs.
             let mut stream: Box<dyn TrackerStream> = if let Some(ref connector) = tls {
-                let domain = rustls::pki_types::ServerName::try_from(host)
-                    .map_err(|_| Error::new(ErrorKind::InvalidInput))?;
+                use rustls::pki_types::ServerName;
+
+                let domain = ServerName::try_from(host).map_err(Error::invalid_input)?;
                 let tls_stream = connector
                     .connect(domain, tcp_stream)
                     .await
@@ -163,7 +165,7 @@ impl HttpTracker {
 }
 
 /// Build a TLS connector with system root certificates.
-fn build_tls_connector() -> Result<tokio_rustls::TlsConnector, Error> {
+fn build_tls_connector() -> Result<TlsConnector, Error> {
     let mut root_store = rustls::RootCertStore::empty();
 
     let native_certs = rustls_native_certs::load_native_certs();
@@ -175,7 +177,7 @@ fn build_tls_connector() -> Result<tokio_rustls::TlsConnector, Error> {
         .with_root_certificates(root_store)
         .with_no_client_auth();
 
-    Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
+    Ok(TlsConnector::from(Arc::new(config)))
 }
 
 /// Build the query string with correct percent-encoding for binary fields

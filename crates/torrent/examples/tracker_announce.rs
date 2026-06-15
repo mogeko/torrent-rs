@@ -1,6 +1,6 @@
 //! Perform a real tracker announce and print the peer list.
 //!
-//! Uses the bundled Debian 13.5 torrent's built-in tracker list.
+//! Uses the bundled Ubuntu 26.04 torrent's built-in tracker list.
 //! Demonstrates single and multi-tracker announce via the unified [`Tracker`] API.
 //!
 //! Run with: `cargo run -p torrent --example tracker_announce`
@@ -17,11 +17,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Parse the real torrent to get info_hash and tracker URLs
-    let data = include_bytes!("data/debian-13.5.0-amd64-netinst.iso.torrent");
+    let data = include_bytes!("data/ubuntu-26.04-live-server-amd64.iso.torrent");
     let meta = from_bytes(data)?;
     let info_hash = meta.info_hash();
 
-    println!("Torrent:  debian-13.5.0-amd64-netinst.iso.torrent");
+    println!("Torrent:  ubuntu-26.04-live-server-amd64.iso.torrent");
     println!("Info hash: {:02x?}", info_hash);
 
     // Build an announce request

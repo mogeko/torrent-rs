@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,6 +7,8 @@ use tokio::sync::Mutex;
 
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerId, PeerMessage};
+
+use super::uni_deque::UniDeque;
 
 /// Maximum retry attempts per peer before discarding.
 const MAX_RETRIES: u32 = 3;
@@ -43,8 +45,8 @@ pub(crate) struct PeerManager {
     info_hash: [u8; 20],
     /// Active connections by remote address (behind Mutex for interior mutability).
     connections: HashMap<SocketAddr, Arc<Mutex<PeerConnection>>>,
-    /// Pending connection attempts.
-    pending: VecDeque<SocketAddr>,
+    /// Pending connection attempts (O(1) contains via internal HashSet).
+    pending: UniDeque<SocketAddr>,
     /// Maximum connections.
     max_connections: u32,
     /// Per-peer backoff state (retry count + cooldown timer).
@@ -58,7 +60,7 @@ impl PeerManager {
             peer_id,
             info_hash,
             connections: HashMap::new(),
-            pending: VecDeque::new(),
+            pending: UniDeque::new(),
             max_connections,
             backoff: HashMap::new(),
         }
@@ -66,11 +68,12 @@ impl PeerManager {
 
     /// Add peers from tracker/DHT announce.
     ///
-    /// Skips addresses already connected or already pending.
+    /// Skips addresses already connected. Duplicate entries in the
+    /// pending queue are silently skipped by [`UniDeque::push_unique`].
     pub fn add_peers(&mut self, addrs: Vec<SocketAddr>) {
         for addr in addrs {
-            if !self.connections.contains_key(&addr) && !self.pending.contains(&addr) {
-                self.pending.push_back(addr);
+            if !self.connections.contains_key(&addr) {
+                self.pending.push_unique(addr);
             }
         }
     }
@@ -104,8 +107,7 @@ impl PeerManager {
     /// cooldown for retry, up to [`MAX_RETRIES`] times.
     pub async fn connect_pending(&mut self) -> Vec<SocketAddr> {
         let batch_size = (self.max_connections as usize).saturating_sub(self.connections.len());
-        let drain_count = batch_size.min(self.pending.len());
-        let raw_batch: Vec<SocketAddr> = self.pending.drain(..drain_count).collect();
+        let raw_batch: Vec<SocketAddr> = self.pending.drain_first_n(batch_size);
 
         if raw_batch.is_empty() {
             return vec![];
@@ -117,7 +119,12 @@ impl PeerManager {
             if let Some(state) = self.backoff.get(&addr) {
                 if state.cooldown_until > now {
                     // Still in cooldown — put back for later
-                    self.pending.push_back(addr);
+                    let re_enqueued = self.pending.push_unique(addr);
+                    debug_assert!(
+                        re_enqueued,
+                        "cooldown peer {} unexpectedly already in pending set",
+                        addr
+                    );
                     continue;
                 }
             }
@@ -158,7 +165,12 @@ impl PeerManager {
                             MAX_RETRIES,
                             PEER_COOLDOWN.as_secs()
                         );
-                        self.pending.push_back(addr);
+                        let re_enqueued = self.pending.push_unique(addr);
+                        debug_assert!(
+                            re_enqueued,
+                            "retried peer {} unexpectedly already in pending set",
+                            addr
+                        );
                     } else {
                         tracing::debug!("peer {}: max retries reached, discarding", addr);
                         self.backoff.remove(&addr);
@@ -217,7 +229,11 @@ mod tests {
             peer_id: PeerId::random(),
             info_hash: [0u8; 20],
             connections: HashMap::new(),
-            pending: vec![test_addr(1)].into_iter().collect(),
+            pending: {
+                let mut d = UniDeque::new();
+                d.push_unique(test_addr(1));
+                d
+            },
             max_connections: 0,
             backoff: HashMap::new(),
         };
