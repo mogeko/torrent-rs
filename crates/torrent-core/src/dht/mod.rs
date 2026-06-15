@@ -227,4 +227,64 @@ mod tests {
         // Should be different with high probability
         assert_ne!(id1, id2);
     }
+
+    // ── A.3: find_closest ordering correctness ──────────────────
+
+    #[test]
+    fn find_closest_returns_correct_order() {
+        let mut rt = RoutingTable::with_id([0x00u8; 20]);
+
+        // Insert nodes with increasing distance
+        for i in 1u8..=8 {
+            let mut id = [0u8; 20];
+            id[0] = i;
+            rt.insert(Node {
+                id,
+                addr: "127.0.0.1:6881".parse().unwrap(),
+            });
+        }
+
+        // Target is 0 — so node with id[0]=1 should be closest
+        let target = [0x00u8; 20];
+        let closest = rt.find_closest(&target, 4);
+        assert_eq!(closest.len(), 4);
+
+        // Verify order: id[0]=1 < id[0]=2 < id[0]=3 < id[0]=4
+        for (i, node) in closest.iter().enumerate() {
+            assert_eq!(node.id[0], (i + 1) as u8);
+        }
+    }
+
+    #[test]
+    fn find_closest_count_exceeds_total() {
+        let mut rt = RoutingTable::with_id([0u8; 20]);
+        rt.insert(Node {
+            id: [0x01u8; 20],
+            addr: "127.0.0.1:6881".parse().unwrap(),
+        });
+        rt.insert(Node {
+            id: [0x02u8; 20],
+            addr: "127.0.0.1:6882".parse().unwrap(),
+        });
+
+        // Request more than we have
+        let closest = rt.find_closest(&[0x00u8; 20], 10);
+        assert_eq!(closest.len(), 2);
+    }
+
+    // ── A.4: bucket_index edge cases ────────────────────────────
+
+    #[test]
+    fn bucket_index_last_bit_diff() {
+        let our = [0x00u8; 20];
+        let mut node = [0x00u8; 20];
+        node[19] = 0x01; // last byte, bit 0 → bucket = 19*8 + 7 = 159
+        assert_eq!(bucket_index(&our, &node), 159);
+    }
+
+    #[test]
+    fn bucket_index_same_id() {
+        let id = [0x42u8; 20];
+        assert_eq!(bucket_index(&id, &id), 0);
+    }
 }
