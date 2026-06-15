@@ -6,7 +6,10 @@
 //!
 //! Async RPC and query helpers live in the `torrent` crate under `torrent::dht`.
 
+mod kbucket;
 pub mod krpc;
+
+use self::kbucket::KBucket;
 
 use std::net::SocketAddr;
 
@@ -37,25 +40,11 @@ pub struct RoutingTable {
     /// Our own node ID.
     pub node_id: [u8; 20],
     /// K-buckets: 160 buckets, each with up to K nodes.
-    buckets: Vec<Bucket>,
+    buckets: Vec<KBucket>,
 }
-
-/// Maximum nodes per bucket.
-const K: usize = 8;
 
 /// Number of buckets (160-bit address space).
 const NUM_BUCKETS: usize = 160;
-
-#[derive(Debug, Clone)]
-struct Bucket {
-    nodes: Vec<Node>,
-}
-
-impl Bucket {
-    fn new() -> Self {
-        Bucket { nodes: Vec::new() }
-    }
-}
 
 impl Default for RoutingTable {
     fn default() -> Self {
@@ -68,7 +57,7 @@ impl RoutingTable {
     pub fn new() -> Self {
         RoutingTable {
             node_id: generate_node_id(),
-            buckets: (0..NUM_BUCKETS).map(|_| Bucket::new()).collect(),
+            buckets: (0..NUM_BUCKETS).map(|_| KBucket::new()).collect(),
         }
     }
 
@@ -76,42 +65,23 @@ impl RoutingTable {
     pub fn with_id(node_id: [u8; 20]) -> Self {
         RoutingTable {
             node_id,
-            buckets: (0..NUM_BUCKETS).map(|_| Bucket::new()).collect(),
+            buckets: (0..NUM_BUCKETS).map(|_| KBucket::new()).collect(),
         }
     }
 
     /// Insert or update a node in the routing table.
     ///
-    /// Returns true if the node was newly added, false if updated or rejected.
+    /// Delegates to the appropriate K-bucket which handles LRU ordering
+    /// and eviction. Returns `true` if the node was newly added.
     pub fn insert(&mut self, node: Node) -> bool {
         tracing::debug!("DHT insert: {}", node.addr);
         let bucket_idx = bucket_index(&self.node_id, &node.id);
-        let bucket = &mut self.buckets[bucket_idx];
-
-        // Check if node already exists — update
-        for existing in &mut bucket.nodes {
-            if existing.id == node.id {
-                existing.addr = node.addr;
-                return false;
-            }
-        }
-
-        // Insert if bucket is not full
-        if bucket.nodes.len() < K {
-            bucket.nodes.push(node);
-            return true;
-        }
-
-        // Bucket is full — reject (in full implementation, we'd ping existing nodes)
-        // For now, keep the nodes sorted by last seen
-        bucket.nodes.remove(0);
-        bucket.nodes.push(node);
-        true
+        self.buckets[bucket_idx].insert(node)
     }
 
     /// Find the K closest nodes to a target ID.
     pub fn find_closest(&self, target: &[u8; 20], count: usize) -> Vec<Node> {
-        let mut all_nodes: Vec<&Node> = self.buckets.iter().flat_map(|b| b.nodes.iter()).collect();
+        let mut all_nodes: Vec<&Node> = self.buckets.iter().flat_map(|b| b.iter()).collect();
 
         all_nodes.sort_by_key(|n| xor_distance(&n.id, target));
 
@@ -120,7 +90,7 @@ impl RoutingTable {
 
     /// Number of known nodes in the routing table.
     pub fn num_nodes(&self) -> usize {
-        self.buckets.iter().map(|b| b.nodes.len()).sum()
+        self.buckets.iter().map(|b| b.len()).sum()
     }
 
     /// Generate a random node ID.
@@ -244,9 +214,8 @@ mod tests {
                 addr: "127.0.0.1:6881".parse().unwrap(),
             });
         }
-        // Bucket can hold at most K=8, but our insert replaces oldest
-        // With the current simple insertion: keeps 8
-        assert!(rt.num_nodes() <= 8 + 12 - 8); // rough check
+        // K=8, so only the last 8 survive
+        assert_eq!(rt.num_nodes(), 8);
     }
 
     #[test]
