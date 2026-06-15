@@ -31,7 +31,7 @@ pub type QueryHandler = Arc<dyn Fn(&KrpcMessage, SocketAddr) -> Option<Vec<u8>> 
 /// call inserts a oneshot sender into `pending`, sends the UDP datagram,
 /// then awaits the receiver. The background loop dispatches matching
 /// responses by transaction ID and delegates queries to the optional
-/// [`query_handler`](QueryHandler).
+/// `query_handler` callback.
 pub struct DhtRpc {
     socket: UdpSocket,
     pending: Mutex<HashMap<TransactionId, oneshot::Sender<KrpcMessage>>>,
