@@ -14,7 +14,7 @@ use super::krpc::{KrpcMessage, TransactionId};
 ///
 /// Supports concurrent in-flight queries via a background receive loop
 /// and a transaction ID → oneshot channel map. Each [`query`](DhtRpc::query)
-/// call inserts a oneshot sender into [`pending`], sends the UDP datagram,
+/// call inserts a oneshot sender into `pending`, sends the UDP datagram,
 /// then awaits the receiver. The background loop dispatches matching
 /// responses by transaction ID.
 pub struct DhtRpc {
