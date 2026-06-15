@@ -708,7 +708,7 @@ impl DownloadLoop {
         match DhtRpc::new(bind_addr).await {
             Ok(rpc) => {
                 self.dht_node_id = generate_node_id();
-                self.dht_rpc = Some(Arc::new(rpc));
+                self.dht_rpc = Some(rpc);
                 self.next_dht_search = Some(Instant::now());
             }
             Err(_) => {
