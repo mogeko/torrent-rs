@@ -1,3 +1,8 @@
+//! High-level DHT query wrappers — BEP 5.
+//!
+//! Each function accepts a [`DhtRpc`] client, builds the appropriate
+//! KRPC message, sends it to the target address, and parses the response.
+
 use std::net::SocketAddr;
 
 use crate::error::{Error, ErrorKind};

@@ -1,3 +1,8 @@
+//! KRPC message encoding/decoding — BEP 5.
+//!
+//! Provides the [`KrpcMessage`] enum, builder helpers for queries
+//! and responses, response parsers, and compact node I/O.
+
 use std::net::{Ipv4Addr, SocketAddr};
 
 use bytes::Bytes;
@@ -497,6 +502,9 @@ fn dict_get<'a>(val: &'a Bencode, key: &[u8]) -> Option<&'a Bencode> {
     }
 }
 
+/// Extract a byte-string value from a bencode dictionary by key.
+///
+/// Returns `None` if the key is not present or the value is not bytes.
 pub fn dict_get_bytes<'a>(val: &'a Bencode, key: &[u8]) -> Option<&'a [u8]> {
     match dict_get(val, key)? {
         Bencode::Bytes(b) => Some(b),

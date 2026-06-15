@@ -1,3 +1,10 @@
+//! Async DHT RPC client — UDP send/receive with transaction matching.
+//!
+//! [`DhtRpc`] binds a UDP socket, spawns a background receive loop, and
+//! supports concurrent in-flight queries via a transaction ID → oneshot
+//! channel map. Incoming queries are dispatched to an optional
+//! [`QueryHandler`] callback.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
