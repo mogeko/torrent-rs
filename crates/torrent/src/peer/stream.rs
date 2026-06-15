@@ -5,7 +5,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 
 use crate::error::{Error, ErrorKind};
-use crate::peer::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
+
+use super::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
 
 /// Timeout for TCP connect + handshake exchange.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);

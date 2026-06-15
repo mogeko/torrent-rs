@@ -4,7 +4,8 @@ use std::time::Duration;
 use tokio::net::{UdpSocket, lookup_host};
 
 use crate::error::{Error, ErrorKind};
-use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
+
+use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
 /// Magic connection ID constant used during the connection phase.
 const INITIAL_CONNECTION_ID: u64 = 0x41727101980;

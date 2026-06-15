@@ -72,9 +72,8 @@ impl KBucket {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-
     use super::*;
+    use std::net::SocketAddr;
 
     fn node(id_byte: u8) -> Node {
         let mut id = [0u8; 20];

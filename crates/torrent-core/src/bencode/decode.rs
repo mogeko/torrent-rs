@@ -1,7 +1,8 @@
 use bytes::Bytes;
 
-use crate::bencode::Bencode;
 use crate::error::{Error, ErrorKind};
+
+use super::Bencode;
 
 /// Decode a single bencoded value from the beginning of `data`.
 ///
@@ -204,8 +205,6 @@ fn parse_decimal_u64(s: &[u8]) -> Result<u64, Error> {
 #[cfg(test)]
 mod decode_tests {
     use super::*;
-    use crate::bencode::Bencode;
-    use bytes::Bytes;
 
     // ── Strings ────────────────────────────────────────────────────────
 

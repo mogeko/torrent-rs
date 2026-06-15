@@ -1,9 +1,8 @@
 use std::net::SocketAddr;
 
-use crate::dht::Node;
-use crate::dht::krpc;
-use crate::dht::rpc::DhtRpc;
 use crate::error::{Error, ErrorKind};
+
+use super::{Node, krpc, rpc::DhtRpc};
 
 /// Find nodes close to a target ID (BEP 5 find_node).
 ///
