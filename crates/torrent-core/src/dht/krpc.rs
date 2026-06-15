@@ -340,6 +340,120 @@ pub fn parse_compact_nodes(data: &[u8]) -> Vec<super::Node> {
         .collect()
 }
 
+/// Encode nodes into compact format (BEP 5).
+///
+/// Each node is 26 bytes: 20-byte node ID + 4-byte IPv4 address + 2-byte port.
+/// Returns the concatenated bytes for all nodes.
+pub fn encode_compact_nodes(nodes: &[super::Node]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(nodes.len() * 26);
+    for node in nodes {
+        data.extend_from_slice(&node.id);
+        let ip = match node.addr.ip() {
+            std::net::IpAddr::V4(v4) => v4.octets(),
+            _ => continue, // skip IPv6 for now
+        };
+        data.extend_from_slice(&ip);
+        data.extend_from_slice(&node.addr.port().to_be_bytes());
+    }
+    data
+}
+
+// ── Response builders ─────────────────────────────────────────────────
+
+/// Build a `ping` response (BEP 5).
+pub fn build_ping_response(tid: TransactionId, node_id: &[u8; 20]) -> Vec<u8> {
+    KrpcMessage::Response {
+        transaction_id: tid,
+        result: Bencode::Dict(vec![(
+            id_key(),
+            Bencode::Bytes(Bytes::copy_from_slice(node_id)),
+        )]),
+    }
+    .to_bytes()
+}
+
+/// Build a `find_node` response (BEP 5).
+pub fn build_find_node_response(
+    tid: TransactionId,
+    node_id: &[u8; 20],
+    nodes: &[super::Node],
+) -> Vec<u8> {
+    let compact = encode_compact_nodes(nodes);
+    KrpcMessage::Response {
+        transaction_id: tid,
+        result: Bencode::Dict(vec![
+            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+            (Bytes::from("nodes"), Bencode::Bytes(Bytes::from(compact))),
+        ]),
+    }
+    .to_bytes()
+}
+
+/// Build a `get_peers` response with peer values (BEP 5).
+pub fn build_get_peers_response_values(
+    tid: TransactionId,
+    node_id: &[u8; 20],
+    token: &[u8],
+    peers: &[std::net::SocketAddr],
+) -> Vec<u8> {
+    let peer_list: Vec<Bencode> = peers
+        .iter()
+        .filter_map(|addr| match addr.ip() {
+            std::net::IpAddr::V4(v4) => {
+                let mut data = Vec::new();
+                data.extend_from_slice(&v4.octets());
+                data.extend_from_slice(&addr.port().to_be_bytes());
+                Some(Bencode::Bytes(Bytes::from(data)))
+            }
+            _ => None,
+        })
+        .collect();
+    KrpcMessage::Response {
+        transaction_id: tid,
+        result: Bencode::Dict(vec![
+            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+            (
+                Bytes::from("token"),
+                Bencode::Bytes(Bytes::copy_from_slice(token)),
+            ),
+            (Bytes::from("values"), Bencode::List(peer_list)),
+        ]),
+    }
+    .to_bytes()
+}
+
+/// Build a `get_peers` response with closer nodes (BEP 5).
+pub fn build_get_peers_response_nodes(
+    tid: TransactionId,
+    node_id: &[u8; 20],
+    token: &[u8],
+    nodes: &[super::Node],
+) -> Vec<u8> {
+    let compact = encode_compact_nodes(nodes);
+    KrpcMessage::Response {
+        transaction_id: tid,
+        result: Bencode::Dict(vec![
+            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+            (
+                Bytes::from("token"),
+                Bencode::Bytes(Bytes::copy_from_slice(token)),
+            ),
+            (Bytes::from("nodes"), Bencode::Bytes(Bytes::from(compact))),
+        ]),
+    }
+    .to_bytes()
+}
+
+/// Build a KRPC error response (BEP 5).
+pub fn build_error_response(tid: TransactionId, code: i64, message: &str) -> Vec<u8> {
+    KrpcMessage::Error {
+        transaction_id: tid,
+        code,
+        message: message.into(),
+    }
+    .to_bytes()
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn t_key() -> Bytes {

@@ -15,7 +15,9 @@ use torrent_core::dht::{Node, RoutingTable};
 
 use crate::error::Error;
 
-use super::{find_node, get_peers, krpc, rpc::DhtRpc};
+use super::krpc::{self, KrpcMessage};
+use super::rpc::{DhtRpc, QueryHandler};
+use super::{find_node, get_peers};
 
 /// Interval between periodic bootstrap refreshes.
 const BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(300);
@@ -36,6 +38,8 @@ pub(crate) struct DhtNode {
     rpc: Arc<DhtRpc>,
     /// Well-known bootstrap addresses (resolved at construction time).
     bootstrap_nodes: Vec<SocketAddr>,
+    /// Secret for token generation (BEP 5 announce_peer validation).
+    secret: [u8; 20],
 }
 
 impl DhtNode {
@@ -46,6 +50,7 @@ impl DhtNode {
     pub async fn new(bind_addr: SocketAddr, bootstrap: &[(&str, u16)]) -> Result<Arc<Self>, Error> {
         let rpc = DhtRpc::new(bind_addr).await?;
         let node_id = torrent_core::dht::generate_node_id();
+        let secret = torrent_core::dht::generate_node_id(); // reuse SHA-1 generator for secret too
         let routing_table = Arc::new(Mutex::new(RoutingTable::with_id(node_id)));
 
         // Resolve bootstrap hostnames once
@@ -63,7 +68,12 @@ impl DhtNode {
             routing_table,
             rpc,
             bootstrap_nodes,
+            secret,
         });
+
+        // Install server-side query handler
+        node.rpc
+            .set_query_handler(create_query_handler(node.clone()));
 
         // Perform initial bootstrap then spawn periodic refresher
         node.clone().bootstrap().await;
@@ -211,4 +221,81 @@ impl DhtNode {
             }
         });
     }
+}
+
+/// Build a query handler that responds to incoming DHT queries.
+///
+/// Uses the node's routing table and node ID to answer `ping`,
+/// `find_node`, `get_peers`, and `announce_peer` queries.
+fn create_query_handler(node: Arc<DhtNode>) -> QueryHandler {
+    Arc::new(
+        move |msg: &KrpcMessage, src: SocketAddr| -> Option<Vec<u8>> {
+            let KrpcMessage::Query {
+                transaction_id,
+                method,
+                args,
+            } = msg
+            else {
+                return None;
+            };
+            let tid = *transaction_id;
+
+            match method.as_str() {
+                "ping" => Some(krpc::build_ping_response(tid, &node.node_id)),
+
+                "find_node" => {
+                    let target = krpc::dict_get_bytes(args, b"target")?;
+                    let mut target_id = [0u8; 20];
+                    let len = std::cmp::min(target.len(), 20);
+                    target_id[..len].copy_from_slice(&target[..len]);
+
+                    let rt = node.routing_table.blocking_lock();
+                    let closest = rt.find_closest(&target_id, 8);
+                    drop(rt);
+
+                    Some(krpc::build_find_node_response(tid, &node.node_id, &closest))
+                }
+
+                "get_peers" => {
+                    let info_hash_bytes = krpc::dict_get_bytes(args, b"info_hash")?;
+                    let mut info_hash = [0u8; 20];
+                    let len = std::cmp::min(info_hash_bytes.len(), 20);
+                    info_hash[..len].copy_from_slice(&info_hash_bytes[..len]);
+                    let token = generate_token(&node.secret, &src);
+
+                    let rt = node.routing_table.blocking_lock();
+                    let closest = rt.find_closest(&info_hash, 8);
+                    drop(rt);
+
+                    // Always respond with closest nodes (no local peer storage)
+                    Some(krpc::build_get_peers_response_nodes(
+                        tid,
+                        &node.node_id,
+                        &token,
+                        &closest,
+                    ))
+                }
+
+                "announce_peer" => {
+                    // Accept announce without validation (Phase 4.3 will add token check).
+                    // No local peer storage — just acknowledge.
+                    Some(krpc::build_ping_response(tid, &node.node_id))
+                }
+
+                _ => None,
+            }
+        },
+    )
+}
+
+/// Generate a token for `get_peers` / `announce_peer` validation (BEP 5).
+///
+/// The token is `SHA-1(secret || ip)[..4]` — simple, stateless,
+/// and bound to the requesting IP address.
+fn generate_token(secret: &[u8; 20], addr: &SocketAddr) -> Vec<u8> {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(secret);
+    hasher.update(format!("{}", addr.ip()).as_bytes());
+    hasher.finalize()[..4].to_vec()
 }
