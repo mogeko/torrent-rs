@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rand::RngExt;
 use tokio::sync::Mutex;
@@ -90,57 +90,91 @@ impl DhtNode {
         }
     }
 
-    /// Find peers for an info_hash via the DHT.
+    /// Find peers for an info_hash via iterative DHT lookup (BEP 5).
     ///
-    /// Queries the K closest known nodes for peers sharing the given
-    /// infohash. Currently performs a single round of parallel queries
-    /// (iterative recursive lookup is deferred to Phase 4).
+    /// Starts from the K closest known nodes and recursively queries
+    /// closer nodes returned by each response. Stops when peers are
+    /// found or a 15-second deadline expires.
     pub async fn get_peers(&self, info_hash: &[u8; 20]) -> Vec<SocketAddr> {
-        let closest = {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut queried: HashSet<[u8; 20]> = HashSet::new();
+        let mut peers: HashSet<SocketAddr> = HashSet::new();
+
+        // Seed: K closest nodes from the routing table
+        let mut pending: Vec<Node> = {
             let rt = self.routing_table.lock().await;
             rt.find_closest(info_hash, ALPHA)
         };
 
-        if closest.is_empty() {
+        if pending.is_empty() {
             return vec![];
         }
 
-        let mut peers: HashSet<SocketAddr> = HashSet::new();
-        let mut nodes_to_insert: Vec<Node> = Vec::new();
-        let mut handles = Vec::new();
+        loop {
+            // Take next batch of unqueried nodes
+            let batch: Vec<Node> = pending
+                .drain(..pending.len())
+                .filter(|n| queried.insert(n.id))
+                .take(LOOKUP_CONCURRENCY)
+                .collect();
 
-        for node in closest.into_iter().take(LOOKUP_CONCURRENCY) {
-            let rpc = self.rpc.clone();
-            let node_id = self.node_id;
-            let target = *info_hash;
-            let tid: krpc::TransactionId = rand::rng().random();
+            if batch.is_empty() || Instant::now() >= deadline {
+                break;
+            }
 
-            handles.push(tokio::spawn(async move {
-                get_peers(&rpc, node.addr, tid, &node_id, &target).await
-            }));
-        }
+            // Parallel queries
+            let mut handles = Vec::with_capacity(batch.len());
+            for node in &batch {
+                let rpc = self.rpc.clone();
+                let node_id = self.node_id;
+                let target = *info_hash;
+                let addr = node.addr;
+                let tid: krpc::TransactionId = rand::rng().random();
 
-        for handle in handles {
-            if let Ok(Ok(result)) = handle.await {
-                match result {
-                    krpc::GetPeersResult::Values {
-                        peers: returned_peers,
-                        ..
-                    } => {
-                        peers.extend(returned_peers);
-                    }
-                    krpc::GetPeersResult::Nodes(nodes) => {
-                        nodes_to_insert.extend(nodes);
+                handles.push(tokio::spawn(async move {
+                    get_peers(&rpc, addr, tid, &node_id, &target).await
+                }));
+            }
+
+            // Drain handled responses — dynamic removal from Vec
+            for handle in handles {
+                if let Ok(Ok(result)) = handle.await {
+                    match result {
+                        krpc::GetPeersResult::Values {
+                            peers: returned_peers,
+                            ..
+                        } => {
+                            peers.extend(returned_peers);
+                        }
+                        krpc::GetPeersResult::Nodes(nodes) => {
+                            // Feed into routing table, collect new unqueried nodes
+                            let mut rt = self.routing_table.lock().await;
+                            for node in nodes {
+                                if !queried.contains(&node.id) {
+                                    rt.insert(node.clone());
+                                    pending.push(node);
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
 
-        // Feed any returned nodes back into the routing table
-        if !nodes_to_insert.is_empty() {
-            let mut rt = self.routing_table.lock().await;
-            for node in nodes_to_insert {
-                rt.insert(node);
+            // Stop if we have enough peers or the deadline has passed
+            if !peers.is_empty() || Instant::now() >= deadline {
+                break;
+            }
+
+            // Refresh pending from routing table
+            let rt = self.routing_table.lock().await;
+            let fresh = rt.find_closest(info_hash, ALPHA);
+            for node in fresh {
+                if !queried.contains(&node.id) {
+                    pending.push(node);
+                }
+            }
+            if pending.is_empty() {
+                break;
             }
         }
 
