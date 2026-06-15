@@ -59,6 +59,11 @@ impl DhtRpc {
         *self.query_handler.lock().unwrap() = Some(handler);
     }
 
+    /// Return the bound local address of the underlying UDP socket.
+    pub fn local_addr(&self) -> Result<SocketAddr, Error> {
+        self.socket.local_addr().map_err(Error::protocol)
+    }
+
     /// Send a query and wait for a response via the transaction table.
     pub async fn query(
         &self,

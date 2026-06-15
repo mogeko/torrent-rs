@@ -11,13 +11,12 @@ use std::time::{Duration, Instant};
 
 use rand::RngExt;
 use tokio::sync::Mutex;
-use torrent_core::dht::{Node, RoutingTable};
 
 use crate::error::Error;
 
 use super::krpc::{self, KrpcMessage};
 use super::rpc::{DhtRpc, QueryHandler};
-use super::{find_node, get_peers};
+use super::{Node, RoutingTable, find_node, generate_node_id, get_peers};
 
 /// Interval between periodic bootstrap refreshes.
 const BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(300);
@@ -49,8 +48,8 @@ impl DhtNode {
     /// bootstrap hostnames, and spawns a periodic bootstrap task.
     pub async fn new(bind_addr: SocketAddr, bootstrap: &[(&str, u16)]) -> Result<Arc<Self>, Error> {
         let rpc = DhtRpc::new(bind_addr).await?;
-        let node_id = torrent_core::dht::generate_node_id();
-        let secret = torrent_core::dht::generate_node_id(); // reuse SHA-1 generator for secret too
+        let node_id = generate_node_id();
+        let secret = generate_node_id(); // reuse SHA-1 generator for secret too
         let routing_table = Arc::new(Mutex::new(RoutingTable::with_id(node_id)));
 
         // Resolve bootstrap hostnames once
@@ -89,7 +88,7 @@ impl DhtNode {
     async fn bootstrap(&self) {
         for &addr in &self.bootstrap_nodes {
             let tid: krpc::TransactionId = rand::rng().random();
-            let target = torrent_core::dht::generate_node_id();
+            let target = generate_node_id();
 
             if let Ok(nodes) = find_node(&self.rpc, addr, tid, &self.node_id, &target).await {
                 let mut rt = self.routing_table.lock().await;
