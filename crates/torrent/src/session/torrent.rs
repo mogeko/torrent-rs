@@ -101,11 +101,7 @@ impl TorrentHandle {
             last_downloaded: 0,
             last_uploaded: 0,
             tick_count: 0,
-            enable_dht: config.enable_dht,
             piece_cache: HashMap::new(),
-            dht_rpc: None,
-            dht_node_id: [0u8; 20],
-            next_dht_search: None,
         };
 
         let task = tokio::spawn(async move {

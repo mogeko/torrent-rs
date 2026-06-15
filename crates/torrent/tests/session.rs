@@ -40,6 +40,7 @@ async fn session_new_with_temp_dir() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
+        enable_dht: false,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -52,6 +53,7 @@ async fn add_torrent_bytes_and_query_status() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
+        enable_dht: false,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -79,6 +81,7 @@ async fn remove_torrent() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
+        enable_dht: false,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -102,6 +105,7 @@ async fn add_and_query_multiple_times() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
+        enable_dht: false,
         ..Default::default()
     };
     let session = Session::new(config).await?;
