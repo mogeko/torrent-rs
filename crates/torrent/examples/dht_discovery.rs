@@ -5,6 +5,7 @@
 //!
 //! Run with: `cargo run -p torrent --example dht_discovery`
 
+use std::net::SocketAddr;
 use torrent::dht::{DhtRpc, Node, RoutingTable, get_peers, krpc};
 use tracing_subscriber::EnvFilter;
 
@@ -30,7 +31,7 @@ async fn main() {
 
     let mut rt = RoutingTable::new();
     for (host, port) in &bootstrap {
-        let addr: std::net::SocketAddr = match format!("{}:{}", host, port).parse() {
+        let addr: SocketAddr = match format!("{}:{}", host, port).parse() {
             Ok(a) => a,
             Err(_) => continue,
         };

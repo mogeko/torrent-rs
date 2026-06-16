@@ -3,7 +3,7 @@
 //! Provides the [`KrpcMessage`] enum, builder helpers for queries
 //! and responses, response parsers, and compact node I/O.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bytes::Bytes;
 
@@ -308,7 +308,7 @@ pub fn parse_get_peers_response(msg: &KrpcMessage) -> Result<GetPeersResult, Err
                     {
                         let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
                         let port = u16::from_be_bytes([b[4], b[5]]);
-                        peers.push(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+                        peers.push(SocketAddr::new(IpAddr::V4(ip), port));
                     }
                 }
                 return Ok(GetPeersResult::Values { token, peers });
@@ -339,7 +339,7 @@ pub fn parse_compact_nodes(data: &[u8]) -> Vec<super::Node> {
             let port = u16::from_be_bytes([chunk[24], chunk[25]]);
             super::Node {
                 id,
-                addr: SocketAddr::new(std::net::IpAddr::V4(ip), port),
+                addr: SocketAddr::new(IpAddr::V4(ip), port),
             }
         })
         .collect()
@@ -354,7 +354,7 @@ pub fn encode_compact_nodes(nodes: &[super::Node]) -> Vec<u8> {
     for node in nodes {
         data.extend_from_slice(&node.id);
         let ip = match node.addr.ip() {
-            std::net::IpAddr::V4(v4) => v4.octets(),
+            IpAddr::V4(v4) => v4.octets(),
             _ => continue, // skip IPv6 for now
         };
         data.extend_from_slice(&ip);
@@ -399,12 +399,12 @@ pub fn build_get_peers_response_values(
     tid: TransactionId,
     node_id: &[u8; 20],
     token: &[u8],
-    peers: &[std::net::SocketAddr],
+    peers: &[SocketAddr],
 ) -> Vec<u8> {
     let peer_list: Vec<Bencode> = peers
         .iter()
         .filter_map(|addr| match addr.ip() {
-            std::net::IpAddr::V4(v4) => {
+            IpAddr::V4(v4) => {
                 let mut data = Vec::new();
                 data.extend_from_slice(&v4.octets());
                 data.extend_from_slice(&addr.port().to_be_bytes());
