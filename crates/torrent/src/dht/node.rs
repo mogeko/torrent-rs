@@ -42,13 +42,17 @@ pub(crate) struct DhtNode {
 }
 
 impl DhtNode {
-    /// Initialize a new DHT node.
+    /// Initialize a new DHT node with a specific node ID.
     ///
-    /// Binds a UDP socket, generates a random node ID, resolves
-    /// bootstrap hostnames, and spawns a periodic bootstrap task.
-    pub async fn new(bind_addr: SocketAddr, bootstrap: &[(&str, u16)]) -> Result<Arc<Self>, Error> {
+    /// Binds a UDP socket, resolves bootstrap hostnames, creates the
+    /// routing table, installs the server-side query handler, and
+    /// spawns a periodic bootstrap task.
+    pub async fn new(
+        node_id: [u8; 20],
+        bind_addr: SocketAddr,
+        bootstrap: &[(&str, u16)],
+    ) -> Result<Arc<Self>, Error> {
         let rpc = DhtRpc::new(bind_addr).await?;
-        let node_id = generate_node_id();
         let secret = generate_node_id(); // reuse SHA-1 generator for secret too
         let routing_table = Arc::new(Mutex::new(RoutingTable::with_id(node_id)));
 
