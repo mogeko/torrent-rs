@@ -98,11 +98,7 @@ async fn main() {
 
 /// Call find_node with proper types.
 async fn find_node(
-    rpc: &DhtRpc,
-    node: &Node,
-    tid: krpc::TransactionId,
-    node_id: &[u8; 20],
-    target: &[u8; 20],
+    rpc: &DhtRpc, node: &Node, tid: krpc::TransactionId, node_id: &[u8; 20], target: &[u8; 20],
 ) -> Result<Vec<Node>, Box<dyn std::error::Error>> {
     Ok(torrent::dht::find_node(rpc, node.addr, tid, node_id, target).await?)
 }

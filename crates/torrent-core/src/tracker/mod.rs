@@ -139,10 +139,7 @@ impl AnnounceResponse {
     ///
     /// Used by the UDP tracker parser in the `torrent` crate.
     pub fn from_udp_fields(
-        interval: u32,
-        complete: u32,
-        incomplete: u32,
-        peers: Vec<SocketAddr>,
+        interval: u32, complete: u32, incomplete: u32, peers: Vec<SocketAddr>,
     ) -> Self {
         AnnounceResponse {
             interval,

@@ -16,17 +16,12 @@ use crate::error::Error;
 pub trait Storage: Send + Sync {
     /// Read an entire piece into `buf`. The buffer must be exactly the piece length.
     fn read_piece(
-        &self,
-        index: u32,
-        buf: &mut [u8],
+        &self, index: u32, buf: &mut [u8],
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Write a block (a portion of a piece) to storage.
     fn write_block(
-        &self,
-        piece: u32,
-        offset: u32,
-        data: &[u8],
+        &self, piece: u32, offset: u32, data: &[u8],
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Total number of pieces.

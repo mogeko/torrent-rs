@@ -220,11 +220,7 @@ pub fn build_get_peers(tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 
 /// downloading the torrent identified by `info_hash` on the given `port`.
 /// Requires a `token` obtained from a previous `get_peers` response.
 pub fn build_announce_peer(
-    tid: TransactionId,
-    node_id: &[u8; 20],
-    info_hash: &[u8; 20],
-    port: u16,
-    token: &[u8],
+    tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 20], port: u16, token: &[u8],
 ) -> Vec<u8> {
     KrpcMessage::Query {
         transaction_id: tid,
@@ -379,9 +375,7 @@ pub fn build_ping_response(tid: TransactionId, node_id: &[u8; 20]) -> Vec<u8> {
 
 /// Build a `find_node` response (BEP 5).
 pub fn build_find_node_response(
-    tid: TransactionId,
-    node_id: &[u8; 20],
-    nodes: &[super::Node],
+    tid: TransactionId, node_id: &[u8; 20], nodes: &[super::Node],
 ) -> Vec<u8> {
     let compact = encode_compact_nodes(nodes);
     KrpcMessage::Response {
@@ -396,10 +390,7 @@ pub fn build_find_node_response(
 
 /// Build a `get_peers` response with peer values (BEP 5).
 pub fn build_get_peers_response_values(
-    tid: TransactionId,
-    node_id: &[u8; 20],
-    token: &[u8],
-    peers: &[SocketAddr],
+    tid: TransactionId, node_id: &[u8; 20], token: &[u8], peers: &[SocketAddr],
 ) -> Vec<u8> {
     let peer_list: Vec<Bencode> = peers
         .iter()
@@ -429,10 +420,7 @@ pub fn build_get_peers_response_values(
 
 /// Build a `get_peers` response with closer nodes (BEP 5).
 pub fn build_get_peers_response_nodes(
-    tid: TransactionId,
-    node_id: &[u8; 20],
-    token: &[u8],
-    nodes: &[super::Node],
+    tid: TransactionId, node_id: &[u8; 20], token: &[u8], nodes: &[super::Node],
 ) -> Vec<u8> {
     let compact = encode_compact_nodes(nodes);
     KrpcMessage::Response {

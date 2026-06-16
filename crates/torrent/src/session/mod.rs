@@ -164,8 +164,7 @@ impl Session {
             let node = DhtNode::new(node_id, bind_addr, bootstrap).await?;
 
             // Spawn background feeder: poll each torrent's info_hash every 30s
-            let dht = node.clone();
-            let t = torrents.clone();
+            let (dht, t) = (node.clone(), torrents.clone());
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(30)).await;

@@ -73,10 +73,7 @@ impl DhtRpc {
 
     /// Send a query and wait for a response via the transaction table.
     pub async fn query(
-        &self,
-        addr: SocketAddr,
-        tid: TransactionId,
-        data: &[u8],
+        &self, addr: SocketAddr, tid: TransactionId, data: &[u8],
     ) -> Result<KrpcMessage, Error> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(tid, tx);
@@ -98,10 +95,7 @@ impl DhtRpc {
 
     /// Ping a node to check if it's alive.
     pub async fn ping(
-        &self,
-        addr: SocketAddr,
-        tid: TransactionId,
-        node_id: &[u8; 20],
+        &self, addr: SocketAddr, tid: TransactionId, node_id: &[u8; 20],
     ) -> Result<KrpcMessage, Error> {
         let data = super::krpc::build_ping(tid, node_id);
         self.query(addr, tid, &data).await

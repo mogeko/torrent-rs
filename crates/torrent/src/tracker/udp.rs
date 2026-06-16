@@ -157,10 +157,7 @@ fn build_connect_packet(transaction_id: u32) -> Vec<u8> {
 
 /// Build a UDP announce request packet (BEP 15).
 fn build_announce_packet(
-    connection_id: u64,
-    transaction_id: u32,
-    req: &AnnounceRequest,
-    event: u32,
+    connection_id: u64, transaction_id: u32, req: &AnnounceRequest, event: u32,
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(98);
     buf.extend_from_slice(&connection_id.to_be_bytes()); // 8
@@ -200,8 +197,7 @@ fn parse_connect_response(data: &[u8], expected_transaction_id: u32) -> Result<u
 
 /// Parse a UDP announce response.
 fn parse_announce_response(
-    data: &[u8],
-    expected_transaction_id: u32,
+    data: &[u8], expected_transaction_id: u32,
 ) -> Result<AnnounceResponse, Error> {
     if data.len() < 20 {
         return Err(Error::new(ErrorKind::TrackerProtocolError));

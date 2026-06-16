@@ -40,10 +40,7 @@ pub(crate) struct TorrentHandle {
 impl TorrentHandle {
     /// Create a new TorrentHandle and spawn its download loop.
     pub fn new(
-        metainfo: Metainfo,
-        info_hash: [u8; 20],
-        storage: Arc<FileStorage>,
-        config: &SessionConfig,
+        metainfo: Metainfo, info_hash: [u8; 20], storage: Arc<FileStorage>, config: &SessionConfig,
     ) -> Self {
         let num_pieces = metainfo.info.num_pieces();
         let name = match &metainfo.info.mode {

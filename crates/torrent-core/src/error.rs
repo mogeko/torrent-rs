@@ -155,8 +155,7 @@ impl Error {
 
     /// Create a new error with the given kind and an underlying source.
     pub fn with_source(
-        kind: ErrorKind,
-        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+        kind: ErrorKind, source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> Self {
         Self {
             kind,

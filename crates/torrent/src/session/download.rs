@@ -268,9 +268,7 @@ impl DownloadLoop {
 
     /// Process a single peer wire protocol message.
     async fn handle_peer_message(
-        &mut self,
-        addr: SocketAddr,
-        msg: PeerMessage,
+        &mut self, addr: SocketAddr, msg: PeerMessage,
     ) -> Result<(), Error> {
         let peer = match self.peers.get_mut(&addr) {
             Some(p) => p,

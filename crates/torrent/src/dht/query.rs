@@ -18,11 +18,7 @@ use super::{Node, krpc, rpc::DhtRpc};
 ///
 /// Returns an error if the RPC call fails or the response is malformed.
 pub async fn find_node(
-    rpc: &DhtRpc,
-    addr: SocketAddr,
-    tid: krpc::TransactionId,
-    node_id: &[u8; 20],
-    target: &[u8; 20],
+    rpc: &DhtRpc, addr: SocketAddr, tid: krpc::TransactionId, node_id: &[u8; 20], target: &[u8; 20],
 ) -> Result<Vec<Node>, Error> {
     tracing::debug!("DHT find_node to {}", addr);
     let data = krpc::build_find_node(tid, node_id, target);
@@ -50,10 +46,7 @@ pub async fn find_node(
 ///
 /// Returns an error if the RPC call fails or the response is malformed.
 pub async fn get_peers(
-    rpc: &DhtRpc,
-    addr: SocketAddr,
-    tid: krpc::TransactionId,
-    node_id: &[u8; 20],
+    rpc: &DhtRpc, addr: SocketAddr, tid: krpc::TransactionId, node_id: &[u8; 20],
     info_hash: &[u8; 20],
 ) -> Result<krpc::GetPeersResult, Error> {
     tracing::debug!("DHT get_peers to {}", addr);
@@ -73,13 +66,8 @@ pub async fn get_peers(
 ///
 /// Returns an error if the RPC call fails or the response is malformed.
 pub async fn announce_peer(
-    rpc: &DhtRpc,
-    addr: SocketAddr,
-    tid: krpc::TransactionId,
-    node_id: &[u8; 20],
-    info_hash: &[u8; 20],
-    port: u16,
-    token: &[u8],
+    rpc: &DhtRpc, addr: SocketAddr, tid: krpc::TransactionId, node_id: &[u8; 20],
+    info_hash: &[u8; 20], port: u16, token: &[u8],
 ) -> Result<(), Error> {
     tracing::debug!("DHT announce_peer to {} (port {})", addr, port);
     let data = krpc::build_announce_peer(tid, node_id, info_hash, port, token);

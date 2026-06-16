@@ -48,9 +48,7 @@ impl DhtNode {
     /// routing table, installs the server-side query handler, and
     /// spawns a periodic bootstrap task.
     pub async fn new(
-        node_id: [u8; 20],
-        bind_addr: SocketAddr,
-        bootstrap: &[(&str, u16)],
+        node_id: [u8; 20], bind_addr: SocketAddr, bootstrap: &[(&str, u16)],
     ) -> Result<Arc<Self>, Error> {
         let rpc = DhtRpc::new(bind_addr).await?;
         let secret = generate_node_id(); // reuse SHA-1 generator for secret too

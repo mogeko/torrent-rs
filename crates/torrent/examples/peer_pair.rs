@@ -64,8 +64,7 @@ async fn connect_peer(addr: SocketAddr) -> Result<(PeerId, TcpStream), Box<dyn s
 
 /// Send a message (length-prefixed wire format) over the stream.
 async fn send_msg(
-    stream: &mut TcpStream,
-    msg: &PeerMessage,
+    stream: &mut TcpStream, msg: &PeerMessage,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let wire = encode(msg);
     stream.write_all(&wire).await?;

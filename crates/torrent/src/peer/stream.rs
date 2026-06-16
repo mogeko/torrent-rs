@@ -28,9 +28,7 @@ pub struct PeerConnection {
 impl PeerConnection {
     /// Connect to a peer, perform the handshake, and return a connection.
     pub async fn connect(
-        addr: SocketAddr,
-        info_hash: [u8; 20],
-        our_peer_id: PeerId,
+        addr: SocketAddr, info_hash: [u8; 20], our_peer_id: PeerId,
     ) -> Result<Self, Error> {
         tracing::debug!("connecting to peer {}", addr);
 
