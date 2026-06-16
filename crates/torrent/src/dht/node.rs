@@ -73,12 +73,11 @@ impl DhtNode {
         });
 
         // Install server-side query handler
-        node.rpc
-            .set_query_handler(create_query_handler(node.clone()));
+        let query_handler = create_query_handler(node.clone());
+        node.rpc.set_query_handler(query_handler);
 
-        // Perform initial bootstrap then spawn periodic refresher
-        node.clone().bootstrap().await;
-        node.clone().spawn_bootstrap_loop();
+        // Kick off bootstrap in the background (non-blocking)
+        node.clone().spawn_bootstrap();
 
         Ok(node)
     }
@@ -87,7 +86,7 @@ impl DhtNode {
     ///
     /// Sends `find_node` queries with a random target to each bootstrap
     /// node. Any returned nodes are inserted into the routing table.
-    async fn bootstrap(&self) {
+    async fn bootstrap(&self) -> () {
         for &addr in &self.bootstrap_nodes {
             let tid: krpc::TransactionId = rand::rng().random();
             let target = generate_node_id();
@@ -212,13 +211,14 @@ impl DhtNode {
         Ok(())
     }
 
-    /// Spawn a periodic bootstrap task that re-populates the routing table.
-    fn spawn_bootstrap_loop(self: Arc<Self>) {
+    /// Spawn a background task: bootstrap immediately, then
+    /// periodically re-bootstrap to keep the routing table fresh.
+    fn spawn_bootstrap(self: Arc<Self>) -> () {
         tokio::spawn(async move {
+            self.bootstrap().await;
             loop {
                 tokio::time::sleep(BOOTSTRAP_INTERVAL).await;
-                let node = self.clone();
-                node.bootstrap().await;
+                self.bootstrap().await;
             }
         });
     }
