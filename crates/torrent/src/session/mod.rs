@@ -17,11 +17,14 @@ mod uni_deque;
 mod upload;
 
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 
+use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Metainfo, Mode, from_bytes as parse_metainfo};
 use crate::storage::FileStorage;
@@ -67,7 +70,10 @@ pub struct Session {
     /// Session configuration.
     config: SessionConfig,
     /// Active torrents, keyed by info_hash.
-    torrents: RwLock<HashMap<InfoHash, TorrentHandle>>,
+    torrents: Arc<RwLock<HashMap<InfoHash, TorrentHandle>>>,
+    /// Shared DHT node (if DHT is enabled).
+    #[expect(dead_code)]
+    dht_node: Option<Arc<DhtNode>>,
 }
 
 /// Session configuration.
@@ -83,6 +89,10 @@ pub struct SessionConfig {
     pub download_dir: PathBuf,
     /// Enable DHT.
     pub enable_dht: bool,
+    /// Optional DHT node ID (20 bytes). If `None`, a random one is generated
+    /// each session. Set this to a persisted value to keep a stable identity
+    /// across restarts (BEP 5 recommends persisting the node ID).
+    pub node_id: Option<[u8; 20]>,
 }
 
 impl Default for SessionConfig {
@@ -93,6 +103,7 @@ impl Default for SessionConfig {
             max_uploads: 8,
             download_dir: PathBuf::from("downloads"),
             enable_dht: true,
+            node_id: None,
         }
     }
 }
@@ -136,9 +147,48 @@ pub enum TorrentState {
 impl Session {
     /// Create a new session with the given configuration.
     pub async fn new(config: SessionConfig) -> Result<Self, Error> {
+        let torrents: Arc<RwLock<HashMap<InfoHash, TorrentHandle>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        // Initialize DHT if enabled
+        let dht_node = if config.enable_dht {
+            let bind_addr = SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::UNSPECIFIED,
+                config.listen_port + 1,
+            ));
+            let bootstrap = &[
+                ("router.bittorrent.com", 6881),
+                ("dht.transmissionbt.com", 6881),
+            ];
+            let node_id = config.node_id.unwrap_or_else(generate_node_id);
+            let node = DhtNode::new(node_id, bind_addr, bootstrap).await?;
+
+            // Spawn background feeder: poll each torrent's info_hash every 30s
+            let (dht, t) = (node.clone(), torrents.clone());
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    let info_hashes: Vec<InfoHash> = t.read().await.keys().copied().collect();
+                    for ih in info_hashes {
+                        let peers = dht.get_peers(&ih).await;
+                        if !peers.is_empty() {
+                            if let Some(handle) = t.read().await.get(&ih) {
+                                handle.peer_mgr.write().await.add_peers(peers);
+                            }
+                        }
+                    }
+                }
+            });
+
+            Some(node)
+        } else {
+            None
+        };
+
         Ok(Session {
             config,
-            torrents: RwLock::new(HashMap::new()),
+            torrents,
+            dht_node,
         })
     }
 

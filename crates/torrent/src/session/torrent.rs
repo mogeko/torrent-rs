@@ -40,10 +40,7 @@ pub(crate) struct TorrentHandle {
 impl TorrentHandle {
     /// Create a new TorrentHandle and spawn its download loop.
     pub fn new(
-        metainfo: Metainfo,
-        info_hash: [u8; 20],
-        storage: Arc<FileStorage>,
-        config: &SessionConfig,
+        metainfo: Metainfo, info_hash: [u8; 20], storage: Arc<FileStorage>, config: &SessionConfig,
     ) -> Self {
         let num_pieces = metainfo.info.num_pieces();
         let name = match &metainfo.info.mode {
@@ -101,11 +98,7 @@ impl TorrentHandle {
             last_downloaded: 0,
             last_uploaded: 0,
             tick_count: 0,
-            enable_dht: config.enable_dht,
             piece_cache: HashMap::new(),
-            dht_rpc: None,
-            dht_node_id: [0u8; 20],
-            next_dht_search: None,
         };
 
         let task = tokio::spawn(async move {

@@ -4,7 +4,8 @@ use tokio::fs;
 
 use crate::error::Error;
 use crate::metainfo::{Info, Mode};
-use crate::storage::Storage;
+
+use super::Storage;
 
 /// File-based storage backend.
 pub struct FileStorage {

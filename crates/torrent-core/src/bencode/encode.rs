@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use crate::bencode::Bencode;
+use super::Bencode;
 
 /// Encode a `Bencode` value into its bencoded byte representation.
 ///
@@ -85,8 +85,6 @@ fn encode_dict(entries: &[(Bytes, Bencode)]) -> Vec<u8> {
 #[cfg(test)]
 mod encode_tests {
     use super::*;
-    use crate::bencode::Bencode;
-    use bytes::Bytes;
 
     // ── Strings ────────────────────────────────────────────────────────
 

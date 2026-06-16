@@ -7,7 +7,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
 use crate::error::{Error, ErrorKind};
-use crate::tracker::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
+
+use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
 /// Timeout for HTTP tracker connect + request + response read.
 const TIMEOUT: Duration = Duration::from_secs(15);

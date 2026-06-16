@@ -1,11 +1,12 @@
 use bytes::Bytes;
 
-use crate::bencode::{self, Bencode};
 use crate::error::{Error, ErrorKind};
+
+use super::{Bencode, decode, encode};
 
 /// Decode a bencoded byte string directly to a `String`.
 ///
-/// Convenience wrapper around [`bencode::decode`](crate::bencode::decode)
+/// Convenience wrapper around [`decode`]
 /// that extracts a byte string and converts it to UTF-8.
 ///
 /// # Errors
@@ -23,7 +24,7 @@ use crate::error::{Error, ErrorKind};
 /// assert_eq!(s, "hello");
 /// ```
 pub fn decode_str(data: &[u8]) -> Result<String, Error> {
-    let (val, _rest) = bencode::decode(data)?;
+    let (val, _rest) = decode(data)?;
     match val {
         Bencode::Bytes(b) => {
             String::from_utf8(b.to_vec()).map_err(|_| Error::new(ErrorKind::InvalidInput))
@@ -45,7 +46,7 @@ pub fn decode_str(data: &[u8]) -> Result<String, Error> {
 /// assert_eq!(encode_str("spam"), b"4:spam");
 /// ```
 pub fn encode_str(s: &str) -> Vec<u8> {
-    bencode::encode(&Bencode::Bytes(Bytes::copy_from_slice(s.as_bytes())))
+    encode(&Bencode::Bytes(Bytes::copy_from_slice(s.as_bytes())))
 }
 
 /// Get a value by key from a bencoded dictionary.
@@ -131,7 +132,6 @@ pub fn dict_get_bytes<'a>(val: &'a Bencode, key: &[u8]) -> Option<&'a Bytes> {
 #[cfg(test)]
 mod util_tests {
     use super::*;
-    use bytes::Bytes;
 
     #[test]
     fn test_decode_str() {

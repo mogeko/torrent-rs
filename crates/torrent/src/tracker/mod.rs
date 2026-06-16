@@ -247,8 +247,7 @@ impl Tracker {
     ///
     /// Each task returns `Ok(AnnounceResponse)` on success or `Err(Error)` on failure.
     pub fn announce_into_set(
-        &self,
-        req: &AnnounceRequest,
+        &self, req: &AnnounceRequest,
     ) -> JoinSet<Result<AnnounceResponse, Error>> {
         let mut set = JoinSet::new();
         let req = Arc::new(req.clone());

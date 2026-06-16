@@ -1,4 +1,9 @@
-use std::net::{Ipv4Addr, SocketAddr};
+//! KRPC message encoding/decoding — BEP 5.
+//!
+//! Provides the [`KrpcMessage`] enum, builder helpers for queries
+//! and responses, response parsers, and compact node I/O.
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bytes::Bytes;
 
@@ -215,11 +220,7 @@ pub fn build_get_peers(tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 
 /// downloading the torrent identified by `info_hash` on the given `port`.
 /// Requires a `token` obtained from a previous `get_peers` response.
 pub fn build_announce_peer(
-    tid: TransactionId,
-    node_id: &[u8; 20],
-    info_hash: &[u8; 20],
-    port: u16,
-    token: &[u8],
+    tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 20], port: u16, token: &[u8],
 ) -> Vec<u8> {
     KrpcMessage::Query {
         transaction_id: tid,
@@ -303,7 +304,7 @@ pub fn parse_get_peers_response(msg: &KrpcMessage) -> Result<GetPeersResult, Err
                     {
                         let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
                         let port = u16::from_be_bytes([b[4], b[5]]);
-                        peers.push(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+                        peers.push(SocketAddr::new(IpAddr::V4(ip), port));
                     }
                 }
                 return Ok(GetPeersResult::Values { token, peers });
@@ -334,10 +335,116 @@ pub fn parse_compact_nodes(data: &[u8]) -> Vec<super::Node> {
             let port = u16::from_be_bytes([chunk[24], chunk[25]]);
             super::Node {
                 id,
-                addr: SocketAddr::new(std::net::IpAddr::V4(ip), port),
+                addr: SocketAddr::new(IpAddr::V4(ip), port),
             }
         })
         .collect()
+}
+
+/// Encode nodes into compact format (BEP 5).
+///
+/// Each node is 26 bytes: 20-byte node ID + 4-byte IPv4 address + 2-byte port.
+/// Returns the concatenated bytes for all nodes.
+pub fn encode_compact_nodes(nodes: &[super::Node]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(nodes.len() * 26);
+    for node in nodes {
+        data.extend_from_slice(&node.id);
+        let ip = match node.addr.ip() {
+            IpAddr::V4(v4) => v4.octets(),
+            _ => continue, // skip IPv6 for now
+        };
+        data.extend_from_slice(&ip);
+        data.extend_from_slice(&node.addr.port().to_be_bytes());
+    }
+    data
+}
+
+// ── Response builders ─────────────────────────────────────────────────
+
+/// Build a `ping` response (BEP 5).
+pub fn build_ping_response(tid: TransactionId, node_id: &[u8; 20]) -> Vec<u8> {
+    KrpcMessage::Response {
+        transaction_id: tid,
+        result: Bencode::Dict(vec![(
+            id_key(),
+            Bencode::Bytes(Bytes::copy_from_slice(node_id)),
+        )]),
+    }
+    .to_bytes()
+}
+
+/// Build a `find_node` response (BEP 5).
+pub fn build_find_node_response(
+    tid: TransactionId, node_id: &[u8; 20], nodes: &[super::Node],
+) -> Vec<u8> {
+    let compact = encode_compact_nodes(nodes);
+    KrpcMessage::Response {
+        transaction_id: tid,
+        result: Bencode::Dict(vec![
+            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+            (Bytes::from("nodes"), Bencode::Bytes(Bytes::from(compact))),
+        ]),
+    }
+    .to_bytes()
+}
+
+/// Build a `get_peers` response with peer values (BEP 5).
+pub fn build_get_peers_response_values(
+    tid: TransactionId, node_id: &[u8; 20], token: &[u8], peers: &[SocketAddr],
+) -> Vec<u8> {
+    let peer_list: Vec<Bencode> = peers
+        .iter()
+        .filter_map(|addr| match addr.ip() {
+            IpAddr::V4(v4) => {
+                let mut data = Vec::new();
+                data.extend_from_slice(&v4.octets());
+                data.extend_from_slice(&addr.port().to_be_bytes());
+                Some(Bencode::Bytes(Bytes::from(data)))
+            }
+            _ => None,
+        })
+        .collect();
+    KrpcMessage::Response {
+        transaction_id: tid,
+        result: Bencode::Dict(vec![
+            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+            (
+                Bytes::from("token"),
+                Bencode::Bytes(Bytes::copy_from_slice(token)),
+            ),
+            (Bytes::from("values"), Bencode::List(peer_list)),
+        ]),
+    }
+    .to_bytes()
+}
+
+/// Build a `get_peers` response with closer nodes (BEP 5).
+pub fn build_get_peers_response_nodes(
+    tid: TransactionId, node_id: &[u8; 20], token: &[u8], nodes: &[super::Node],
+) -> Vec<u8> {
+    let compact = encode_compact_nodes(nodes);
+    KrpcMessage::Response {
+        transaction_id: tid,
+        result: Bencode::Dict(vec![
+            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+            (
+                Bytes::from("token"),
+                Bencode::Bytes(Bytes::copy_from_slice(token)),
+            ),
+            (Bytes::from("nodes"), Bencode::Bytes(Bytes::from(compact))),
+        ]),
+    }
+    .to_bytes()
+}
+
+/// Build a KRPC error response (BEP 5).
+pub fn build_error_response(tid: TransactionId, code: i64, message: &str) -> Vec<u8> {
+    KrpcMessage::Error {
+        transaction_id: tid,
+        code,
+        message: message.into(),
+    }
+    .to_bytes()
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -383,6 +490,9 @@ fn dict_get<'a>(val: &'a Bencode, key: &[u8]) -> Option<&'a Bencode> {
     }
 }
 
+/// Extract a byte-string value from a bencode dictionary by key.
+///
+/// Returns `None` if the key is not present or the value is not bytes.
 pub fn dict_get_bytes<'a>(val: &'a Bencode, key: &[u8]) -> Option<&'a [u8]> {
     match dict_get(val, key)? {
         Bencode::Bytes(b) => Some(b),
@@ -490,5 +600,140 @@ mod tests {
         assert_eq!(nodes[0].id, [0x01u8; 20]);
         assert_eq!(nodes[0].addr.to_string(), "127.0.0.1:6881");
         assert_eq!(nodes[1].addr.to_string(), "192.168.1.1:51413");
+    }
+
+    #[test]
+    fn parse_ping_response_valid() {
+        let msg = KrpcMessage::Response {
+            transaction_id: [0xAB, 0xCD],
+            result: Bencode::Dict(vec![(
+                Bytes::from("id"),
+                Bencode::Bytes(Bytes::copy_from_slice(&[0x42u8; 20])),
+            )]),
+        };
+        let id = parse_ping_response(&msg).unwrap();
+        assert_eq!(id, [0x42u8; 20]);
+    }
+
+    #[test]
+    fn parse_ping_response_not_a_response() {
+        let msg = KrpcMessage::Query {
+            transaction_id: [0; 2],
+            method: "ping".into(),
+            args: Bencode::Dict(vec![]),
+        };
+        assert!(parse_ping_response(&msg).is_err());
+    }
+
+    #[test]
+    fn parse_get_peers_values() {
+        let msg = KrpcMessage::Response {
+            transaction_id: [0; 2],
+            result: Bencode::Dict(vec![
+                (Bytes::from("token"), Bencode::Bytes(Bytes::from("tok"))),
+                (
+                    Bytes::from("values"),
+                    Bencode::List(vec![
+                        // compact peer: 6 bytes (127.0.0.1:6881)
+                        Bencode::Bytes(Bytes::from(vec![127, 0, 0, 1, 0x1A, 0xE1])),
+                    ]),
+                ),
+            ]),
+        };
+        match parse_get_peers_response(&msg).unwrap() {
+            GetPeersResult::Values { token, peers } => {
+                assert_eq!(token, b"tok");
+                assert_eq!(peers.len(), 1);
+            }
+            _ => panic!("expected Values"),
+        }
+    }
+
+    #[test]
+    fn parse_get_peers_nodes() {
+        let mut compact = Vec::new();
+        compact.extend_from_slice(&[0x01u8; 20]); // node ID
+        compact.extend_from_slice(&[10, 0, 0, 1]); // IP
+        compact.extend_from_slice(&6881u16.to_be_bytes());
+
+        let msg = KrpcMessage::Response {
+            transaction_id: [0; 2],
+            result: Bencode::Dict(vec![
+                (Bytes::from("token"), Bencode::Bytes(Bytes::from("tok"))),
+                (Bytes::from("nodes"), Bencode::Bytes(Bytes::from(compact))),
+            ]),
+        };
+        match parse_get_peers_response(&msg).unwrap() {
+            GetPeersResult::Nodes(nodes) => {
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0].addr.to_string(), "10.0.0.1:6881");
+            }
+            _ => panic!("expected Nodes"),
+        }
+    }
+
+    #[test]
+    fn parse_get_peers_neither_values_nor_nodes() {
+        let msg = KrpcMessage::Response {
+            transaction_id: [0; 2],
+            result: Bencode::Dict(vec![]),
+        };
+        assert!(parse_get_peers_response(&msg).is_err());
+    }
+
+    #[test]
+    fn parse_get_peers_non_response() {
+        let msg = KrpcMessage::Query {
+            transaction_id: [0; 2],
+            method: "get_peers".into(),
+            args: Bencode::Dict(vec![]),
+        };
+        assert!(parse_get_peers_response(&msg).is_err());
+    }
+
+    #[test]
+    fn decode_truncated_krpc() {
+        let data = b"d1:t2:ab1:y1:q"; // truncated dict
+        assert!(KrpcMessage::from_bytes(data).is_err());
+    }
+
+    #[test]
+    fn decode_unknown_y_type() {
+        // y = 'x' is not valid
+        let _ = KrpcMessage::Error {
+            transaction_id: [0; 2],
+            code: 0,
+            message: String::new(),
+        };
+        // Instead build a valid message and test internal from_bencode directly
+        let dict = Bencode::Dict(vec![
+            (Bytes::from("t"), Bencode::Bytes(Bytes::from(vec![0, 0]))),
+            (Bytes::from("y"), Bencode::Bytes(Bytes::from(&b"x"[..]))),
+            (
+                Bytes::from("e"),
+                Bencode::List(vec![Bencode::Integer(0), Bencode::Bytes(Bytes::from(""))]),
+            ),
+        ]);
+        assert!(KrpcMessage::from_bencode(&dict).is_err());
+    }
+
+    #[test]
+    fn decode_missing_t_field() {
+        let dict = Bencode::Dict(vec![
+            (Bytes::from("y"), Bencode::Bytes(Bytes::from(&b"q"[..]))),
+            (Bytes::from("q"), Bencode::Bytes(Bytes::from(&b"ping"[..]))),
+            (Bytes::from("a"), Bencode::Dict(vec![])),
+        ]);
+        assert!(KrpcMessage::from_bencode(&dict).is_err());
+    }
+
+    #[test]
+    fn decode_error_missing_list() {
+        let dict = Bencode::Dict(vec![
+            (Bytes::from("t"), Bencode::Bytes(Bytes::from(vec![0, 0]))),
+            (Bytes::from("y"), Bencode::Bytes(Bytes::from(&b"e"[..]))),
+            (Bytes::from("e"), Bencode::Integer(203)), // not a list
+        ]);
+        assert!(KrpcMessage::from_bencode(&dict).is_err());
     }
 }

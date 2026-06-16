@@ -7,7 +7,7 @@
 //!
 //! Async HTTP and UDP tracker implementations live in the `torrent` crate.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::bencode::{self, Bencode, dict_get, dict_get_bytes, dict_get_int};
 use crate::error::{Error, ErrorKind};
@@ -139,10 +139,7 @@ impl AnnounceResponse {
     ///
     /// Used by the UDP tracker parser in the `torrent` crate.
     pub fn from_udp_fields(
-        interval: u32,
-        complete: u32,
-        incomplete: u32,
-        peers: Vec<SocketAddr>,
+        interval: u32, complete: u32, incomplete: u32, peers: Vec<SocketAddr>,
     ) -> Self {
         AnnounceResponse {
             interval,
@@ -180,13 +177,13 @@ fn parse_peers(val: &Bencode) -> Result<Vec<SocketAddr>, Error> {
                 .unwrap_or_default();
             let port = dict_get_int(peer, b"port").unwrap_or(0) as u16;
 
-            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
                 peers.push(SocketAddr::new(ip, port));
             } else if let Some(Bencode::Bytes(b)) = dict_get(peer, b"ip")
                 && b.len() == 4
             {
-                let ip = std::net::Ipv4Addr::new(b[0], b[1], b[2], b[3]);
-                peers.push(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+                let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
+                peers.push(SocketAddr::new(IpAddr::V4(ip), port));
             }
         }
         return Ok(peers);
@@ -209,9 +206,9 @@ pub fn parse_compact_peers_ipv4(data: &[u8]) -> Result<Vec<SocketAddr>, Error> {
     }
     data.chunks_exact(6)
         .map(|chunk| {
-            let ip = std::net::Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+            let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
             let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-            Ok(SocketAddr::new(std::net::IpAddr::V4(ip), port))
+            Ok(SocketAddr::new(IpAddr::V4(ip), port))
         })
         .collect()
 }

@@ -5,6 +5,7 @@
 //!
 //! Run with: `cargo run -p torrent --example dht_discovery`
 
+use std::net::SocketAddr;
 use torrent::dht::{DhtRpc, Node, RoutingTable, get_peers, krpc};
 use tracing_subscriber::EnvFilter;
 
@@ -30,7 +31,7 @@ async fn main() {
 
     let mut rt = RoutingTable::new();
     for (host, port) in &bootstrap {
-        let addr: std::net::SocketAddr = match format!("{}:{}", host, port).parse() {
+        let addr: SocketAddr = match format!("{}:{}", host, port).parse() {
             Ok(a) => a,
             Err(_) => continue,
         };
@@ -97,11 +98,7 @@ async fn main() {
 
 /// Call find_node with proper types.
 async fn find_node(
-    rpc: &DhtRpc,
-    node: &Node,
-    tid: krpc::TransactionId,
-    node_id: &[u8; 20],
-    target: &[u8; 20],
+    rpc: &DhtRpc, node: &Node, tid: krpc::TransactionId, node_id: &[u8; 20], target: &[u8; 20],
 ) -> Result<Vec<Node>, Box<dyn std::error::Error>> {
     Ok(torrent::dht::find_node(rpc, node.addr, tid, node_id, target).await?)
 }

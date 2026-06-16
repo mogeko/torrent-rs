@@ -1,5 +1,6 @@
 use crate::error::Error;
-use crate::tracker::Url;
+
+use super::Url;
 
 /// Convert a type into a tracker URL.
 ///

@@ -5,7 +5,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 
 use crate::error::{Error, ErrorKind};
-use crate::peer::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
+
+use super::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
 
 /// Timeout for TCP connect + handshake exchange.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -27,9 +28,7 @@ pub struct PeerConnection {
 impl PeerConnection {
     /// Connect to a peer, perform the handshake, and return a connection.
     pub async fn connect(
-        addr: SocketAddr,
-        info_hash: [u8; 20],
-        our_peer_id: PeerId,
+        addr: SocketAddr, info_hash: [u8; 20], our_peer_id: PeerId,
     ) -> Result<Self, Error> {
         tracing::debug!("connecting to peer {}", addr);
 
