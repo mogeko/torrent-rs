@@ -222,7 +222,12 @@ async fn dht_rpc_concurrent_queries() {
 
 #[tokio::test]
 async fn dht_rpc_query_timeout() {
-    let client = DhtRpc::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    use std::time::Duration;
+
+    let timeout = Duration::from_secs(1); // 1s
+    let client = DhtRpc::with_timeout("127.0.0.1:0".parse().unwrap(), timeout)
+        .await
+        .unwrap();
     let tid: TransactionId = [0xFF, 0xFF];
     let node_id = [0u8; 20];
     // Port 1 is privileged — no DHT node responds there

@@ -36,6 +36,7 @@ pub struct DhtRpc {
     socket: UdpSocket,
     pending: Mutex<HashMap<TransactionId, oneshot::Sender<KrpcMessage>>>,
     query_handler: Mutex<Option<QueryHandler>>,
+    timeout: Duration,
 }
 
 /// Default timeout for DHT RPC calls.
@@ -47,11 +48,19 @@ impl DhtRpc {
     /// Spawns a background receive loop that dispatches incoming KRPC
     /// messages to the corresponding in-flight query via transaction ID.
     pub async fn new(bind_addr: SocketAddr) -> Result<Arc<Self>, Error> {
+        Self::with_timeout(bind_addr, RPC_TIMEOUT).await
+    }
+
+    /// Create a new DHT RPC client with a custom query timeout.
+    pub async fn with_timeout(
+        bind_addr: SocketAddr, timeout: Duration,
+    ) -> Result<Arc<Self>, Error> {
         let socket = UdpSocket::bind(bind_addr).await?;
         let rpc = Arc::new(DhtRpc {
             socket,
             pending: Mutex::new(HashMap::new()),
             query_handler: Mutex::new(None),
+            timeout,
         });
         rpc.clone().start_recv_loop();
         Ok(rpc)
@@ -84,7 +93,7 @@ impl DhtRpc {
             return Err(Error::with_source(ErrorKind::Protocol, e));
         }
 
-        tokio::time::timeout(RPC_TIMEOUT, rx)
+        tokio::time::timeout(self.timeout, rx)
             .await
             .map_err(|_| {
                 self.pending.lock().unwrap().remove(&tid);

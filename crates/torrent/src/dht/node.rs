@@ -213,7 +213,7 @@ impl DhtNode {
 
     /// Spawn a background task: bootstrap immediately, then
     /// periodically re-bootstrap to keep the routing table fresh.
-    fn spawn_bootstrap(self: Arc<Self>) -> () {
+    fn spawn_bootstrap(self: Arc<Self>) {
         tokio::spawn(async move {
             self.bootstrap().await;
             loop {
