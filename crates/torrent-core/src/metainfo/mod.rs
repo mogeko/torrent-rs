@@ -28,10 +28,11 @@ mod parse;
 
 // Re-export Bytes so callers can construct `RawInfo::Bytes(...)` without
 // adding `bytes` as a direct dependency.
-pub use bytes::Bytes;
+pub use crate::bencode::Bytes;
 
 use sha1::{Digest, Sha1};
 
+use crate::bencode::{self, Bencode};
 use crate::error::Error;
 
 /// Represents a parsed `.torrent` file (BEP 3).
@@ -142,13 +143,95 @@ impl Metainfo {
         }
     }
 
-    /// Serialize back to bencoded bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        unimplemented!("Metainfo::to_bytes is not yet supported")
+    /// Serialize back to bencoded bytes (the `.torrent` file format).
+    ///
+    /// Returns `None` if this is a magnet-URI stub (`RawInfo::Hash`)
+    /// whose raw info dict bytes are not available.
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        let raw_info = match &self.info.raw_info {
+            RawInfo::Bytes(raw) => raw.clone(),
+            RawInfo::Hash(_) => return None,
+        };
+
+        let mut entries: Vec<(Bytes, Bencode)> = Vec::new();
+
+        // announce
+        entries.push((
+            Bytes::from("announce"),
+            Bencode::Bytes(Bytes::copy_from_slice(self.announce.as_bytes())),
+        ));
+
+        // announce-list (BEP 12) — only if non-empty
+        if !self.announce_list.is_empty() {
+            let tiers: Vec<Bencode> = self
+                .announce_list
+                .iter()
+                .map(|tier| {
+                    Bencode::List(
+                        tier.iter()
+                            .map(|url| Bencode::Bytes(Bytes::copy_from_slice(url.as_bytes())))
+                            .collect(),
+                    )
+                })
+                .collect();
+            entries.push((Bytes::from("announce-list"), Bencode::List(tiers)));
+        }
+
+        // Optional fields
+        if let Some(date) = self.creation_date {
+            entries.push((Bytes::from("creation date"), Bencode::Integer(date)));
+        }
+        if let Some(ref c) = self.comment {
+            entries.push((
+                Bytes::from("comment"),
+                Bencode::Bytes(Bytes::copy_from_slice(c.as_bytes())),
+            ));
+        }
+        if let Some(ref cb) = self.created_by {
+            entries.push((
+                Bytes::from("created by"),
+                Bencode::Bytes(Bytes::copy_from_slice(cb.as_bytes())),
+            ));
+        }
+        if let Some(ref enc) = self.encoding {
+            entries.push((
+                Bytes::from("encoding"),
+                Bencode::Bytes(Bytes::copy_from_slice(enc.as_bytes())),
+            ));
+        }
+
+        // Build the outer dict manually so we can splice in the raw info
+        // dict bytes verbatim (they are already bencoded).
+        let mut out: Vec<u8> = Vec::new();
+        out.push(b'd');
+
+        // Sort keys per BEP 3
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        for (key, val) in entries {
+            out.extend_from_slice(&bencode::encode(&Bencode::Bytes(key)));
+            out.extend_from_slice(&bencode::encode(&val));
+        }
+
+        // Insert info dict raw bytes verbatim
+        let info_key = bencode::encode(&Bencode::Bytes(Bytes::from("info")));
+        out.extend_from_slice(&info_key);
+        out.extend_from_slice(&raw_info);
+
+        out.push(b'e');
+        Some(out)
     }
 }
 
 impl Info {
+    /// Replace the raw info bytes (e.g. after a BEP 9 metadata exchange).
+    ///
+    /// Only valid when `raw_info` is currently [`RawInfo::Hash`].
+    /// The caller MUST verify that `SHA-1(raw)` matches the cached hash.
+    pub fn set_raw_bytes(&mut self, raw: Bytes) {
+        self.raw_info = RawInfo::Bytes(raw);
+    }
+
     /// Returns the total size of all files in bytes.
     ///
     /// For single-file torrents, this is the file length.
@@ -233,4 +316,137 @@ impl TryFrom<Vec<u8>> for Metainfo {
 /// ```
 pub fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
     data.try_into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_single() -> (Metainfo, Vec<u8>) {
+        let info = Bencode::Dict(vec![
+            (Bytes::from("name"), Bencode::Bytes(Bytes::from("f.txt"))),
+            (Bytes::from("piece length"), Bencode::Integer(16)),
+            (Bytes::from("length"), Bencode::Integer(32)),
+            (
+                Bytes::from("pieces"),
+                Bencode::Bytes(Bytes::from(vec![0u8; 20])),
+            ),
+        ]);
+        let root = Bencode::Dict(vec![
+            (
+                Bytes::from("announce"),
+                Bencode::Bytes(Bytes::from("http://t.com/a")),
+            ),
+            (Bytes::from("info"), info),
+        ]);
+        let data = bencode::encode(&root);
+        let meta = Metainfo::try_from(&data).unwrap();
+        (meta, data)
+    }
+
+    #[test]
+    fn to_bytes_roundtrip() {
+        let (meta, original) = make_single();
+        let re_encoded = meta.to_bytes().expect("should have raw bytes");
+        assert_eq!(re_encoded, original);
+    }
+
+    #[test]
+    fn to_bytes_magnet_stub_returns_none() {
+        let meta = Metainfo {
+            announce: String::new(),
+            announce_list: vec![],
+            info: Info {
+                piece_length: 0,
+                pieces: vec![],
+                mode: Mode::Single {
+                    name: "stub".into(),
+                    length: 0,
+                },
+                raw_info: RawInfo::Hash([0u8; 20]),
+            },
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+        assert!(meta.to_bytes().is_none());
+    }
+
+    #[test]
+    fn set_raw_bytes_then_to_bytes() {
+        let (meta, _) = make_single();
+
+        // Simulate: start with Hash, then set raw bytes (metadata exchange)
+        let mut stub = Metainfo {
+            announce: "http://t.com/a".into(),
+            announce_list: vec![],
+            info: Info {
+                piece_length: 16,
+                pieces: vec![[0u8; 20]],
+                mode: Mode::Single {
+                    name: "f.txt".into(),
+                    length: 32,
+                },
+                raw_info: RawInfo::Hash([0u8; 20]),
+            },
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+        assert!(stub.to_bytes().is_none());
+
+        // After metadata exchange: set the raw bytes from the original
+        let raw = match &meta.info.raw_info {
+            RawInfo::Bytes(b) => b.clone(),
+            _ => unreachable!(),
+        };
+        stub.info.set_raw_bytes(raw);
+        let re_encoded = stub.to_bytes().expect("should have raw bytes now");
+        let re_parsed = Metainfo::try_from(&re_encoded).unwrap();
+        assert_eq!(re_parsed.info_hash(), stub.info_hash());
+    }
+
+    #[test]
+    fn to_bytes_preserves_optional_fields() {
+        let info = Bencode::Dict(vec![
+            (Bytes::from("name"), Bencode::Bytes(Bytes::from("x"))),
+            (Bytes::from("piece length"), Bencode::Integer(32)),
+            (Bytes::from("length"), Bencode::Integer(64)),
+            (
+                Bytes::from("pieces"),
+                Bencode::Bytes(Bytes::from(vec![0u8; 20])),
+            ),
+        ]);
+        let root = Bencode::Dict(vec![
+            (
+                Bytes::from("announce"),
+                Bencode::Bytes(Bytes::from("http://t.com/a")),
+            ),
+            (Bytes::from("comment"), Bencode::Bytes(Bytes::from("test"))),
+            (
+                Bytes::from("created by"),
+                Bencode::Bytes(Bytes::from("tool")),
+            ),
+            (Bytes::from("creation date"), Bencode::Integer(1000)),
+            (
+                Bytes::from("encoding"),
+                Bencode::Bytes(Bytes::from("UTF-8")),
+            ),
+            (Bytes::from("info"), info),
+        ]);
+        let data = bencode::encode(&root);
+        let meta = Metainfo::try_from(&data).unwrap();
+        assert_eq!(meta.comment.as_deref(), Some("test"));
+        assert_eq!(meta.created_by.as_deref(), Some("tool"));
+        assert_eq!(meta.creation_date, Some(1000));
+        assert_eq!(meta.encoding.as_deref(), Some("UTF-8"));
+
+        // Round-trip
+        let re_encoded = meta.to_bytes().unwrap();
+        let re_parsed = Metainfo::try_from(&re_encoded).unwrap();
+        assert_eq!(re_parsed.comment.as_deref(), Some("test"));
+        assert_eq!(re_parsed.created_by.as_deref(), Some("tool"));
+    }
 }
