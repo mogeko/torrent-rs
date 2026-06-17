@@ -28,7 +28,7 @@ use super::{FileInfo, Info, Metainfo, Mode};
 /// let meta = from_bytes(&data).unwrap();
 /// println!("Info hash: {:x?}", meta.info_hash());
 /// ```
-pub fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
+pub(crate) fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
     tracing::debug!("parsing .torrent file ({} bytes)", data.len());
     let (val, _rest) = bencode::decode(data)?;
 

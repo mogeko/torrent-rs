@@ -26,10 +26,10 @@
 
 mod parse;
 
-pub use self::parse::from_bytes;
-
 use bytes::Bytes;
 use sha1::{Digest, Sha1};
+
+use crate::error::Error;
 
 /// Represents a parsed `.torrent` file (BEP 3).
 ///
@@ -142,4 +142,71 @@ impl Info {
     pub fn num_pieces(&self) -> usize {
         self.pieces.len()
     }
+}
+
+/// Try to parse [`Metainfo`] from raw bencoded bytes (BEP 3).
+///
+/// This is the standard `TryFrom` entry point. A convenience wrapper
+/// [`from_bytes`] is also provided for call sites where a free function
+/// reads more naturally.
+///
+/// # Errors
+///
+/// Returns [`Error`] if the data is not valid bencode or if required
+/// metainfo fields are missing or invalid.
+impl TryFrom<&[u8]> for Metainfo {
+    type Error = Error;
+
+    fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
+        self::parse::from_bytes(data)
+    }
+}
+
+/// Parse [`Metainfo`] from a borrowed byte array of any size.
+impl<const N: usize> TryFrom<&[u8; N]> for Metainfo {
+    type Error = Error;
+
+    fn try_from(data: &[u8; N]) -> Result<Self, Self::Error> {
+        self::parse::from_bytes(data)
+    }
+}
+
+/// Parse [`Metainfo`] from a shared reference to a byte vector.
+///
+/// This complements [`TryFrom<&[u8]>`] so that callers can write
+/// `Metainfo::try_from(&vec)` without manually slicing.
+impl TryFrom<&Vec<u8>> for Metainfo {
+    type Error = Error;
+
+    fn try_from(data: &Vec<u8>) -> Result<Self, Self::Error> {
+        self::parse::from_bytes(data.as_slice())
+    }
+}
+
+/// Parse [`Metainfo`] from an owned byte vector.
+///
+/// This allows `data.try_into()` where `data: Vec<u8>`.
+impl TryFrom<Vec<u8>> for Metainfo {
+    type Error = Error;
+
+    fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
+        self::parse::from_bytes(&data)
+    }
+}
+
+/// Parse a `Metainfo` from raw bencoded bytes (the contents of a `.torrent` file).
+///
+/// This is a convenience wrapper around [`Metainfo::try_from`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use torrent_core::metainfo::from_bytes;
+///
+/// let data = std::fs::read("debian.torrent").unwrap();
+/// let meta = from_bytes(&data).unwrap();
+/// println!("Info hash: {:x?}", meta.info_hash());
+/// ```
+pub fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
+    data.try_into()
 }

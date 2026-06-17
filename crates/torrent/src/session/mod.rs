@@ -26,7 +26,8 @@ use tokio::sync::RwLock;
 
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
-use crate::metainfo::{Metainfo, Mode, from_bytes as parse_metainfo};
+use crate::magnet::MagnetUri;
+use crate::metainfo::{Metainfo, Mode};
 use crate::spec::TorrentSpec;
 use crate::storage::FileStorage;
 
@@ -211,14 +212,13 @@ impl Session {
 
     /// Add a torrent from a magnet URI string (BEP 9).
     pub async fn add_magnet_str(&self, uri: impl AsRef<str>) -> Result<InfoHash, Error> {
-        let magnet: crate::magnet::MagnetUri = uri.as_ref().parse()?;
+        let magnet: MagnetUri = uri.as_ref().parse()?;
         self.add_torrent(magnet).await
     }
 
     /// Add a torrent from raw bencoded bytes (a `.torrent` file).
     pub async fn add_torrent_bytes(&self, data: &[u8]) -> Result<InfoHash, Error> {
-        let meta = parse_metainfo(data)?;
-        self.add_torrent(meta).await
+        self.add_torrent(Metainfo::try_from(data)?).await
     }
 
     /// Core: bootstrap a torrent from full metadata.
@@ -238,7 +238,7 @@ impl Session {
     }
 
     /// Core: bootstrap a torrent from a magnet URI.
-    async fn add_from_magnet(&self, uri: crate::magnet::MagnetUri) -> Result<InfoHash, Error> {
+    async fn add_from_magnet(&self, uri: MagnetUri) -> Result<InfoHash, Error> {
         let info_hash = *uri.primary_info_hash();
         let name = uri
             .display_name

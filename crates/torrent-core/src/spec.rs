@@ -15,12 +15,12 @@ use crate::metainfo::{Metainfo, Mode};
 /// # Examples
 ///
 /// ```
-/// use torrent_core::metainfo::from_bytes;
+/// use torrent_core::metainfo::Metainfo;
 /// use torrent_core::spec::TorrentSpec;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let data = std::fs::read("my.torrent")?;
-/// let meta = from_bytes(&data)?;
+/// let meta = Metainfo::try_from(&data)?;
 /// let spec = TorrentSpec::Metainfo(meta);
 /// assert_eq!(spec.name(), Some("my_torrent"));
 /// # Ok(())

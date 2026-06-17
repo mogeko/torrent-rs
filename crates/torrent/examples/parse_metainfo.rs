@@ -3,7 +3,7 @@
 //! Uses a real Ubuntu 26.04 torrent file bundled in `examples/data/`.
 //! Run with: `cargo run -p torrent --example parse_metainfo`
 
-use torrent::metainfo::from_bytes;
+use torrent::metainfo::Metainfo;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -15,7 +15,7 @@ fn main() {
     let data = include_bytes!("data/ubuntu-26.04-live-server-amd64.iso.torrent");
 
     // Parse it
-    let meta = from_bytes(data).expect("failed to parse .torrent file");
+    let meta = Metainfo::try_from(data).expect("failed to parse .torrent file");
 
     println!("=== Torrent Metadata ===");
     println!("Tracker URL:    {}", meta.announce);
