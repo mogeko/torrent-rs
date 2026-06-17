@@ -3,7 +3,7 @@ use bytes::Bytes;
 use crate::bencode::{self, Bencode, dict_get, dict_get_bytes, dict_get_int};
 use crate::error::{Error, ErrorKind};
 
-use super::{FileInfo, Info, Metainfo, Mode};
+use super::{FileInfo, Info, Metainfo, Mode, RawInfo};
 
 /// Parse a `Metainfo` from raw bencoded bytes (the contents of a `.torrent` file).
 ///
@@ -124,7 +124,7 @@ fn parse_info(val: &Bencode, raw_info: Bytes) -> Result<Info, Error> {
         piece_length: piece_length as u64,
         pieces,
         mode,
-        raw_info,
+        raw_info: RawInfo::Bytes(raw_info),
     })
 }
 

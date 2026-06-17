@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_tracker_from_metainfo() {
-        use torrent_core::metainfo::{Info, Metainfo, Mode};
+        use torrent_core::metainfo::{Info, Metainfo, Mode, RawInfo};
 
         let info = Info {
             piece_length: 262144,
@@ -401,7 +401,7 @@ mod tests {
                 name: "test.txt".into(),
                 length: 1024,
             },
-            raw_info: bytes::Bytes::new(),
+            raw_info: RawInfo::Bytes(bytes::Bytes::new()),
         };
         let meta = Metainfo {
             announce: "http://tracker.a.com/announce".into(),
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_tracker_from_metainfo_skip_invalid() {
-        use torrent_core::metainfo::{Info, Metainfo, Mode};
+        use torrent_core::metainfo::{Info, Metainfo, Mode, RawInfo};
 
         let info = Info {
             piece_length: 262144,
@@ -428,7 +428,7 @@ mod tests {
                 name: "test.txt".into(),
                 length: 1024,
             },
-            raw_info: bytes::Bytes::new(),
+            raw_info: RawInfo::Bytes(bytes::Bytes::new()),
         };
         // announce has invalid scheme; announce_list is valid
         let meta = Metainfo {
@@ -509,7 +509,8 @@ mod tests {
 
     #[test]
     fn test_tracker_from_metainfo_dedup_across_tiers() {
-        use torrent_core::metainfo::{Info, Metainfo, Mode};
+        use bytes::Bytes;
+        use torrent_core::metainfo::{Info, Metainfo, Mode, RawInfo};
 
         let info = Info {
             piece_length: 262144,
@@ -518,7 +519,7 @@ mod tests {
                 name: "test.txt".into(),
                 length: 1024,
             },
-            raw_info: bytes::Bytes::new(),
+            raw_info: RawInfo::Bytes(Bytes::new()),
         };
         // announce and announce_list[0] share the same URL
         let meta = Metainfo {
@@ -610,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_tracker_from_metainfo_preserves_order() {
-        use torrent_core::metainfo::{Info, Metainfo, Mode};
+        use torrent_core::metainfo::{Info, Metainfo, Mode, RawInfo};
 
         let info = Info {
             piece_length: 262144,
@@ -619,7 +620,7 @@ mod tests {
                 name: "test.txt".into(),
                 length: 1024,
             },
-            raw_info: bytes::Bytes::new(),
+            raw_info: RawInfo::Bytes(bytes::Bytes::new()),
         };
         // Multiple tiers with unique URLs; order should be preserved
         let meta = Metainfo {

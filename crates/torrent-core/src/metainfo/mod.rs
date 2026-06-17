@@ -66,6 +66,19 @@ pub struct Metainfo {
     pub encoding: Option<String>,
 }
 
+/// Either the raw bencoded `info` dict bytes or a pre-computed hash.
+///
+/// From a `.torrent` file we get the full bytes (`Bytes`), and `info_hash()`
+/// computes SHA-1 from them. From a magnet URI we only have the hash itself
+/// (`Hash`) — see BEP 9.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawInfo {
+    /// Full bencoded info dict bytes (from a `.torrent` file).
+    Bytes(Bytes),
+    /// Pre-computed 20-byte info hash (from a magnet URI, no raw bytes).
+    Hash([u8; 20]),
+}
+
 /// The `info` dictionary from a `.torrent` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Info {
@@ -75,8 +88,8 @@ pub struct Info {
     pub pieces: Vec<[u8; 20]>,
     /// Whether this is a single-file or multi-file torrent.
     pub mode: Mode,
-    /// The raw bencoded `info` dict bytes — needed for info_hash calculation.
-    pub raw_info: Bytes,
+    /// Raw info dict bytes or pre-computed hash (from magnet URI).
+    pub raw_info: RawInfo,
 }
 
 /// File layout mode for a torrent.
@@ -112,10 +125,18 @@ impl Metainfo {
     ///
     /// This is the torrent's unique identifier used in tracker requests,
     /// DHT lookups, and magnet links.
+    ///
+    /// If [`RawInfo::Hash`] is stored (e.g. from a magnet URI), that
+    /// value is returned directly instead of computing SHA-1.
     pub fn info_hash(&self) -> [u8; 20] {
-        let mut hasher = Sha1::new();
-        hasher.update(&self.info.raw_info);
-        hasher.finalize().into()
+        match &self.info.raw_info {
+            RawInfo::Hash(h) => *h,
+            RawInfo::Bytes(raw) => {
+                let mut hasher = Sha1::new();
+                hasher.update(raw);
+                hasher.finalize().into()
+            }
+        }
     }
 
     /// Serialize back to bencoded bytes.

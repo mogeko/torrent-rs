@@ -387,9 +387,12 @@ fn base32_val(c: u8) -> Result<u8, Error> {
     }
 }
 
-/// Simple URL percent-decoding.
+/// URL percent-decoding with proper UTF-8 handling.
+///
+/// Accumulates percent-decoded bytes, then decodes as UTF-8
+/// (replacing invalid sequences with U+FFFD).
 fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut buf = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -397,14 +400,14 @@ fn url_decode(s: &str) -> String {
             && i + 2 < bytes.len()
             && let (Ok(hi), Ok(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
         {
-            result.push((hi << 4 | lo) as char);
+            buf.push((hi << 4) | lo);
             i += 3;
             continue;
         }
-        result.push(bytes[i] as char);
+        buf.push(bytes[i]);
         i += 1;
     }
-    result
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 #[cfg(test)]
@@ -455,7 +458,7 @@ mod tests {
 
     #[test]
     fn metainfo_to_magnet() {
-        use crate::metainfo::{Info, Metainfo, Mode};
+        use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
         use bytes::Bytes;
 
         let info = Info {
@@ -465,7 +468,7 @@ mod tests {
                 name: "test.txt".into(),
                 length: 1024,
             },
-            raw_info: Bytes::from_static(b"d4:infod...e"),
+            raw_info: RawInfo::Bytes(Bytes::from_static(b"d4:infod...e")),
         };
         let meta = Metainfo {
             announce: "http://tracker.example.com/announce".into(),
@@ -654,15 +657,12 @@ mod tests {
         );
     }
 
-    /// URL-decoded but treats each byte as an individual char —
-    /// multi-byte UTF-8 sequences are NOT reassembled yet.
-    /// TODO: accumulate bytes and decode as UTF-8.
     #[test]
     fn magnet_with_percent_encoded_dn() {
         let uri = "magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc\
-            &dn=%48%65%6c%6c%6f"; // "Hello" in percent-encoded ASCII
+            &dn=%E2%98%83%20snowman"; // ☃ snowman
         let magnet = MagnetUri::from_str(uri).unwrap();
         let name = magnet.display_name.unwrap();
-        assert_eq!(name, "Hello");
+        assert_eq!(name, "\u{2603} snowman");
     }
 }

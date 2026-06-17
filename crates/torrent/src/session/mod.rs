@@ -27,7 +27,7 @@ use tokio::sync::RwLock;
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
-use crate::metainfo::{Metainfo, Mode};
+use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
 use crate::spec::TorrentSpec;
 use crate::storage::FileStorage;
 
@@ -256,14 +256,14 @@ impl Session {
         let meta = Metainfo {
             announce,
             announce_list,
-            info: crate::metainfo::Info {
+            info: Info {
                 piece_length: 0,
                 pieces: vec![],
                 mode: Mode::Single {
                     name: name.clone(),
                     length: uri.exact_length.unwrap_or(0),
                 },
-                raw_info: bytes::Bytes::new(),
+                raw_info: RawInfo::Hash(info_hash),
             },
             creation_date: None,
             comment: None,
