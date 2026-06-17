@@ -26,7 +26,10 @@
 
 mod parse;
 
-use bytes::Bytes;
+// Re-export Bytes so callers can construct `RawInfo::Bytes(...)` without
+// adding `bytes` as a direct dependency.
+pub use bytes::Bytes;
+
 use sha1::{Digest, Sha1};
 
 use crate::error::Error;

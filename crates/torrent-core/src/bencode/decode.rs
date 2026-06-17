@@ -1,8 +1,6 @@
-use bytes::Bytes;
-
 use crate::error::{Error, ErrorKind};
 
-use super::Bencode;
+use super::{Bencode, Bytes};
 
 /// Decode a single bencoded value from the beginning of `data`.
 ///
@@ -33,8 +31,7 @@ use super::Bencode;
 /// Decoding a nested dictionary:
 ///
 /// ```
-/// use torrent_core::bencode::{decode, Bencode};
-/// use bytes::Bytes;
+/// use torrent_core::bencode::{decode, Bencode, Bytes};
 ///
 /// let (val, rest) = decode(b"d3:fooi42e3:bar4:spame").unwrap();
 /// assert!(rest.is_empty());

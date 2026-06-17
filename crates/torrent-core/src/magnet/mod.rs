@@ -458,8 +458,7 @@ mod tests {
 
     #[test]
     fn metainfo_to_magnet() {
-        use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
-        use bytes::Bytes;
+        use crate::metainfo::{Bytes, Info, Metainfo, Mode, RawInfo};
 
         let info = Info {
             piece_length: 262144,

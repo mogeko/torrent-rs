@@ -40,8 +40,7 @@ assert_eq!(encoded, b"4:spam");
 ### Bencode
 
 ```rust
-use torrent_core::bencode::{decode, encode, Bencode};
-use bytes::Bytes;
+use torrent_core::bencode::{Bencode, Bytes, decode, encode};
 
 // Decode a bencoded dictionary
 let (val, _) = decode(b"d3:fooi42e5:hello5:worlde").unwrap();

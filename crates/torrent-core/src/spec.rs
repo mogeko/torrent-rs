@@ -87,7 +87,7 @@ impl From<MagnetUri> for TorrentSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
+    use crate::metainfo::{Bytes, FileInfo, Info, Metainfo, Mode, RawInfo};
 
     fn make_meta() -> Metainfo {
         Metainfo {
@@ -100,7 +100,7 @@ mod tests {
                     name: "test.txt".into(),
                     length: 1024,
                 },
-                raw_info: RawInfo::Bytes(bytes::Bytes::from_static(b"d4:infod...e")),
+                raw_info: RawInfo::Bytes(Bytes::from_static(b"d4:infod...e")),
             },
             creation_date: None,
             comment: None,
@@ -118,12 +118,12 @@ mod tests {
                 pieces: vec![[0u8; 20], [0u8; 20]],
                 mode: Mode::Multiple {
                     name: "root_dir".into(),
-                    files: vec![crate::metainfo::FileInfo {
+                    files: vec![FileInfo {
                         length: 512,
                         path: vec!["a.txt".into()],
                     }],
                 },
-                raw_info: RawInfo::Bytes(bytes::Bytes::from_static(b"d4:infod...e")),
+                raw_info: RawInfo::Bytes(Bytes::from_static(b"d4:infod...e")),
             },
             creation_date: None,
             comment: None,

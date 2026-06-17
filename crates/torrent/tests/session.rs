@@ -1,7 +1,6 @@
 //! Integration tests for the Session API.
 
-use bytes::Bytes;
-use torrent::bencode::{Bencode, encode};
+use torrent::bencode::{Bencode, Bytes, encode};
 use torrent::error::{Error, ErrorKind};
 use torrent::session::{Session, SessionConfig, TorrentState};
 

@@ -222,8 +222,7 @@ fn map_byte_range(offset: u64, length: u64, files: &[StorageFile]) -> Vec<(PathB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metainfo::RawInfo;
-    use bytes::Bytes;
+    use crate::metainfo::{Bytes, FileInfo, RawInfo};
 
     #[test]
     fn test_map_byte_range_single_file() {
@@ -293,11 +292,11 @@ mod tests {
             mode: Mode::Multiple {
                 name: "multi".into(),
                 files: vec![
-                    crate::metainfo::FileInfo {
+                    FileInfo {
                         length: 32,
                         path: vec!["a.bin".into()],
                     },
-                    crate::metainfo::FileInfo {
+                    FileInfo {
                         length: 32,
                         path: vec!["b.bin".into()],
                     },

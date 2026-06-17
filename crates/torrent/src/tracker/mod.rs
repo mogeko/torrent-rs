@@ -48,9 +48,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::task::JoinSet;
-use torrent_core::metainfo::Metainfo;
 
 use crate::error::{Error, ErrorKind};
+use crate::metainfo::Metainfo;
 
 /// Unified tracker client that auto-detects HTTP vs UDP from the URL scheme.
 ///
@@ -294,6 +294,7 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metainfo::{Bytes, Info, Metainfo, Mode, RawInfo};
     use crate::peer::PeerId;
 
     #[test]
@@ -392,8 +393,6 @@ mod tests {
 
     #[test]
     fn test_tracker_from_metainfo() {
-        use torrent_core::metainfo::{Info, Metainfo, Mode, RawInfo};
-
         let info = Info {
             piece_length: 262144,
             pieces: vec![[0u8; 20]],
@@ -401,7 +400,7 @@ mod tests {
                 name: "test.txt".into(),
                 length: 1024,
             },
-            raw_info: RawInfo::Bytes(bytes::Bytes::new()),
+            raw_info: RawInfo::Bytes(Bytes::new()),
         };
         let meta = Metainfo {
             announce: "http://tracker.a.com/announce".into(),
@@ -419,8 +418,6 @@ mod tests {
 
     #[test]
     fn test_tracker_from_metainfo_skip_invalid() {
-        use torrent_core::metainfo::{Info, Metainfo, Mode, RawInfo};
-
         let info = Info {
             piece_length: 262144,
             pieces: vec![[0u8; 20]],
@@ -428,7 +425,7 @@ mod tests {
                 name: "test.txt".into(),
                 length: 1024,
             },
-            raw_info: RawInfo::Bytes(bytes::Bytes::new()),
+            raw_info: RawInfo::Bytes(Bytes::new()),
         };
         // announce has invalid scheme; announce_list is valid
         let meta = Metainfo {
@@ -509,9 +506,6 @@ mod tests {
 
     #[test]
     fn test_tracker_from_metainfo_dedup_across_tiers() {
-        use bytes::Bytes;
-        use torrent_core::metainfo::{Info, Metainfo, Mode, RawInfo};
-
         let info = Info {
             piece_length: 262144,
             pieces: vec![[0u8; 20]],
@@ -611,8 +605,6 @@ mod tests {
 
     #[test]
     fn test_tracker_from_metainfo_preserves_order() {
-        use torrent_core::metainfo::{Info, Metainfo, Mode, RawInfo};
-
         let info = Info {
             piece_length: 262144,
             pieces: vec![[0u8; 20]],
@@ -620,7 +612,7 @@ mod tests {
                 name: "test.txt".into(),
                 length: 1024,
             },
-            raw_info: RawInfo::Bytes(bytes::Bytes::new()),
+            raw_info: RawInfo::Bytes(Bytes::new()),
         };
         // Multiple tiers with unique URLs; order should be preserved
         let meta = Metainfo {

@@ -1,8 +1,6 @@
-use bytes::Bytes;
-
 use crate::error::{Error, ErrorKind};
 
-use super::{Bencode, decode, encode};
+use super::{Bencode, Bytes, decode, encode};
 
 /// Decode a bencoded byte string directly to a `String`.
 ///
@@ -58,8 +56,7 @@ pub fn encode_str(s: &str) -> Vec<u8> {
 /// # Examples
 ///
 /// ```
-/// use torrent_core::bencode::{Bencode, dict_get};
-/// use bytes::Bytes;
+/// use torrent_core::bencode::{Bencode, Bytes, dict_get};
 ///
 /// let dict = Bencode::Dict(vec![
 ///     (Bytes::from("foo"), Bencode::Integer(42)),
@@ -88,8 +85,7 @@ pub fn dict_get<'a>(val: &'a Bencode, key: &[u8]) -> Option<&'a Bencode> {
 /// # Examples
 ///
 /// ```
-/// use torrent_core::bencode::{Bencode, dict_get_int};
-/// use bytes::Bytes;
+/// use torrent_core::bencode::{Bencode, Bytes, dict_get_int};
 ///
 /// let dict = Bencode::Dict(vec![
 ///     (Bytes::from("count"), Bencode::Integer(42)),
@@ -112,8 +108,7 @@ pub fn dict_get_int(val: &Bencode, key: &[u8]) -> Option<i64> {
 /// # Examples
 ///
 /// ```
-/// use torrent_core::bencode::{Bencode, dict_get_bytes};
-/// use bytes::Bytes;
+/// use torrent_core::bencode::{Bencode, Bytes, dict_get_bytes};
 ///
 /// let dict = Bencode::Dict(vec![
 ///     (Bytes::from("name"), Bencode::Bytes(Bytes::from("hello"))),

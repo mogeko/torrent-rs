@@ -1,6 +1,4 @@
-use bytes::Bytes;
-
-use crate::bencode::{self, Bencode, dict_get, dict_get_bytes, dict_get_int};
+use crate::bencode::{self, Bencode, Bytes, dict_get, dict_get_bytes, dict_get_int};
 use crate::error::{Error, ErrorKind};
 
 use super::{FileInfo, Info, Metainfo, Mode, RawInfo};

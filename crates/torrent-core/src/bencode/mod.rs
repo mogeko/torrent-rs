@@ -28,13 +28,13 @@ mod decode;
 mod encode;
 mod util;
 
+pub use bytes::Bytes;
+
 pub use self::decode::decode;
 pub use self::encode::encode;
 pub use self::util::*;
 
 use std::fmt;
-
-use bytes::Bytes;
 
 /// Represents a bencoded value as defined in BEP 3.
 ///
@@ -48,8 +48,7 @@ use bytes::Bytes;
 /// # Examples
 ///
 /// ```
-/// use torrent_core::bencode::Bencode;
-/// use bytes::Bytes;
+/// use torrent_core::bencode::{Bencode, Bytes};
 ///
 /// // String
 /// let s = Bencode::Bytes(Bytes::from("hello"));

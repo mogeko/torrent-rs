@@ -1,6 +1,4 @@
-use bytes::Bytes;
-
-use super::Bencode;
+use super::{Bencode, Bytes};
 
 /// Encode a `Bencode` value into its bencoded byte representation.
 ///
@@ -11,16 +9,14 @@ use super::Bencode;
 /// # Examples
 ///
 /// ```
-/// use torrent_core::bencode::{encode, Bencode};
-/// use bytes::Bytes;
+/// use torrent_core::bencode::{encode, Bencode, Bytes};
 ///
 /// let val = Bencode::Bytes(Bytes::from("spam"));
 /// assert_eq!(encode(&val), b"4:spam");
 /// ```
 ///
 /// ```
-/// use torrent_core::bencode::{encode, Bencode};
-/// use bytes::Bytes;
+/// use torrent_core::bencode::{encode, Bencode, Bytes};
 ///
 /// let val = Bencode::List(vec![
 ///     Bencode::Integer(1),
