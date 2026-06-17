@@ -28,7 +28,7 @@
 //! ```
 
 // Re-export key core types so users only need `torrent` as a dependency.
-pub use torrent_core::{bencode, error, magnet, metainfo, piece};
+pub use torrent_core::{bencode, error, magnet, metainfo, piece, spec};
 
 pub mod dht;
 pub mod peer;

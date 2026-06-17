@@ -63,3 +63,15 @@ impl TorrentSpec {
         }
     }
 }
+
+impl From<Metainfo> for TorrentSpec {
+    fn from(meta: Metainfo) -> Self {
+        TorrentSpec::Metainfo(meta)
+    }
+}
+
+impl From<MagnetUri> for TorrentSpec {
+    fn from(uri: MagnetUri) -> Self {
+        TorrentSpec::Magnet(uri)
+    }
+}
