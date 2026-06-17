@@ -55,7 +55,7 @@ dependency:
 
 ```rust
 use torrent::bencode::{decode, encode, Bencode};
-use torrent::metainfo::from_bytes;
+use torrent::metainfo::Metainfo;
 use torrent::magnet::MagnetUri;
 use torrent::error::{Error, ErrorKind};
 use torrent::peer::{Handshake, PeerId, PeerMessage};
@@ -83,23 +83,23 @@ cargo run -p torrent --example parse_metainfo
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   torrent (async)                    │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │
+│                   torrent (async)                   │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐ │
 │  │ session  │ │ tracker  │ │ dht/rpc  │ │storage/ │ │
 │  │          │ │ http/udp │ │ query    │ │fs       │ │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └───┬────┘ │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬────┘ │
 │       │            │            │            │      │
 │       └────────────┴────────────┴────────────┘      │
 │                        │                            │
-│              depends on torrent_core                 │
+│              depends on torrent_core                │
 │                        │                            │
 ├────────────────────────┼────────────────────────────┤
-│              torrent-core (sync, no tokio)           │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │
-│  │ bencode  │ │ metainfo │ │   peer   │ │ dht/   │ │
-│  │ error    │ │ magnet   │ │ handshake│ │ krpc   │ │
-│  │          │ │          │ │ message  │ │ routing│ │
-│  └──────────┘ └──────────┘ └──────────┘ └────────┘ │
+│              torrent-core (sync, no tokio)          │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐ │
+│  │ bencode  │ │ metainfo │ │   peer   │ │ dht/    │ │
+│  │ error    │ │ magnet   │ │ handshake│ │ krpc    │ │
+│  │          │ │          │ │ message  │ │ routing │ │
+│  └──────────┘ └──────────┘ └──────────┘ └─────────┘ │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────────┐ │
 │  │ tracker  │ │  piece   │ │ storage              │ │
 │  │ data     │ │ manager  │ │ trait (read/write)   │ │

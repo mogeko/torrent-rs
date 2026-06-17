@@ -10,6 +10,7 @@ use std::fs::canonicalize;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use torrent::metainfo::Metainfo;
 use torrent::session::{Session, SessionConfig, TorrentState};
 use tracing_subscriber::EnvFilter;
 
@@ -48,12 +49,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let info_hash = session.add_torrent_bytes(data).await?;
     let status = session.torrent_status(&info_hash).await?;
     let total_bytes = {
-        let meta = torrent::metainfo::from_bytes(data)?;
+        let meta = Metainfo::try_from(data)?;
         meta.info.total_size()
     };
     println!("\nTorrent: {}", status.name);
     println!("Size: {} MB ({} pieces)", total_bytes / (1024 * 1024), {
-        let meta = torrent::metainfo::from_bytes(data)?;
+        let meta = Metainfo::try_from(data)?;
         meta.info.num_pieces()
     });
     println!("Info hash: {:02x?}", &info_hash[..4]);

@@ -1,9 +1,7 @@
-use bytes::Bytes;
-
-use crate::bencode::{self, Bencode, dict_get, dict_get_bytes, dict_get_int};
+use crate::bencode::{self, Bencode, Bytes, dict_get, dict_get_bytes, dict_get_int};
 use crate::error::{Error, ErrorKind};
 
-use super::{FileInfo, Info, Metainfo, Mode};
+use super::{FileInfo, Info, Metainfo, Mode, RawInfo};
 
 /// Parse a `Metainfo` from raw bencoded bytes (the contents of a `.torrent` file).
 ///
@@ -28,7 +26,7 @@ use super::{FileInfo, Info, Metainfo, Mode};
 /// let meta = from_bytes(&data).unwrap();
 /// println!("Info hash: {:x?}", meta.info_hash());
 /// ```
-pub fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
+pub(crate) fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
     tracing::debug!("parsing .torrent file ({} bytes)", data.len());
     let (val, _rest) = bencode::decode(data)?;
 
@@ -124,7 +122,7 @@ fn parse_info(val: &Bencode, raw_info: Bytes) -> Result<Info, Error> {
         piece_length: piece_length as u64,
         pieces,
         mode,
-        raw_info,
+        raw_info: RawInfo::Bytes(raw_info),
     })
 }
 

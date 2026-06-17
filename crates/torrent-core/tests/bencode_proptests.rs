@@ -1,8 +1,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, FileFailurePersistence};
 
-use bytes::Bytes;
-use torrent_core::bencode::{Bencode, decode, encode};
+use torrent_core::bencode::{Bencode, Bytes, decode, encode};
 
 fn proptest_config() -> ProptestConfig {
     ProptestConfig {

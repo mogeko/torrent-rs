@@ -12,6 +12,7 @@
 //! - [`magnet`] — Magnet URI (BEP 9)
 //! - [`peer`] — handshake, message types, PeerId
 //! - [`piece`] — PieceManager, piece selection strategies (BEP 3)
+//! - [`spec`] — Unified torrent specification (metainfo or magnet)
 //! - [`storage`] — Storage trait
 //! - [`tracker`] — Announce data types and parsing (sync)
 
@@ -22,5 +23,6 @@ pub mod magnet;
 pub mod metainfo;
 pub mod peer;
 pub mod piece;
+pub mod spec;
 pub mod storage;
 pub mod tracker;

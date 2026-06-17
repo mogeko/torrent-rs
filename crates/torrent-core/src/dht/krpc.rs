@@ -5,9 +5,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use bytes::Bytes;
-
-use crate::bencode::{self, Bencode};
+use crate::bencode::{self, Bencode, Bytes};
 use crate::error::{Error, ErrorKind};
 
 /// Transaction ID type (2-byte random value).

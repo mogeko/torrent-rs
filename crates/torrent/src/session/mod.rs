@@ -19,6 +19,7 @@ mod upload;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +27,9 @@ use tokio::sync::RwLock;
 
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
-use crate::metainfo::{Metainfo, Mode, from_bytes as parse_metainfo};
+use crate::magnet::{MagnetUri, hex_encode};
+use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
+use crate::spec::TorrentSpec;
 use crate::storage::FileStorage;
 
 use self::torrent::TorrentHandle;
@@ -192,8 +195,35 @@ impl Session {
         })
     }
 
-    /// Add a torrent by its `Metainfo`.
-    pub async fn add_torrent(&self, meta: Metainfo) -> Result<InfoHash, Error> {
+    /// Add a torrent from a [`TorrentSpec`].
+    ///
+    /// Accepts both full metadata ([`Metainfo`]) and magnet links
+    /// ([`MagnetUri`]). For magnet links, file download cannot start
+    /// until metadata is obtained from peers.
+    ///
+    /// [`add_torrent_bytes`](Session::add_torrent_bytes) and
+    /// [`add_magnet_str`](Session::add_magnet_str) are convenience
+    /// wrappers.
+    pub async fn add_torrent(&self, spec: impl Into<TorrentSpec>) -> Result<InfoHash, Error> {
+        match spec.into() {
+            TorrentSpec::Metainfo(meta) => self.add_metainfo(meta).await,
+            TorrentSpec::Magnet(uri) => self.add_magnet(uri).await,
+        }
+    }
+
+    /// Add a torrent from a magnet URI string (BEP 9).
+    pub async fn add_magnet_str(&self, uri: impl AsRef<str>) -> Result<InfoHash, Error> {
+        let magnet: MagnetUri = uri.as_ref().parse()?;
+        self.add_torrent(magnet).await
+    }
+
+    /// Add a torrent from raw bencoded bytes (a `.torrent` file).
+    pub async fn add_torrent_bytes(&self, data: &[u8]) -> Result<InfoHash, Error> {
+        self.add_torrent(Metainfo::try_from(data)?).await
+    }
+
+    /// Core: bootstrap a torrent from full metadata.
+    async fn add_metainfo(&self, meta: Metainfo) -> Result<InfoHash, Error> {
         let info_hash = meta.info_hash();
         let _name = match &meta.info.mode {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
@@ -208,10 +238,59 @@ impl Session {
         Ok(info_hash)
     }
 
-    /// Add a torrent from raw bencoded bytes (the contents of a .torrent file).
-    pub async fn add_torrent_bytes(&self, data: &[u8]) -> Result<InfoHash, Error> {
-        let meta = parse_metainfo(data)?;
-        self.add_torrent(meta).await
+    /// Core: bootstrap a torrent from a magnet URI.
+    async fn add_magnet(&self, uri: MagnetUri) -> Result<InfoHash, Error> {
+        let info_hash = *uri.primary_info_hash();
+        let name = uri
+            .display_name
+            .clone()
+            .unwrap_or_else(|| hex_encode(info_hash));
+        let announce = uri.trackers.first().cloned().unwrap_or_default();
+        let announce_list = if uri.trackers.len() > 1 {
+            vec![uri.trackers[1..].to_vec()]
+        } else {
+            vec![]
+        };
+
+        // Build a minimal Metainfo stub: no pieces, no raw_info.
+        // The download loop will be idle until metadata is discovered.
+        let meta = Metainfo {
+            announce,
+            announce_list,
+            info: Info {
+                piece_length: 0,
+                pieces: vec![],
+                mode: Mode::Single {
+                    name: name.clone(),
+                    length: uri.exact_length.unwrap_or(0),
+                },
+                raw_info: RawInfo::Hash(info_hash),
+            },
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+
+        let storage = Arc::new(FileStorage::new(&meta.info, &self.config.download_dir).await?);
+        let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
+
+        // Inject x.pe addresses directly into the connection pool (BEP 9).
+        if !uri.peers.is_empty() {
+            let mut peer_addrs = Vec::with_capacity(uri.peers.len());
+            for peer_str in &uri.peers {
+                if let Ok(addr) = SocketAddr::from_str(peer_str) {
+                    peer_addrs.push(addr);
+                }
+            }
+            if !peer_addrs.is_empty() {
+                handle.peer_mgr.write().await.add_peers(peer_addrs);
+            }
+        }
+
+        self.torrents.write().await.insert(info_hash, handle);
+
+        Ok(info_hash)
     }
 
     /// Remove a torrent by info_hash.

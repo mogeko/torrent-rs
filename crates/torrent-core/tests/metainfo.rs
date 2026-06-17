@@ -1,5 +1,4 @@
-use bytes::Bytes;
-use torrent_core::bencode::{Bencode, encode};
+use torrent_core::bencode::{Bencode, Bytes, encode};
 use torrent_core::error::ErrorKind;
 use torrent_core::metainfo::{Mode, from_bytes};
 

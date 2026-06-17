@@ -13,7 +13,6 @@ readme = "README.md"
 
 [dependencies]
 torrent-core.workspace = true
-bytes.workspace = true
 rand.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true

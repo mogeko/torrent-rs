@@ -1,7 +1,6 @@
 //! Integration tests for the Session API.
 
-use bytes::Bytes;
-use torrent::bencode::{Bencode, encode};
+use torrent::bencode::{Bencode, Bytes, encode};
 use torrent::error::{Error, ErrorKind};
 use torrent::session::{Session, SessionConfig, TorrentState};
 
@@ -119,6 +118,122 @@ async fn add_and_query_multiple_times() -> Result<(), Error> {
         assert_eq!(status.info_hash, info_hash);
         assert_eq!(status.state, TorrentState::Queued);
     }
+
+    Ok(())
+}
+
+// --- Magnet URI tests ---
+
+#[tokio::test]
+async fn add_magnet_str_minimal() -> Result<(), Error> {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = SessionConfig {
+        download_dir: tmp.path().to_path_buf(),
+        enable_dht: false,
+        ..Default::default()
+    };
+    let session = Session::new(config).await?;
+
+    let info_hash = session
+        .add_magnet_str("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567")
+        .await?;
+
+    let active = session.active_torrents().await;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0], info_hash);
+
+    let status = session.torrent_status(&info_hash).await?;
+    assert_eq!(status.info_hash, info_hash);
+    assert_eq!(status.state, TorrentState::Queued);
+    assert_eq!(status.progress, 0.0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn add_magnet_str_with_trackers() -> Result<(), Error> {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = SessionConfig {
+        download_dir: tmp.path().to_path_buf(),
+        enable_dht: false,
+        ..Default::default()
+    };
+    let session = Session::new(config).await?;
+
+    let info_hash = session
+        .add_magnet_str(
+            "magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\
+             &tr=http://t1.com/ann&tr=http://t2.com/ann",
+        )
+        .await?;
+
+    assert!(session.active_torrents().await.contains(&info_hash));
+    let status = session.torrent_status(&info_hash).await?;
+    assert_eq!(status.state, TorrentState::Queued);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn add_magnet_str_invalid() -> Result<(), Error> {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = SessionConfig {
+        download_dir: tmp.path().to_path_buf(),
+        enable_dht: false,
+        ..Default::default()
+    };
+    let session = Session::new(config).await?;
+
+    // No xt parameter — should fail
+    let result = session.add_magnet_str("magnet:?dn=no_hash").await;
+    assert!(result.is_err());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn add_magnet_str_with_display_name() -> Result<(), Error> {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = SessionConfig {
+        download_dir: tmp.path().to_path_buf(),
+        enable_dht: false,
+        ..Default::default()
+    };
+    let session = Session::new(config).await?;
+
+    let info_hash = session
+        .add_magnet_str("magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc&dn=Test+File")
+        .await?;
+
+    let status = session.torrent_status(&info_hash).await?;
+    assert_eq!(status.name, "Test+File");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn magnet_via_add_torrent() -> Result<(), Error> {
+    use std::str::FromStr;
+    use torrent::magnet::MagnetUri;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config = SessionConfig {
+        download_dir: tmp.path().to_path_buf(),
+        enable_dht: false,
+        ..Default::default()
+    };
+    let session = Session::new(config).await?;
+
+    let magnet = MagnetUri::from_str(
+        "magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd&dn=Direct",
+    )
+    .unwrap();
+    let info_hash = *magnet.primary_info_hash();
+
+    session.add_torrent(magnet).await?;
+
+    let status = session.torrent_status(&info_hash).await?;
+    assert_eq!(status.name, "Direct");
 
     Ok(())
 }

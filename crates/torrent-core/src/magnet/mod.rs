@@ -21,10 +21,11 @@
 //! assert_eq!(magnet.info_hashes.len(), 1);
 //! ```
 
-use std::fmt;
+use std::fmt::{self, Write};
 use std::str::FromStr;
 
 use crate::error::{Error, ErrorKind};
+use crate::metainfo::{Metainfo, Mode};
 
 /// A parsed magnet URI (BEP 9).
 ///
@@ -72,6 +73,10 @@ pub struct MagnetUri {
     pub keyword_topic: Option<String>,
     /// Manifest topic (from `mt` parameter).
     pub manifest_topic: Option<String>,
+    /// Exact length in bytes (from `xl` parameter, BEP 9).
+    pub exact_length: Option<u64>,
+    /// Peer addresses for direct metadata transfer (from `x.pe` parameter).
+    pub peers: Vec<String>,
 }
 
 /// An info hash extracted from a magnet URI.
@@ -109,6 +114,8 @@ impl FromStr for MagnetUri {
         let mut acceptable_source = None;
         let mut keyword_topic = None;
         let mut manifest_topic = None;
+        let mut exact_length = None;
+        let mut peers = Vec::new();
 
         for param in body.split('&') {
             if param.is_empty() {
@@ -146,6 +153,12 @@ impl FromStr for MagnetUri {
                 "mt" => {
                     manifest_topic = Some(url_decode(value));
                 }
+                "x.pe" => {
+                    peers.push(url_decode(value));
+                }
+                "xl" => {
+                    exact_length = value.parse::<u64>().ok();
+                }
                 _ => {
                     // Unknown parameters are ignored per BEP 9
                 }
@@ -165,14 +178,44 @@ impl FromStr for MagnetUri {
             acceptable_source,
             keyword_topic,
             manifest_topic,
+            exact_length,
+            peers,
         })
     }
 }
 
+impl From<&Metainfo> for MagnetUri {
+    /// Create a magnet URI from torrent metadata (BEP 9).
+    fn from(meta: &Metainfo) -> Self {
+        let ih = meta.info_hash();
+        MagnetUri {
+            info_hashes: vec![InfoHash {
+                bytes: ih,
+                raw: hex_encode(ih),
+            }],
+            display_name: Some(match &meta.info.mode {
+                Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+            }),
+            exact_length: Some(meta.info.total_size()),
+            trackers: std::iter::once(meta.announce.clone())
+                .chain(meta.announce_list.iter().flatten().cloned())
+                .collect(),
+            web_seeds: Vec::new(),
+            exact_source: None,
+            acceptable_source: None,
+            keyword_topic: None,
+            manifest_topic: None,
+            peers: Vec::new(),
+        }
+    }
+}
+
 impl fmt::Display for MagnetUri {
-    /// Re-serialize to magnet URI format.
+    /// Re-serialize to magnet URI format with RFC 3986 percent-encoding.
     ///
     /// Uses the original `raw` form for info hashes to preserve encoding.
+    /// String values (`dn`, `tr`, `ws`, `xs`, `as`, `kt`, `mt`) are
+    /// percent-encoded so the output is a valid ASCII URI.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "magnet:?")?;
 
@@ -192,7 +235,7 @@ impl fmt::Display for MagnetUri {
             if !first {
                 write!(f, "&")?;
             }
-            write!(f, "dn={}", dn)?;
+            write!(f, "dn={}", url_encode(dn))?;
             first = false;
         }
 
@@ -201,55 +244,53 @@ impl fmt::Display for MagnetUri {
             if !first {
                 write!(f, "&")?;
             }
-            write!(f, "tr={}", tr)?;
+            write!(f, "tr={}", url_encode(tr))?;
             first = false;
         }
 
         // ws
         for ws in &self.web_seeds {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "ws={}", ws)?;
-            first = false;
+            write!(f, "&ws={}", url_encode(ws))?;
         }
 
         // xs
         if let Some(ref xs) = self.exact_source {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "xs={}", xs)?;
-            first = false;
+            write!(f, "&xs={}", url_encode(xs))?;
         }
 
         // as
         if let Some(ref a) = self.acceptable_source {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "as={}", a)?;
-            first = false;
+            write!(f, "&as={}", url_encode(a))?;
         }
 
         // kt
         if let Some(ref kt) = self.keyword_topic {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "kt={}", kt)?;
-            first = false;
+            write!(f, "&kt={}", url_encode(kt))?;
         }
 
         // mt
         if let Some(ref mt) = self.manifest_topic {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "mt={}", mt)?;
+            write!(f, "&mt={}", url_encode(mt))?;
+        }
+
+        // x.pe
+        for peer in &self.peers {
+            write!(f, "&x.pe={}", url_encode(peer))?;
+        }
+
+        // xl
+        if let Some(xl) = self.exact_length {
+            write!(f, "&xl={}", xl)?;
         }
 
         Ok(())
+    }
+}
+
+impl MagnetUri {
+    /// Return the primary info hash (first `xt` parameter).
+    pub fn primary_info_hash(&self) -> &[u8; 20] {
+        &self.info_hashes[0].bytes
     }
 }
 
@@ -269,6 +310,12 @@ fn parse_xt(value: &str) -> Option<InfoHash> {
     }?;
 
     Some(InfoHash { bytes, raw })
+}
+
+/// Encode 20 bytes as a hex string.
+#[doc(hidden)]
+pub fn hex_encode(bytes: [u8; 20]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Decode a hex string to 20 bytes.
@@ -332,9 +379,12 @@ fn base32_val(c: u8) -> Result<u8, Error> {
     }
 }
 
-/// Simple URL percent-decoding.
+/// URL percent-decoding with proper UTF-8 handling.
+///
+/// Accumulates percent-decoded bytes, then decodes as UTF-8
+/// (replacing invalid sequences with U+FFFD).
 fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut buf = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -342,12 +392,30 @@ fn url_decode(s: &str) -> String {
             && i + 2 < bytes.len()
             && let (Ok(hi), Ok(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
         {
-            result.push((hi << 4 | lo) as char);
+            buf.push((hi << 4) | lo);
             i += 3;
             continue;
         }
-        result.push(bytes[i] as char);
+        buf.push(bytes[i]);
         i += 1;
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// URL percent-encoding per RFC 3986.
+///
+/// Encodes all bytes outside the unreserved set (`A-Za-z0-9-._~`).
+fn url_encode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                result.push(*b as char);
+            }
+            _ => {
+                write!(result, "%{:02X}", b).unwrap();
+            }
+        }
     }
     result
 }
@@ -388,5 +456,285 @@ mod tests {
     #[test]
     fn url_decode_no_encoding() {
         assert_eq!(url_decode("hello world"), "hello world");
+    }
+
+    #[test]
+    fn parse_xl_parameter() {
+        use std::str::FromStr;
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&xl=1024";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.exact_length, Some(1024));
+    }
+
+    #[test]
+    fn metainfo_to_magnet() {
+        use crate::metainfo::{Bytes, Info, Metainfo, Mode, RawInfo};
+
+        let info = Info {
+            piece_length: 262144,
+            pieces: vec![[0u8; 20]],
+            mode: Mode::Single {
+                name: "test.txt".into(),
+                length: 1024,
+            },
+            raw_info: RawInfo::Bytes(Bytes::from_static(b"d4:infod...e")),
+        };
+        let meta = Metainfo {
+            announce: "http://tracker.example.com/announce".into(),
+            announce_list: vec![],
+            info,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+
+        let magnet = MagnetUri::from(&meta);
+        assert_eq!(magnet.info_hashes.len(), 1);
+        assert_eq!(magnet.display_name.as_deref(), Some("test.txt"));
+        assert_eq!(magnet.exact_length, Some(1024));
+        assert_eq!(magnet.trackers.len(), 1);
+        assert_eq!(magnet.trackers[0], "http://tracker.example.com/announce");
+    }
+
+    // --- Additional parameter tests ---
+
+    #[test]
+    fn parse_magnet_ws() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &ws=http://example.com/file";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.web_seeds, vec!["http://example.com/file"]);
+    }
+
+    #[test]
+    fn parse_magnet_xs() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &xs=urn:sha1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(
+            magnet.exact_source.as_deref(),
+            Some("urn:sha1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        );
+    }
+
+    #[test]
+    fn parse_magnet_as() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &as=http://alt.example.com/file";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(
+            magnet.acceptable_source.as_deref(),
+            Some("http://alt.example.com/file")
+        );
+    }
+
+    #[test]
+    fn parse_magnet_kt_mt() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &kt=keyword1+keyword2&mt=http://manifest.example.com";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.keyword_topic.as_deref(), Some("keyword1+keyword2"));
+        assert_eq!(
+            magnet.manifest_topic.as_deref(),
+            Some("http://manifest.example.com")
+        );
+    }
+
+    #[test]
+    fn parse_x_pe_single() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &x.pe=192.168.1.1:6881";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.peers, vec!["192.168.1.1:6881"]);
+    }
+
+    #[test]
+    fn parse_x_pe_multiple() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &x.pe=192.168.1.1:6881&x.pe=10.0.0.1:6882";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.peers, vec!["192.168.1.1:6881", "10.0.0.1:6882"]);
+    }
+
+    #[test]
+    fn parse_x_pe_ipv6() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &x.pe=%5B%3A%3A1%5D%3A6881"; // [::1]:6881
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.peers, vec!["[::1]:6881"]);
+    }
+
+    #[test]
+    fn roundtrip_x_pe() {
+        // IPv4 peer: colon is %-encoded in URI
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &x.pe=192.168.1.1%3A6881";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.peers, vec!["192.168.1.1:6881"]);
+        // Round-trip preserves the value
+        let magnet2 = magnet.to_string().parse::<MagnetUri>().unwrap();
+        assert_eq!(magnet, magnet2);
+    }
+
+    #[test]
+    fn parse_magnet_all_params() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &dn=Test+File\
+            &tr=http://t1.com/ann\
+            &tr=http://t2.com/ann\
+            &ws=http://webseed.example.com/data\
+            &xs=urn:sha1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
+            &as=http://alt.example.com/data\
+            &kt=test+keyword\
+            &mt=http://manifest.example.com\
+            &xl=4096\
+            &x.pe=1.2.3.4%3A6881";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.info_hashes.len(), 1);
+        assert_eq!(magnet.display_name.as_deref(), Some("Test+File"));
+        assert_eq!(magnet.trackers.len(), 2);
+        assert_eq!(magnet.web_seeds.len(), 1);
+        assert!(magnet.exact_source.is_some());
+        assert!(magnet.acceptable_source.is_some());
+        assert!(magnet.keyword_topic.is_some());
+        assert!(magnet.manifest_topic.is_some());
+        assert_eq!(magnet.exact_length, Some(4096));
+        assert_eq!(magnet.peers, vec!["1.2.3.4:6881"]);
+    }
+
+    #[test]
+    fn display_all_params() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &dn=Test%20File\
+            &tr=http%3A%2F%2Ft.com%2Fann\
+            &ws=http%3A%2F%2Fweb.example.com\
+            &xs=urn%3Asha1%3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
+            &as=http%3A%2F%2Falt.example.com\
+            &kt=k\
+            &mt=http%3A%2F%2Fm.example.com\
+            &xl=2048";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        let displayed = magnet.to_string();
+        // All values should be percent-encoded
+        assert!(displayed.contains("dn=Test%20File"));
+        assert!(displayed.contains("tr=http%3A%2F%2Ft.com%2Fann"));
+        assert!(displayed.contains("ws=http%3A%2F%2Fweb.example.com"));
+        // xt hash is raw hex, not escaped (no % chars to escape)
+        assert!(displayed.contains("xt=urn:btih:0123456789abcdef0123456789abcdef01234567"));
+        assert!(displayed.contains("xl=2048"));
+    }
+
+    #[test]
+    fn roundtrip_percent_encoded() {
+        // A URI with special characters that need encoding
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &dn=Test%20File%21\
+            &tr=http%3A%2F%2Ft.com%3A8080%2Fann%3Fkey%3Dval";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        // Round-trip: the structure should be identical
+        let magnet2 = magnet.to_string().parse::<MagnetUri>().unwrap();
+        assert_eq!(magnet, magnet2);
+    }
+
+    #[test]
+    fn roundtrip_unicode_dn() {
+        // Unicode in dn — survives round-trip via percent-encoding
+        let uri = "magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc\
+            &dn=%E2%98%83%20snowman"; // ☃ snowman
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        let encoded = magnet.to_string();
+        // Should be re-encoded as ASCII
+        assert!(encoded.is_ascii());
+        assert!(encoded.contains("dn=%E2%98%83%20snowman"));
+        // Values must survive the trip
+        let magnet2 = encoded.parse::<MagnetUri>().unwrap();
+        assert_eq!(magnet, magnet2);
+    }
+
+    // --- Malformed xt ---
+
+    #[test]
+    fn reject_xt_wrong_prefix() {
+        let uri = "magnet:?xt=urn:sha1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert!(MagnetUri::from_str(uri).is_err());
+    }
+
+    #[test]
+    fn reject_xt_hex_wrong_length() {
+        // 39 chars (must be exactly 40)
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef0123456";
+        assert!(MagnetUri::from_str(uri).is_err());
+    }
+
+    #[test]
+    fn reject_xt_base32_wrong_length() {
+        // 31 chars (must be exactly 32)
+        let uri = "magnet:?xt=urn:btih:64wsmv3zsbx5fve2sn5zxdq5w22lfpx";
+        assert!(MagnetUri::from_str(uri).is_err());
+    }
+
+    #[test]
+    fn reject_xt_invalid_length() {
+        // completely wrong length
+        let uri = "magnet:?xt=urn:btih:short";
+        assert!(MagnetUri::from_str(uri).is_err());
+    }
+
+    // --- URL decode edge cases ---
+
+    #[test]
+    fn url_decode_multiple_percents() {
+        assert_eq!(url_decode("hello%20world%21"), "hello world!");
+    }
+
+    #[test]
+    fn url_decode_incomplete_percent() {
+        // solitary % at end should be left as-is
+        assert_eq!(url_decode("hello%"), "hello%");
+    }
+
+    #[test]
+    fn url_decode_truncated_percent() {
+        // %2 at end (only 1 hex digit) should be left as-is
+        assert_eq!(url_decode("hello%2"), "hello%2");
+    }
+
+    #[test]
+    fn url_decode_invalid_hex() {
+        // %ZZ is not valid hex
+        assert_eq!(url_decode("hello%ZZworld"), "hello%ZZworld");
+    }
+
+    #[test]
+    fn url_decode_partial_hex() {
+        // %2g — only first char is valid hex
+        assert_eq!(url_decode("hello%2gworld"), "hello%2gworld");
+    }
+
+    // --- primary_info_hash ---
+
+    #[test]
+    fn primary_info_hash_returns_first() {
+        let uri = "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
+            &xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        let primary = magnet.primary_info_hash();
+        assert_eq!(
+            primary,
+            &[
+                0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+                0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+            ]
+        );
+    }
+
+    #[test]
+    fn magnet_with_percent_encoded_dn() {
+        let uri = "magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc\
+            &dn=%E2%98%83%20snowman"; // ☃ snowman
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        let name = magnet.display_name.unwrap();
+        assert_eq!(name, "\u{2603} snowman");
     }
 }

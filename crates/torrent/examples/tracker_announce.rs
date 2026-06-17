@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo run -p torrent --example tracker_announce`
 
-use torrent::metainfo::from_bytes;
+use torrent::metainfo::Metainfo;
 use torrent::peer::PeerId;
 use torrent::tracker::{AnnounceEvent, AnnounceRequest, Tracker};
 use tracing_subscriber::EnvFilter;
@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Parse the real torrent to get info_hash and tracker URLs
     let data = include_bytes!("data/ubuntu-26.04-live-server-amd64.iso.torrent");
-    let meta = from_bytes(data)?;
+    let meta = Metainfo::try_from(data)?;
     let info_hash = meta.info_hash();
 
     println!("Torrent:  ubuntu-26.04-live-server-amd64.iso.torrent");
