@@ -206,7 +206,7 @@ impl Session {
     pub async fn add_torrent(&self, spec: impl Into<TorrentSpec>) -> Result<InfoHash, Error> {
         match spec.into() {
             TorrentSpec::Metainfo(meta) => self.add_metainfo(meta).await,
-            TorrentSpec::Magnet(uri) => self.add_from_magnet(uri).await,
+            TorrentSpec::Magnet(uri) => self.add_magnet(uri).await,
         }
     }
 
@@ -238,7 +238,7 @@ impl Session {
     }
 
     /// Core: bootstrap a torrent from a magnet URI.
-    async fn add_from_magnet(&self, uri: MagnetUri) -> Result<InfoHash, Error> {
+    async fn add_magnet(&self, uri: MagnetUri) -> Result<InfoHash, Error> {
         let info_hash = *uri.primary_info_hash();
         let name = uri
             .display_name
