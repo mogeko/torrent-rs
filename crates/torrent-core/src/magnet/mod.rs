@@ -21,7 +21,7 @@
 //! assert_eq!(magnet.info_hashes.len(), 1);
 //! ```
 
-use std::fmt;
+use std::fmt::{self, Write};
 use std::str::FromStr;
 
 use crate::error::{Error, ErrorKind};
@@ -203,9 +203,11 @@ impl From<&Metainfo> for MagnetUri {
 }
 
 impl fmt::Display for MagnetUri {
-    /// Re-serialize to magnet URI format.
+    /// Re-serialize to magnet URI format with RFC 3986 percent-encoding.
     ///
     /// Uses the original `raw` form for info hashes to preserve encoding.
+    /// String values (`dn`, `tr`, `ws`, `xs`, `as`, `kt`, `mt`) are
+    /// percent-encoded so the output is a valid ASCII URI.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "magnet:?")?;
 
@@ -225,7 +227,7 @@ impl fmt::Display for MagnetUri {
             if !first {
                 write!(f, "&")?;
             }
-            write!(f, "dn={}", dn)?;
+            write!(f, "dn={}", url_encode(dn))?;
             first = false;
         }
 
@@ -234,61 +236,38 @@ impl fmt::Display for MagnetUri {
             if !first {
                 write!(f, "&")?;
             }
-            write!(f, "tr={}", tr)?;
+            write!(f, "tr={}", url_encode(tr))?;
             first = false;
         }
 
         // ws
         for ws in &self.web_seeds {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "ws={}", ws)?;
-            first = false;
+            write!(f, "&ws={}", url_encode(ws))?;
         }
 
         // xs
         if let Some(ref xs) = self.exact_source {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "xs={}", xs)?;
-            first = false;
+            write!(f, "&xs={}", url_encode(xs))?;
         }
 
         // as
         if let Some(ref a) = self.acceptable_source {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "as={}", a)?;
-            first = false;
+            write!(f, "&as={}", url_encode(a))?;
         }
 
         // kt
         if let Some(ref kt) = self.keyword_topic {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "kt={}", kt)?;
-            first = false;
+            write!(f, "&kt={}", url_encode(kt))?;
         }
 
         // mt
         if let Some(ref mt) = self.manifest_topic {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "mt={}", mt)?;
-            first = false;
+            write!(f, "&mt={}", url_encode(mt))?;
         }
 
         // xl
         if let Some(xl) = self.exact_length {
-            if !first {
-                write!(f, "&")?;
-            }
-            write!(f, "xl={}", xl)?;
+            write!(f, "&xl={}", xl)?;
         }
 
         Ok(())
@@ -408,6 +387,24 @@ fn url_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// URL percent-encoding per RFC 3986.
+///
+/// Encodes all bytes outside the unreserved set (`A-Za-z0-9-._~`).
+fn url_encode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                result.push(*b as char);
+            }
+            _ => {
+                write!(result, "%{:02X}", b).unwrap();
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -558,25 +555,50 @@ mod tests {
     #[test]
     fn display_all_params() {
         let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
-            &dn=Test\
-            &tr=http://t.com/ann\
-            &ws=http://web.example.com\
-            &xs=urn:sha1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
-            &as=http://alt.example.com\
+            &dn=Test%20File\
+            &tr=http%3A%2F%2Ft.com%2Fann\
+            &ws=http%3A%2F%2Fweb.example.com\
+            &xs=urn%3Asha1%3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
+            &as=http%3A%2F%2Falt.example.com\
             &kt=k\
-            &mt=http://m.example.com\
+            &mt=http%3A%2F%2Fm.example.com\
             &xl=2048";
         let magnet = MagnetUri::from_str(uri).unwrap();
         let displayed = magnet.to_string();
+        // All values should be percent-encoded
+        assert!(displayed.contains("dn=Test%20File"));
+        assert!(displayed.contains("tr=http%3A%2F%2Ft.com%2Fann"));
+        assert!(displayed.contains("ws=http%3A%2F%2Fweb.example.com"));
+        // xt hash is raw hex, not escaped (no % chars to escape)
         assert!(displayed.contains("xt=urn:btih:0123456789abcdef0123456789abcdef01234567"));
-        assert!(displayed.contains("dn=Test"));
-        assert!(displayed.contains("tr=http://t.com/ann"));
-        assert!(displayed.contains("ws=http://web.example.com"));
-        assert!(displayed.contains("xs=urn:sha1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
-        assert!(displayed.contains("as=http://alt.example.com"));
-        assert!(displayed.contains("kt=k"));
-        assert!(displayed.contains("mt=http://m.example.com"));
         assert!(displayed.contains("xl=2048"));
+    }
+
+    #[test]
+    fn roundtrip_percent_encoded() {
+        // A URI with special characters that need encoding
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &dn=Test%20File%21\
+            &tr=http%3A%2F%2Ft.com%3A8080%2Fann%3Fkey%3Dval";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        // Round-trip: the structure should be identical
+        let magnet2 = magnet.to_string().parse::<MagnetUri>().unwrap();
+        assert_eq!(magnet, magnet2);
+    }
+
+    #[test]
+    fn roundtrip_unicode_dn() {
+        // Unicode in dn — survives round-trip via percent-encoding
+        let uri = "magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc\
+            &dn=%E2%98%83%20snowman"; // ☃ snowman
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        let encoded = magnet.to_string();
+        // Should be re-encoded as ASCII
+        assert!(encoded.is_ascii());
+        assert!(encoded.contains("dn=%E2%98%83%20snowman"));
+        // Values must survive the trip
+        let magnet2 = encoded.parse::<MagnetUri>().unwrap();
+        assert_eq!(magnet, magnet2);
     }
 
     // --- Malformed xt ---

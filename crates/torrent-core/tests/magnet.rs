@@ -71,9 +71,14 @@ fn roundtrip_display() {
         &dn=test+file&tr=http://tracker.com/announce";
     let parsed = uri_str.parse::<MagnetUri>().unwrap();
     let displayed = parsed.to_string();
+    // xt hash (hex chars are unreserved — no encoding)
     assert!(displayed.contains("xt=urn:btih:0123456789abcdef0123456789abcdef01234567"));
-    assert!(displayed.contains("dn=test+file"));
-    assert!(displayed.contains("tr=http://tracker.com/announce"));
+    // + and :/// are percent-encoded per RFC 3986
+    assert!(displayed.contains("dn=test%2Bfile"));
+    assert!(displayed.contains("tr=http%3A%2F%2Ftracker.com%2Fannounce"));
+    // Values survive round-trip
+    let parsed2 = displayed.parse::<MagnetUri>().unwrap();
+    assert_eq!(parsed, parsed2);
 }
 
 #[test]
