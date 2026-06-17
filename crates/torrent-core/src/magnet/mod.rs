@@ -25,6 +25,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::error::{Error, ErrorKind};
+use crate::metainfo::{Metainfo, Mode};
 
 /// A parsed magnet URI (BEP 9).
 ///
@@ -72,6 +73,8 @@ pub struct MagnetUri {
     pub keyword_topic: Option<String>,
     /// Manifest topic (from `mt` parameter).
     pub manifest_topic: Option<String>,
+    /// Exact length in bytes (from `xl` parameter, BEP 9).
+    pub exact_length: Option<u64>,
 }
 
 /// An info hash extracted from a magnet URI.
@@ -109,6 +112,7 @@ impl FromStr for MagnetUri {
         let mut acceptable_source = None;
         let mut keyword_topic = None;
         let mut manifest_topic = None;
+        let mut exact_length = None;
 
         for param in body.split('&') {
             if param.is_empty() {
@@ -146,6 +150,9 @@ impl FromStr for MagnetUri {
                 "mt" => {
                     manifest_topic = Some(url_decode(value));
                 }
+                "xl" => {
+                    exact_length = value.parse::<u64>().ok();
+                }
                 _ => {
                     // Unknown parameters are ignored per BEP 9
                 }
@@ -165,6 +172,7 @@ impl FromStr for MagnetUri {
             acceptable_source,
             keyword_topic,
             manifest_topic,
+            exact_length,
         })
     }
 }
@@ -247,9 +255,50 @@ impl fmt::Display for MagnetUri {
                 write!(f, "&")?;
             }
             write!(f, "mt={}", mt)?;
+            first = false;
+        }
+
+        // xl
+        if let Some(xl) = self.exact_length {
+            if !first {
+                write!(f, "&")?;
+            }
+            write!(f, "xl={}", xl)?;
         }
 
         Ok(())
+    }
+}
+
+impl From<&Metainfo> for MagnetUri {
+    /// Create a magnet URI from torrent metadata (BEP 9).
+    fn from(meta: &Metainfo) -> Self {
+        let ih = meta.info_hash();
+        MagnetUri {
+            info_hashes: vec![InfoHash {
+                bytes: ih,
+                raw: hex_encode(ih),
+            }],
+            display_name: Some(match &meta.info.mode {
+                Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+            }),
+            exact_length: Some(meta.info.total_size()),
+            trackers: std::iter::once(meta.announce.clone())
+                .chain(meta.announce_list.iter().flatten().cloned())
+                .collect(),
+            web_seeds: Vec::new(),
+            exact_source: None,
+            acceptable_source: None,
+            keyword_topic: None,
+            manifest_topic: None,
+        }
+    }
+}
+
+impl MagnetUri {
+    /// Return the primary info hash (first `xt` parameter).
+    pub fn primary_info_hash(&self) -> &[u8; 20] {
+        &self.info_hashes[0].bytes
     }
 }
 
@@ -269,6 +318,11 @@ fn parse_xt(value: &str) -> Option<InfoHash> {
     }?;
 
     Some(InfoHash { bytes, raw })
+}
+
+/// Encode 20 bytes to a hex string.
+fn hex_encode(bytes: [u8; 20]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Decode a hex string to 20 bytes.
@@ -388,5 +442,45 @@ mod tests {
     #[test]
     fn url_decode_no_encoding() {
         assert_eq!(url_decode("hello world"), "hello world");
+    }
+
+    #[test]
+    fn parse_xl_parameter() {
+        use std::str::FromStr;
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&xl=1024";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.exact_length, Some(1024));
+    }
+
+    #[test]
+    fn metainfo_to_magnet() {
+        use crate::metainfo::{Info, Metainfo, Mode};
+        use bytes::Bytes;
+
+        let info = Info {
+            piece_length: 262144,
+            pieces: vec![[0u8; 20]],
+            mode: Mode::Single {
+                name: "test.txt".into(),
+                length: 1024,
+            },
+            raw_info: Bytes::from_static(b"d4:infod...e"),
+        };
+        let meta = Metainfo {
+            announce: "http://tracker.example.com/announce".into(),
+            announce_list: vec![],
+            info,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+
+        let magnet = MagnetUri::from(&meta);
+        assert_eq!(magnet.info_hashes.len(), 1);
+        assert_eq!(magnet.display_name.as_deref(), Some("test.txt"));
+        assert_eq!(magnet.exact_length, Some(1024));
+        assert_eq!(magnet.trackers.len(), 1);
+        assert_eq!(magnet.trackers[0], "http://tracker.example.com/announce");
     }
 }

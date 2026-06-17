@@ -29,6 +29,7 @@ mod parse;
 pub use self::parse::from_bytes;
 
 use bytes::Bytes;
+use sha1::{Digest, Sha1};
 
 /// Represents a parsed `.torrent` file (BEP 3).
 ///
@@ -112,7 +113,6 @@ impl Metainfo {
     /// This is the torrent's unique identifier used in tracker requests,
     /// DHT lookups, and magnet links.
     pub fn info_hash(&self) -> [u8; 20] {
-        use sha1::{Digest, Sha1};
         let mut hasher = Sha1::new();
         hasher.update(&self.info.raw_info);
         hasher.finalize().into()
