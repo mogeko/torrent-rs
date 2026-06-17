@@ -19,6 +19,7 @@ mod upload;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -273,6 +274,20 @@ impl Session {
 
         let storage = Arc::new(FileStorage::new(&meta.info, &self.config.download_dir).await?);
         let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
+
+        // Inject x.pe addresses directly into the connection pool (BEP 9).
+        if !uri.peers.is_empty() {
+            let mut peer_addrs = Vec::with_capacity(uri.peers.len());
+            for peer_str in &uri.peers {
+                if let Ok(addr) = SocketAddr::from_str(peer_str) {
+                    peer_addrs.push(addr);
+                }
+            }
+            if !peer_addrs.is_empty() {
+                handle.peer_mgr.write().await.add_peers(peer_addrs);
+            }
+        }
+
         self.torrents.write().await.insert(info_hash, handle);
 
         Ok(info_hash)

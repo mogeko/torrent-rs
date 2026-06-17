@@ -75,6 +75,8 @@ pub struct MagnetUri {
     pub manifest_topic: Option<String>,
     /// Exact length in bytes (from `xl` parameter, BEP 9).
     pub exact_length: Option<u64>,
+    /// Peer addresses for direct metadata transfer (from `x.pe` parameter).
+    pub peers: Vec<String>,
 }
 
 /// An info hash extracted from a magnet URI.
@@ -113,6 +115,7 @@ impl FromStr for MagnetUri {
         let mut keyword_topic = None;
         let mut manifest_topic = None;
         let mut exact_length = None;
+        let mut peers = Vec::new();
 
         for param in body.split('&') {
             if param.is_empty() {
@@ -150,6 +153,9 @@ impl FromStr for MagnetUri {
                 "mt" => {
                     manifest_topic = Some(url_decode(value));
                 }
+                "x.pe" => {
+                    peers.push(url_decode(value));
+                }
                 "xl" => {
                     exact_length = value.parse::<u64>().ok();
                 }
@@ -173,6 +179,7 @@ impl FromStr for MagnetUri {
             keyword_topic,
             manifest_topic,
             exact_length,
+            peers,
         })
     }
 }
@@ -198,6 +205,7 @@ impl From<&Metainfo> for MagnetUri {
             acceptable_source: None,
             keyword_topic: None,
             manifest_topic: None,
+            peers: Vec::new(),
         }
     }
 }
@@ -263,6 +271,11 @@ impl fmt::Display for MagnetUri {
         // mt
         if let Some(ref mt) = self.manifest_topic {
             write!(f, "&mt={}", url_encode(mt))?;
+        }
+
+        // x.pe
+        for peer in &self.peers {
+            write!(f, "&x.pe={}", url_encode(peer))?;
         }
 
         // xl
@@ -529,6 +542,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_x_pe_single() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &x.pe=192.168.1.1:6881";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.peers, vec!["192.168.1.1:6881"]);
+    }
+
+    #[test]
+    fn parse_x_pe_multiple() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &x.pe=192.168.1.1:6881&x.pe=10.0.0.1:6882";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.peers, vec!["192.168.1.1:6881", "10.0.0.1:6882"]);
+    }
+
+    #[test]
+    fn parse_x_pe_ipv6() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &x.pe=%5B%3A%3A1%5D%3A6881"; // [::1]:6881
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.peers, vec!["[::1]:6881"]);
+    }
+
+    #[test]
+    fn roundtrip_x_pe() {
+        // IPv4 peer: colon is %-encoded in URI
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
+            &x.pe=192.168.1.1%3A6881";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        assert_eq!(magnet.peers, vec!["192.168.1.1:6881"]);
+        // Round-trip preserves the value
+        let magnet2 = magnet.to_string().parse::<MagnetUri>().unwrap();
+        assert_eq!(magnet, magnet2);
+    }
+
+    #[test]
     fn parse_magnet_all_params() {
         let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567\
             &dn=Test+File\
@@ -539,7 +588,8 @@ mod tests {
             &as=http://alt.example.com/data\
             &kt=test+keyword\
             &mt=http://manifest.example.com\
-            &xl=4096";
+            &xl=4096\
+            &x.pe=1.2.3.4%3A6881";
         let magnet = MagnetUri::from_str(uri).unwrap();
         assert_eq!(magnet.info_hashes.len(), 1);
         assert_eq!(magnet.display_name.as_deref(), Some("Test+File"));
@@ -550,6 +600,7 @@ mod tests {
         assert!(magnet.keyword_topic.is_some());
         assert!(magnet.manifest_topic.is_some());
         assert_eq!(magnet.exact_length, Some(4096));
+        assert_eq!(magnet.peers, vec!["1.2.3.4:6881"]);
     }
 
     #[test]
