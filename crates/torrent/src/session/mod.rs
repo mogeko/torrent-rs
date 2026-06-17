@@ -26,7 +26,7 @@ use tokio::sync::RwLock;
 
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
-use crate::magnet::MagnetUri;
+use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{Metainfo, Mode};
 use crate::spec::TorrentSpec;
 use crate::storage::FileStorage;
@@ -300,9 +300,4 @@ impl Session {
     pub async fn active_torrents(&self) -> Vec<InfoHash> {
         self.torrents.read().await.keys().copied().collect()
     }
-}
-
-/// Encode 20 bytes as a hex string.
-fn hex_encode(bytes: [u8; 20]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
