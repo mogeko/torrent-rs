@@ -31,6 +31,7 @@ async fn session_config_defaults() {
     assert_eq!(cfg.listen_port, 6881);
     assert_eq!(cfg.max_connections, 50);
     assert_eq!(cfg.max_uploads, 8);
+    assert_eq!(cfg.download_dir, std::path::PathBuf::from("."));
     assert!(cfg.bootstrap_nodes.is_some());
 }
 

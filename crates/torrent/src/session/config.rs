@@ -25,12 +25,20 @@ pub type InfoHash = [u8; 20];
 pub struct SessionConfig {
     // ── Network ──
     /// TCP listen port for incoming peer connections.
+    ///
+    /// Default: `6881`.
     pub listen_port: u16,
     /// Maximum number of peer connections per torrent.
+    ///
+    /// Default: `50`.
     pub max_connections: u32,
     /// Maximum upload slots (unchoke limit, BEP 3).
+    ///
+    /// Default: `8`.
     pub max_uploads: u32,
     /// Download directory for completed files.
+    ///
+    /// Default: `"."` (current working directory).
     pub download_dir: PathBuf,
 
     // ── Rate Limiting ──
@@ -38,8 +46,12 @@ pub struct SessionConfig {
     ///
     /// Applies across all torrents. Use `0` to pause downloads while
     /// keeping connections open. Per-torrent limits are not yet supported.
+    ///
+    /// Default: `None`.
     pub download_rate_limit: Option<u64>,
     /// Global upload rate limit in bytes/s. `None` = unlimited.
+    ///
+    /// Default: `None`.
     pub upload_rate_limit: Option<u64>,
 
     // ── Queue & Concurrency ──
@@ -47,12 +59,20 @@ pub struct SessionConfig {
     ///
     /// `0` means unlimited. When the limit is reached,
     /// [`Session::add_torrent`](super::Session::add_torrent) returns an error.
+    ///
+    /// Default: `0` (unlimited).
     pub max_active_torrents: usize,
     /// Maximum number of pieces to download concurrently.
+    ///
+    /// Default: `5`.
     pub max_concurrent_pieces: usize,
     /// How many completed pieces to cache for upload serving (LRU eviction).
+    ///
+    /// Default: `256`.
     pub piece_cache_size: usize,
     /// When fewer than this many pieces remain, switch to EndGame mode.
+    ///
+    /// Default: `10`.
     pub endgame_threshold: usize,
 
     // ── Timers & Retries ──
@@ -60,26 +80,48 @@ pub struct SessionConfig {
     ///
     /// If a peer does not deliver the requested block within this
     /// duration, the request is cancelled and re-assigned.
+    ///
+    /// Default: `60` s.
     pub request_timeout: Duration,
     /// Per-peer TCP connection timeout.
+    ///
+    /// Default: `500` ms.
     pub peer_connect_timeout: Duration,
     /// Maximum connection retries per peer before discarding.
+    ///
+    /// Default: `3`.
     pub peer_max_retries: u32,
     /// Cooldown before reconnecting a failed peer.
+    ///
+    /// Default: `30` s.
     pub peer_cooldown: Duration,
     /// How often to run the choke/unchoke algorithm.
+    ///
+    /// Default: `10` s.
     pub choke_interval: Duration,
     /// Idle duration before a peer is snubbed (BEP 3).
+    ///
+    /// Default: `60` s.
     pub snub_timeout: Duration,
     /// How many corrupt blocks before banning a peer.
+    ///
+    /// Default: `10`.
     pub corrupt_ban_threshold: u32,
     /// Re-announce interval after a tracker request fails.
+    ///
+    /// Default: `30` s.
     pub announce_fallback_interval: Duration,
     /// Timeout for HTTP and UDP tracker requests.
+    ///
+    /// Default: `15` s.
     pub tracker_timeout: Duration,
     /// How often the DHT background task polls for new peers.
+    ///
+    /// Default: `30` s.
     pub dht_poll_interval: Duration,
     /// Buffer size for the peer message channel (per torrent).
+    ///
+    /// Default: `256`.
     pub peer_msg_buffer_size: usize,
 
     // ── DHT ──
@@ -87,11 +129,13 @@ pub struct SessionConfig {
     /// When `Some`, the session initializes a DHT node and uses these
     /// addresses to join the DHT network (BEP 5).
     ///
-    /// Default: `Some(vec![...])` with well-known public bootstrap nodes.
+    /// Default: `Some(vec![router.bittorrent.com:6881, dht.transmissionbt.com:6881])`.
     pub bootstrap_nodes: Option<Vec<BootstrapNode>>,
     /// Optional DHT node ID (20 bytes). If `None`, a random one is generated
     /// each session. Set this to a persisted value to keep a stable identity
     /// across restarts (BEP 5 recommends persisting the node ID).
+    ///
+    /// Default: `None`.
     pub node_id: Option<[u8; 20]>,
 }
 
@@ -101,7 +145,7 @@ impl Default for SessionConfig {
             listen_port: 6881,
             max_connections: 50,
             max_uploads: 8,
-            download_dir: PathBuf::from("downloads"),
+            download_dir: PathBuf::from("."),
             download_rate_limit: None,
             upload_rate_limit: None,
             max_active_torrents: 0,
