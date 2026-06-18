@@ -210,7 +210,9 @@ impl DownloadLoop {
             pm.to_bitfield()
         };
         let pm = peer_mgr.read().await;
-        if !bf_bytes.is_empty() {
+        // BEP 3: the bitfield message is optional and SHOULD NOT be sent
+        // if the client has no pieces (all bits are zero).
+        if bf_bytes.iter().any(|&b| b != 0) {
             pm.send_to(&addr, &PeerMessage::Bitfield(bf_bytes)).await?;
         }
         pm.send_to(&addr, &PeerMessage::Interested).await?;

@@ -57,8 +57,22 @@ impl DownloadLoop {
             let (index, begin) = if let Some(blk) = block_opt {
                 blk
             } else if self.active_downloads.len() < MAX_CONCURRENT_DOWNLOADS {
+                // If the peer hasn't sent its bitfield yet we cannot
+                // tell which pieces it has — skip for now.
+                let peer_has_bitfield = self
+                    .peers
+                    .get(&addr)
+                    .is_some_and(|p| !p.bitfield.is_empty());
+                if !peer_has_bitfield {
+                    continue;
+                }
+
                 let selected = self.selector.select(&our_bf, &availability);
                 if let Some(idx) = selected {
+                    // Don't overwrite an existing download for the same piece.
+                    if self.active_downloads.contains_key(&idx) {
+                        continue;
+                    }
                     let piece_len = self.piece_len_for_index(idx);
                     if piece_len == 0 {
                         continue;

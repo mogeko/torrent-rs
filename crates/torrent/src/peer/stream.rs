@@ -50,30 +50,31 @@ impl PeerConnection {
         tracing::debug!("connecting to peer {}", addr);
 
         // TCP connect with timeout
-        let raw_stream =
+        let mut raw_stream =
             match tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(addr)).await {
                 Ok(Ok(s)) => s,
                 _ => return Err(Error::new(ErrorKind::PeerConnectionClosed)),
             };
 
-        // Use a combined BufReader<BufWriter<TcpStream>> for the handshake phase.
-        let mut stream = BufReader::new(BufWriter::new(raw_stream));
-
-        // Send our handshake
+        // Perform handshake directly on the raw TcpStream so that no
+        // BufReader read-ahead can steal bytes from subsequent wire
+        // messages (Bitfield, Unchoke, etc.) that the peer may send
+        // immediately after its handshake.
         let handshake = Handshake::new(info_hash, our_peer_id.0);
         let handshake_bytes = handshake.to_bytes();
 
-        if let Err(e) = stream.get_mut().write_all(&handshake_bytes).await {
+        if let Err(e) =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, raw_stream.write_all(&handshake_bytes)).await
+        {
             return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
         }
-
-        if let Err(e) = stream.get_mut().flush().await {
+        if let Err(e) = tokio::time::timeout(HANDSHAKE_TIMEOUT, raw_stream.flush()).await {
             return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
         }
 
         // Read remote handshake with timeout
         let mut buf = [0u8; 68];
-        match tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut buf)).await {
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, raw_stream.read_exact(&mut buf)).await {
             Ok(Ok(_n)) => {}
             _ => return Err(Error::new(ErrorKind::PeerConnectionClosed)),
         };
@@ -84,10 +85,11 @@ impl PeerConnection {
             return Err(Error::new(ErrorKind::PeerInvalidHandshake));
         }
 
-        // Split into independent read/write halves so that recv and send
-        // can proceed concurrently without lock contention.
-        let inner = stream.into_inner().into_inner();
-        let (read_half, write_half) = inner.into_split();
+        // Now split into independent read/write halves so that recv and
+        // send can proceed concurrently without lock contention.
+        // BufReader/BufWriter are applied AFTER the split so no handshake
+        // bytes are ever lost to read-ahead buffering.
+        let (read_half, write_half) = raw_stream.into_split();
 
         tracing::info!("handshake complete with {}", addr);
 
