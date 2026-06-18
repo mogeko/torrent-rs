@@ -11,11 +11,15 @@ keywords = ["bittorrent", "p2p", "torrent", "async", "tokio"]
 categories = ["network-programming", "asynchronous"]
 readme = "README.md"
 
+[features]
+serde = ["torrent-core/serde", "dep:serde"]
+
 [dependencies]
 torrent-core.workspace = true
 rand.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
+serde = { workspace = true, optional = true }
 sha1.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
@@ -25,6 +29,7 @@ url.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies.tracing-subscriber]
 version = "0.3"

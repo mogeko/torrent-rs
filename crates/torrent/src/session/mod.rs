@@ -10,22 +10,23 @@
 //! The loop periodically connects to peers, requests blocks, verifies
 //! pieces using SHA-1, and updates the torrent status.
 
+mod config;
 mod download;
 mod peer_manager;
 mod torrent;
 mod uni_deque;
 mod upload;
 
+pub use config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
+
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::path::PathBuf;
 use std::str::FromStr as _;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use crate::dht::{BootstrapNode, DhtNode, generate_node_id};
+use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
@@ -33,12 +34,6 @@ use crate::spec::TorrentSpec;
 use crate::storage::FileStorage;
 
 use self::torrent::TorrentHandle;
-
-/// Unique identifier for a torrent (SHA-1 info hash).
-///
-/// This is the 20-byte hash used throughout the BitTorrent protocol
-/// to identify torrents. It is computed as `SHA-1(bencoded_info_dict)`.
-pub type InfoHash = [u8; 20];
 
 /// High-level session managing all torrent downloads/uploads.
 ///
@@ -79,81 +74,6 @@ pub struct Session {
     dht_node: Option<Arc<DhtNode>>,
 }
 
-/// Session configuration.
-#[derive(Debug, Clone)]
-pub struct SessionConfig {
-    /// TCP listen port for incoming peer connections.
-    pub listen_port: u16,
-    /// Maximum number of peer connections per torrent.
-    pub max_connections: u32,
-    /// Maximum upload slots.
-    pub max_uploads: u32,
-    /// Download directory.
-    pub download_dir: PathBuf,
-    /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
-    /// When `Some`, the session initializes a DHT node and uses these
-    /// addresses to join the DHT network (BEP 5).
-    ///
-    /// Default: `Some(vec![...])` with well-known public bootstrap nodes.
-    pub bootstrap_nodes: Option<Vec<BootstrapNode>>,
-    /// Optional DHT node ID (20 bytes). If `None`, a random one is generated
-    /// each session. Set this to a persisted value to keep a stable identity
-    /// across restarts (BEP 5 recommends persisting the node ID).
-    pub node_id: Option<[u8; 20]>,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        SessionConfig {
-            listen_port: 6881,
-            max_connections: 50,
-            max_uploads: 8,
-            download_dir: PathBuf::from("downloads"),
-            bootstrap_nodes: Some(vec![
-                BootstrapNode::from(("router.bittorrent.com", 6881)),
-                BootstrapNode::from(("dht.transmissionbt.com", 6881)),
-            ]),
-            node_id: None,
-        }
-    }
-}
-
-/// Status of a torrent, exposed via the public API.
-#[derive(Debug, Clone)]
-pub struct TorrentStatus {
-    /// The 20-byte info hash.
-    pub info_hash: InfoHash,
-    /// Display name of the torrent.
-    pub name: String,
-    /// Download progress (0.0 to 1.0).
-    pub progress: f64,
-    /// Download rate in bytes per second.
-    pub download_rate: f64,
-    /// Upload rate in bytes per second.
-    pub upload_rate: f64,
-    /// Number of connected peers.
-    pub num_peers: usize,
-    /// Number of seeders (peers with 100% completion).
-    pub num_seeds: usize,
-    /// Current state of the torrent.
-    pub state: TorrentState,
-}
-
-/// Possible states of a torrent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TorrentState {
-    /// Waiting to start.
-    Queued,
-    /// Actively downloading.
-    Downloading,
-    /// All pieces downloaded, uploading only.
-    Seeding,
-    /// Paused by user.
-    Paused,
-    /// An error occurred.
-    Error,
-}
-
 impl Session {
     /// Create a new session with the given configuration.
     pub async fn new(config: SessionConfig) -> Result<Self, Error> {
@@ -176,11 +96,12 @@ impl Session {
                 let node_id = config.node_id.unwrap_or_else(generate_node_id);
                 let node = DhtNode::new(node_id, bind_addr, &bootstrap_refs).await?;
 
-                // Spawn background feeder: poll each torrent's info_hash every 30s
+                // Spawn background feeder: poll each torrent's info_hash on config interval
                 let (dht, t) = (node.clone(), torrents.clone());
+                let poll_interval = config.dht_poll_interval;
                 tokio::spawn(async move {
                     loop {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        tokio::time::sleep(poll_interval).await;
                         let info_hashes: Vec<InfoHash> = t.read().await.keys().copied().collect();
                         for ih in info_hashes {
                             let peers = dht.get_peers(&ih).await;
@@ -235,6 +156,8 @@ impl Session {
 
     /// Core: bootstrap a torrent from full metadata.
     async fn add_metainfo(&self, meta: Metainfo) -> Result<InfoHash, Error> {
+        self.check_capacity().await?;
+
         let info_hash = meta.info_hash();
         let _name = match &meta.info.mode {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
@@ -251,6 +174,8 @@ impl Session {
 
     /// Core: bootstrap a torrent from a magnet URI.
     async fn add_magnet(&self, uri: MagnetUri) -> Result<InfoHash, Error> {
+        self.check_capacity().await?;
+
         let info_hash = *uri.primary_info_hash();
         let name = uri
             .display_name
@@ -327,5 +252,18 @@ impl Session {
     /// List all active info_hashes.
     pub async fn active_torrents(&self) -> Vec<InfoHash> {
         self.torrents.read().await.keys().copied().collect()
+    }
+
+    /// Check whether the session has room for another torrent.
+    async fn check_capacity(&self) -> Result<(), Error> {
+        let limit = self.config.max_active_torrents;
+        if limit == 0 {
+            return Ok(());
+        }
+        let count = self.torrents.read().await.len();
+        if count >= limit {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        Ok(())
     }
 }

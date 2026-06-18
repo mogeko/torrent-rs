@@ -24,8 +24,8 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
       - run: cargo fmt --check
-      - run: cargo clippy --release --locked -- -D warnings
-      - run: cargo build --release --locked
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --release --locked
-      - run: cargo test --release --locked -- --test-threads=1
+      - run: cargo clippy --all-features --locked -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --all-features --locked
+      - run: cargo test --all-features --locked -- --test-threads=1

@@ -11,7 +11,7 @@ use crate::error::{Error, ErrorKind};
 use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
 /// Timeout for HTTP tracker connect + request + response read.
-const TIMEOUT: Duration = Duration::from_secs(15);
+use super::DEFAULT_TIMEOUT;
 
 /// Maximum response size to guard against malicious or buggy trackers (256 KB).
 const MAX_RESPONSE_SIZE: u64 = 256 * 1024;
@@ -31,6 +31,8 @@ pub struct HttpTracker {
     port: u16,
     /// TLS connector for `https://` URLs; `None` for plain `http://`.
     tls: Option<TlsConnector>,
+    /// Per-request timeout.
+    timeout: Duration,
 }
 
 impl fmt::Debug for HttpTracker {
@@ -49,17 +51,23 @@ impl Clone for HttpTracker {
             host: self.host.clone(),
             port: self.port,
             tls: self.tls.clone(),
+            timeout: self.timeout,
         }
     }
 }
 
 impl HttpTracker {
-    /// Create a new HTTP tracker client.
+    /// Create a new HTTP tracker client with the default 15 s timeout.
     ///
     /// `url` must be a full announce URL (e.g. `http://tracker.example.com:6969/announce`
     /// or `https://tracker.example.com/announce`). Automatically detects TLS.
     /// Accepts `&str`, `String`, `&String`, or `Url`.
     pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
+        Self::with_timeout(url, DEFAULT_TIMEOUT)
+    }
+
+    /// Create a new HTTP tracker client with a custom timeout.
+    pub fn with_timeout(url: impl IntoUrl, timeout: Duration) -> Result<Self, Error> {
         let url = url.into_url()?;
         let host = url
             .host_str()
@@ -76,6 +84,7 @@ impl HttpTracker {
             host,
             port,
             tls,
+            timeout,
         })
     }
 
@@ -94,7 +103,7 @@ impl HttpTracker {
         let host = self.host.clone();
         let port = self.port;
         let tls = self.tls.clone();
-        let response = tokio::time::timeout(TIMEOUT, async move {
+        let response = tokio::time::timeout(self.timeout, async move {
             let tcp_stream = TcpStream::connect((&*host, port))
                 .await
                 .map_err(Error::tracker_failed)?;

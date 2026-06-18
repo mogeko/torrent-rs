@@ -3,57 +3,57 @@ use rand::RngExt;
 /// Trait for piece selection strategies (BEP 3).
 ///
 /// Implementations decide which piece to download next given the
-/// set of pieces a peer has (`candidates`) and the ones we already
-/// have (`bitfield`).
+/// pieces we already have (`our_bitfield`) and per-piece availability
+/// counts across the swarm (`availability[i]` = number of connected
+/// unchoked peers that have piece `i`).
 ///
 /// # Examples
 ///
 /// ```
 /// use torrent_core::piece::{PieceSelector, Sequential};
 ///
-/// let candidates = vec![true, false, true];
-/// let bitfield = vec![false, false, false];
-/// let next = Sequential.select(&candidates, &bitfield);
+/// let our_bitfield = vec![false, false, false, false];
+/// let availability = vec![3, 0, 2, 1];
+/// let next = Sequential.select(&our_bitfield, &availability);
 /// assert_eq!(next, Some(0));
 /// ```
 pub trait PieceSelector: Send + Sync {
-    /// Select the next piece to download from the available candidates.
+    /// Select the next piece to download.
     ///
-    /// `candidates` is a bitfield from a single peer (true = peer has piece).
-    /// `bitfield` is our local bitfield (true = we already have it).
-    fn select(&self, candidates: &[bool], bitfield: &[bool]) -> Option<u32>;
+    /// `our_bitfield` — pieces we already have (`true` = owned).
+    /// `availability` — per-piece count of peers that have each piece.
+    /// Only pieces where `availability[i] > 0` are reachable.
+    fn select(&self, our_bitfield: &[bool], availability: &[usize]) -> Option<u32>;
 }
 
 /// Select the rarest piece first (BEP 3 recommended default).
 ///
-/// Picks the piece available from the fewest peers. This strategy
+/// Picks the missing piece that the fewest peers have. This strategy
 /// maximizes piece diversity in the swarm and is the standard
 /// approach described in BEP 3.
 pub struct RarestFirst;
 
 impl PieceSelector for RarestFirst {
-    fn select(&self, candidates: &[bool], bitfield: &[bool]) -> Option<u32> {
-        let mut rarest_pieces = Vec::new();
+    fn select(&self, our_bitfield: &[bool], availability: &[usize]) -> Option<u32> {
+        let len = our_bitfield.len().min(availability.len());
+        let mut best_idx: Option<u32> = None;
+        let mut best_count = usize::MAX;
 
-        for (i, &peer_has) in candidates.iter().enumerate() {
-            if i >= bitfield.len() || bitfield[i] {
+        for i in 0..len {
+            if our_bitfield[i] {
                 continue; // already have it
             }
-            if !peer_has {
-                continue; // peer doesn't have it
+            let count = availability[i];
+            if count == 0 {
+                continue; // no peer has it
             }
-            // For basic rarest-first, we just need the count of peers
-            // In the full implementation, we'd pass peer bitfields.
-            // Here we approximate: if only one candidate is available, pick it.
-            rarest_pieces.push(i as u32);
+            if count < best_count {
+                best_count = count;
+                best_idx = Some(i as u32);
+            }
         }
 
-        if rarest_pieces.is_empty() {
-            return None;
-        }
-
-        // Simple: return the first available missing piece
-        Some(rarest_pieces[0])
+        best_idx
     }
 }
 
@@ -64,20 +64,19 @@ impl PieceSelector for RarestFirst {
 pub struct RandomFirst;
 
 impl PieceSelector for RandomFirst {
-    fn select(&self, candidates: &[bool], bitfield: &[bool]) -> Option<u32> {
-        let available: Vec<u32> = candidates
-            .iter()
-            .enumerate()
-            .filter(|(i, peer_has)| **peer_has && (*i >= bitfield.len() || !bitfield[*i]))
-            .map(|(i, _)| i as u32)
+    fn select(&self, our_bitfield: &[bool], availability: &[usize]) -> Option<u32> {
+        let len = our_bitfield.len().min(availability.len());
+        let candidates: Vec<u32> = (0..len)
+            .filter(|&i| !our_bitfield[i] && availability[i] > 0)
+            .map(|i| i as u32)
             .collect();
 
-        if available.is_empty() {
+        if candidates.is_empty() {
             return None;
         }
 
-        let idx = rand::rng().random_range(0..available.len());
-        Some(available[idx])
+        let idx = rand::rng().random_range(0..candidates.len());
+        Some(candidates[idx])
     }
 }
 
@@ -88,9 +87,10 @@ impl PieceSelector for RandomFirst {
 pub struct Sequential;
 
 impl PieceSelector for Sequential {
-    fn select(&self, candidates: &[bool], bitfield: &[bool]) -> Option<u32> {
-        for (i, &peer_has) in candidates.iter().enumerate() {
-            if peer_has && (i >= bitfield.len() || !bitfield[i]) {
+    fn select(&self, our_bitfield: &[bool], availability: &[usize]) -> Option<u32> {
+        let len = our_bitfield.len().min(availability.len());
+        for i in 0..len {
+            if !our_bitfield[i] && availability[i] > 0 {
                 return Some(i as u32);
             }
         }
@@ -106,8 +106,8 @@ impl PieceSelector for Sequential {
 pub struct EndGame;
 
 impl PieceSelector for EndGame {
-    fn select(&self, candidates: &[bool], bitfield: &[bool]) -> Option<u32> {
-        Sequential.select(candidates, bitfield)
+    fn select(&self, our_bitfield: &[bool], availability: &[usize]) -> Option<u32> {
+        Sequential.select(our_bitfield, availability)
     }
 }
 
@@ -117,30 +117,39 @@ mod tests {
 
     #[test]
     fn sequential_basic() {
-        let candidates = vec![true, false, true, true];
-        let bitfield = vec![false, false, false, false];
-        assert_eq!(Sequential.select(&candidates, &bitfield), Some(0));
+        let our_bf = vec![false, false, false, false];
+        let avail = vec![3, 0, 2, 1];
+        // Piece 0 available, piece 1 not, piece 2 available, piece 3 available
+        assert_eq!(Sequential.select(&our_bf, &avail), Some(0));
     }
 
     #[test]
-    fn sequential_skip_choked() {
-        let candidates = vec![false, false, true];
-        let bitfield = vec![false, false, false];
-        assert_eq!(Sequential.select(&candidates, &bitfield), Some(2));
+    fn sequential_skip_zero_availability() {
+        let our_bf = vec![false, false, false];
+        let avail = vec![0, 0, 2];
+        // First two pieces have 0 availability, should pick piece 2
+        assert_eq!(Sequential.select(&our_bf, &avail), Some(2));
     }
 
     #[test]
     fn sequential_all_downloaded() {
-        let candidates = vec![true, true];
-        let bitfield = vec![true, true];
-        assert_eq!(Sequential.select(&candidates, &bitfield), None);
+        let our_bf = vec![true, true];
+        let avail = vec![3, 5];
+        assert_eq!(Sequential.select(&our_bf, &avail), None);
+    }
+
+    #[test]
+    fn sequential_none_available() {
+        let our_bf = vec![false, false];
+        let avail = vec![0, 0]; // no peers have any pieces
+        assert_eq!(Sequential.select(&our_bf, &avail), None);
     }
 
     #[test]
     fn random_first_basic() {
-        let candidates = vec![true, true, true];
-        let bitfield = vec![false, false, false];
-        let result = RandomFirst.select(&candidates, &bitfield);
+        let our_bf = vec![false, false, false];
+        let avail = vec![2, 2, 2];
+        let result = RandomFirst.select(&our_bf, &avail);
         assert!(result.is_some());
         let idx = result.unwrap() as usize;
         assert!(idx < 3);
@@ -148,22 +157,62 @@ mod tests {
 
     #[test]
     fn random_first_empty() {
-        let candidates = vec![false, false];
-        let bitfield = vec![false, false];
-        assert_eq!(RandomFirst.select(&candidates, &bitfield), None);
+        let our_bf = vec![false, false];
+        let avail = vec![0, 0];
+        assert_eq!(RandomFirst.select(&our_bf, &avail), None);
     }
 
     #[test]
-    fn rarest_first_basic() {
-        let candidates = vec![true, true, false];
-        let bitfield = vec![false, false, false];
-        assert_eq!(RarestFirst.select(&candidates, &bitfield), Some(0));
+    fn rarest_first_picks_rarest() {
+        // Piece 0: 3 peers, Piece 1: 1 peer, Piece 2: 5 peers
+        // Should pick Piece 1 (rarest)
+        let our_bf = vec![false, false, false];
+        let avail = vec![3, 1, 5];
+        assert_eq!(RarestFirst.select(&our_bf, &avail), Some(1));
+    }
+
+    #[test]
+    fn rarest_first_skips_owned() {
+        // Piece 0 owned, Piece 1 rarest available
+        let our_bf = vec![true, false, false];
+        let avail = vec![0, 1, 5];
+        assert_eq!(RarestFirst.select(&our_bf, &avail), Some(1));
+    }
+
+    #[test]
+    fn rarest_first_skips_zero_availability() {
+        // Piece 0 has 0 availability (no peers), should pick Piece 1
+        let our_bf = vec![false, false];
+        let avail = vec![0, 3];
+        assert_eq!(RarestFirst.select(&our_bf, &avail), Some(1));
+    }
+
+    #[test]
+    fn rarest_first_empty_when_none_available() {
+        let our_bf = vec![false, false];
+        let avail = vec![0, 0];
+        assert_eq!(RarestFirst.select(&our_bf, &avail), None);
     }
 
     #[test]
     fn endgame_select_any() {
-        let candidates = vec![true, true];
-        let bitfield = vec![false, true];
-        assert_eq!(EndGame.select(&candidates, &bitfield), Some(0));
+        let our_bf = vec![false, true]; // piece 0 missing, piece 1 owned
+        let avail = vec![4, 0];
+        assert_eq!(EndGame.select(&our_bf, &avail), Some(0));
+    }
+
+    #[test]
+    fn endgame_none_available() {
+        let our_bf = vec![false, false];
+        let avail = vec![0, 0];
+        assert_eq!(EndGame.select(&our_bf, &avail), None);
+    }
+
+    #[test]
+    fn availability_shorter_than_bitfield() {
+        // If availability is shorter, we only consider the overlap
+        let our_bf = vec![false, false, false];
+        let avail = vec![1]; // only piece 0 has availability
+        assert_eq!(Sequential.select(&our_bf, &avail), Some(0));
     }
 }

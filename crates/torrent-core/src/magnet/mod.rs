@@ -56,6 +56,7 @@ use crate::metainfo::{Metainfo, Mode};
 /// assert_eq!(magnet.trackers.len(), 1);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MagnetUri {
     /// Exact Topic — info hashes (at least one required).
     pub info_hashes: Vec<InfoHash>,
@@ -81,6 +82,7 @@ pub struct MagnetUri {
 
 /// An info hash extracted from a magnet URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InfoHash {
     /// The 20-byte SHA-1 hash.
     pub bytes: [u8; 20],
@@ -743,5 +745,50 @@ mod tests {
         let magnet = MagnetUri::from_str(uri).unwrap();
         let name = magnet.display_name.unwrap();
         assert_eq!(name, "\u{2603} snowman");
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn magnet_uri_roundtrip_minimal() {
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        let json = serde_json::to_string(&magnet).unwrap();
+        let back: MagnetUri = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, magnet);
+    }
+
+    #[test]
+    fn magnet_uri_roundtrip_full() {
+        let uri = "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
+            &dn=Test%20File\
+            &tr=http%3A%2F%2Ft.com%2Fann\
+            &tr=http%3A%2F%2Ft2.com%2Fann\
+            &ws=http%3A%2F%2Fweb.example.com\
+            &xs=urn%3Asha1%3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
+            &as=http%3A%2F%2Falt.example.com\
+            &kt=test+keyword\
+            &mt=http%3A%2F%2Fm.example.com\
+            &xl=4096\
+            &x.pe=1.2.3.4%3A6881";
+        let magnet = MagnetUri::from_str(uri).unwrap();
+        let json = serde_json::to_string(&magnet).unwrap();
+        let back: MagnetUri = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, magnet);
+    }
+
+    #[test]
+    fn info_hash_roundtrip() {
+        let ih = InfoHash {
+            bytes: [0x42; 20],
+            raw: "4242424242424242424242424242424242424242".into(),
+        };
+        let json = serde_json::to_string(&ih).unwrap();
+        let back: InfoHash = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.bytes, ih.bytes);
+        assert_eq!(back.raw, ih.raw);
     }
 }

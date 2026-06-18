@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Info, Mode};
 
 use super::Storage;
@@ -139,27 +139,72 @@ impl FileStorage {
         }
     }
 
+    /// Read a block (partial piece) without reading the entire piece.
+    ///
+    /// Significantly reduces I/O for upload serving: reads only the
+    /// requested 16 KB block instead of the entire piece (up to 4 MB+).
+    pub(crate) async fn read_block(
+        &self, piece: u32, offset: u32, buf: &mut [u8],
+    ) -> Result<(), Error> {
+        tracing::trace!(
+            "reading block: piece {} offset {} ({} bytes)",
+            piece,
+            offset,
+            buf.len()
+        );
+        let global_offset = self.piece_offset(piece) + offset as u64;
+        self.read_range(global_offset, buf.len(), buf).await
+    }
+
     /// Read a byte range from the file(s).
+    ///
+    /// Uses `tokio::task::spawn_blocking` to keep POSIX `pread` syscalls
+    /// off the tokio worker threads. Data is first read into a heap-allocated
+    /// buffer inside the blocking pool, then copied into the caller's `buf`.
     async fn read_range(&self, offset: u64, len: usize, buf: &mut [u8]) -> Result<(), Error> {
         match &self.mode {
             StorageMode::SingleFile { path } => {
-                let f = fs::File::open(path).await?;
-                let sync_f = f.into_std().await;
-                std::os::unix::fs::FileExt::read_exact_at(&sync_f, buf, offset)?;
+                let path = path.clone();
+                let data = tokio::task::spawn_blocking(move || {
+                    let f = std::fs::File::open(&path)?;
+                    let mut local = vec![0u8; len];
+                    std::os::unix::fs::FileExt::read_exact_at(&f, &mut local, offset)?;
+                    Ok::<Vec<u8>, std::io::Error>(local)
+                })
+                .await
+                .map_err(|e| {
+                    Error::with_source(
+                        ErrorKind::Io,
+                        std::io::Error::other(format!("storage read task panicked: {}", e)),
+                    )
+                })??;
+                buf[..data.len()].copy_from_slice(&data);
                 Ok(())
             }
             StorageMode::MultiFile { files } => {
                 let ranges = map_byte_range(offset, len as u64, files);
                 let mut buf_offset = 0;
                 for (path, file_offset, read_len) in ranges {
-                    let f = fs::File::open(&path).await?;
-                    let sync_f = f.into_std().await;
                     let end = std::cmp::min(buf_offset + read_len as usize, buf.len());
-                    std::os::unix::fs::FileExt::read_exact_at(
-                        &sync_f,
-                        &mut buf[buf_offset..end],
-                        file_offset,
-                    )?;
+                    let actual_len = end - buf_offset;
+                    if actual_len == 0 {
+                        break;
+                    }
+                    let path = path.clone();
+                    let data = tokio::task::spawn_blocking(move || {
+                        let f = std::fs::File::open(&path)?;
+                        let mut local = vec![0u8; actual_len];
+                        std::os::unix::fs::FileExt::read_exact_at(&f, &mut local, file_offset)?;
+                        Ok::<Vec<u8>, std::io::Error>(local)
+                    })
+                    .await
+                    .map_err(|e| {
+                        Error::with_source(
+                            ErrorKind::Io,
+                            std::io::Error::other(format!("storage read task panicked: {}", e)),
+                        )
+                    })??;
+                    buf[buf_offset..end].copy_from_slice(&data);
                     buf_offset += read_len as usize;
                 }
                 Ok(())
@@ -168,26 +213,51 @@ impl FileStorage {
     }
 
     /// Write a byte range to the file(s).
+    ///
+    /// Uses `tokio::task::spawn_blocking` to keep POSIX `pwrite` syscalls
+    /// off the tokio worker threads. Data is first copied into a heap-allocated
+    /// buffer, then written inside the blocking pool.
     async fn write_range(&self, offset: u64, data: &[u8]) -> Result<(), Error> {
         match &self.mode {
             StorageMode::SingleFile { path } => {
-                let f = fs::OpenOptions::new().write(true).open(path).await?;
-                let sync_f = f.into_std().await;
-                std::os::unix::fs::FileExt::write_all_at(&sync_f, data, offset)?;
+                let path = path.clone();
+                let data = data.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    let f = std::fs::OpenOptions::new().write(true).open(&path)?;
+                    std::os::unix::fs::FileExt::write_all_at(&f, &data, offset)?;
+                    Ok::<(), std::io::Error>(())
+                })
+                .await
+                .map_err(|e| {
+                    Error::with_source(
+                        ErrorKind::Io,
+                        std::io::Error::other(format!("storage write task panicked: {}", e)),
+                    )
+                })??;
                 Ok(())
             }
             StorageMode::MultiFile { files } => {
                 let ranges = map_byte_range(offset, data.len() as u64, files);
                 let mut data_offset = 0;
                 for (path, file_offset, write_len) in ranges {
-                    let f = fs::OpenOptions::new().write(true).open(&path).await?;
-                    let sync_f = f.into_std().await;
                     let end = std::cmp::min(data_offset + write_len as usize, data.len());
-                    std::os::unix::fs::FileExt::write_all_at(
-                        &sync_f,
-                        &data[data_offset..end],
-                        file_offset,
-                    )?;
+                    if data_offset >= end {
+                        break;
+                    }
+                    let path = path.clone();
+                    let chunk = data[data_offset..end].to_vec();
+                    tokio::task::spawn_blocking(move || {
+                        let f = std::fs::OpenOptions::new().write(true).open(&path)?;
+                        std::os::unix::fs::FileExt::write_all_at(&f, &chunk, file_offset)?;
+                        Ok::<(), std::io::Error>(())
+                    })
+                    .await
+                    .map_err(|e| {
+                        Error::with_source(
+                            ErrorKind::Io,
+                            std::io::Error::other(format!("storage write task panicked: {}", e)),
+                        )
+                    })??;
                     data_offset += write_len as usize;
                 }
                 Ok(())
