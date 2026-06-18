@@ -6,15 +6,16 @@
 //!
 //! Async RPC and query helpers live in the `torrent` crate under `torrent::dht`.
 
-mod kbucket;
 pub mod krpc;
 
-use self::kbucket::KBucket;
+mod kbucket;
 
 use std::net::SocketAddr;
 
 use rand::RngExt;
 use sha1::{Digest, Sha1};
+
+use self::kbucket::KBucket;
 
 /// Number of buckets (160-bit address space).
 const NUM_BUCKETS: usize = 160;
