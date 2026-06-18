@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use rand::RngExt;
 
@@ -42,8 +41,8 @@ impl DownloadLoop {
             to_unchoke.insert(candidates[idx]);
         }
 
-        // Snubbing: remove peers idle for >60s (BEP 3)
-        let snub_timeout = Duration::from_secs(60);
+        // Snubbing: remove peers idle for >snub_timeout (BEP 3)
+        let snub_timeout = self.snub_timeout;
         to_unchoke.retain(|addr| {
             self.peers.get(addr).is_none_or(|p| {
                 // Snub peers that haven't sent data in >60s.

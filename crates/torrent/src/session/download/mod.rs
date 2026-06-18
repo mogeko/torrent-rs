@@ -40,6 +40,20 @@ pub(crate) struct DownloadLoop {
     pub(crate) listen_port: u16,
     /// Timeout for a single block request.
     pub(crate) request_timeout: Duration,
+    /// Maximum concurrent piece downloads.
+    pub(crate) max_concurrent_pieces: usize,
+    /// How many completed pieces to cache for upload serving.
+    pub(crate) piece_cache_size: usize,
+    /// EndGame threshold (switch when fewer pieces remain).
+    pub(crate) endgame_threshold: usize,
+    /// Choke/unchoke interval.
+    pub(crate) choke_interval: Duration,
+    /// Snub timeout for idle peers.
+    pub(crate) snub_timeout: Duration,
+    /// Corrupt block ban threshold.
+    pub(crate) corrupt_ban_threshold: u32,
+    /// Re-announce fallback interval on tracker error.
+    pub(crate) announce_fallback_interval: Duration,
     /// Tracker client for peer discovery.
     pub(crate) tracker: Option<Tracker>,
     /// Next announce time.
@@ -82,7 +96,7 @@ impl DownloadLoop {
         }
 
         let mut status_tick = tokio::time::interval(Duration::from_secs(1));
-        let mut choke_tick = tokio::time::interval(Duration::from_secs(10));
+        let mut choke_tick = tokio::time::interval(self.choke_interval);
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
 
         loop {

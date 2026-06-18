@@ -48,6 +48,12 @@ pub struct SessionConfig {
     /// `0` means unlimited. When the limit is reached,
     /// [`Session::add_torrent`](super::Session::add_torrent) returns an error.
     pub max_active_torrents: usize,
+    /// Maximum number of pieces to download concurrently.
+    pub max_concurrent_pieces: usize,
+    /// How many completed pieces to cache for upload serving (LRU eviction).
+    pub piece_cache_size: usize,
+    /// When fewer than this many pieces remain, switch to EndGame mode.
+    pub endgame_threshold: usize,
 
     // ── Timers & Retries ──
     /// Timeout for a single block request (BEP 3).
@@ -61,6 +67,20 @@ pub struct SessionConfig {
     pub peer_max_retries: u32,
     /// Cooldown before reconnecting a failed peer.
     pub peer_cooldown: Duration,
+    /// How often to run the choke/unchoke algorithm.
+    pub choke_interval: Duration,
+    /// Idle duration before a peer is snubbed (BEP 3).
+    pub snub_timeout: Duration,
+    /// How many corrupt blocks before banning a peer.
+    pub corrupt_ban_threshold: u32,
+    /// Re-announce interval after a tracker request fails.
+    pub announce_fallback_interval: Duration,
+    /// Timeout for HTTP and UDP tracker requests.
+    pub tracker_timeout: Duration,
+    /// How often the DHT background task polls for new peers.
+    pub dht_poll_interval: Duration,
+    /// Buffer size for the peer message channel (per torrent).
+    pub peer_msg_buffer_size: usize,
 
     // ── DHT ──
     /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
@@ -85,10 +105,20 @@ impl Default for SessionConfig {
             download_rate_limit: None,
             upload_rate_limit: None,
             max_active_torrents: 0,
+            max_concurrent_pieces: 5,
+            piece_cache_size: 256,
+            endgame_threshold: 10,
             request_timeout: Duration::from_secs(60),
             peer_connect_timeout: Duration::from_millis(500),
             peer_max_retries: 3,
             peer_cooldown: Duration::from_secs(30),
+            choke_interval: Duration::from_secs(10),
+            snub_timeout: Duration::from_secs(60),
+            corrupt_ban_threshold: 10,
+            announce_fallback_interval: Duration::from_secs(30),
+            tracker_timeout: Duration::from_secs(15),
+            dht_poll_interval: Duration::from_secs(30),
+            peer_msg_buffer_size: 256,
             bootstrap_nodes: Some(vec![
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
                 BootstrapNode::from(("dht.transmissionbt.com", 6881)),
@@ -157,11 +187,24 @@ mod serde_tests {
         assert_eq!(back.download_rate_limit, config.download_rate_limit);
         assert_eq!(back.upload_rate_limit, config.upload_rate_limit);
         assert_eq!(back.max_active_torrents, config.max_active_torrents);
+        assert_eq!(back.max_concurrent_pieces, config.max_concurrent_pieces);
+        assert_eq!(back.piece_cache_size, config.piece_cache_size);
+        assert_eq!(back.endgame_threshold, config.endgame_threshold);
         assert_eq!(back.request_timeout, config.request_timeout);
         assert_eq!(back.peer_connect_timeout, config.peer_connect_timeout);
         assert_eq!(back.peer_max_retries, config.peer_max_retries);
         assert_eq!(back.peer_cooldown, config.peer_cooldown);
+        assert_eq!(back.choke_interval, config.choke_interval);
+        assert_eq!(back.snub_timeout, config.snub_timeout);
+        assert_eq!(back.corrupt_ban_threshold, config.corrupt_ban_threshold);
+        assert_eq!(
+            back.announce_fallback_interval,
+            config.announce_fallback_interval
+        );
+        assert_eq!(back.tracker_timeout, config.tracker_timeout);
         assert_eq!(back.node_id, config.node_id);
+        assert_eq!(back.dht_poll_interval, config.dht_poll_interval);
+        assert_eq!(back.peer_msg_buffer_size, config.peer_msg_buffer_size);
     }
 
     #[test]
@@ -174,12 +217,22 @@ mod serde_tests {
             download_rate_limit: Some(1_048_576),
             upload_rate_limit: Some(524_288),
             max_active_torrents: 5,
+            max_concurrent_pieces: 10,
+            piece_cache_size: 128,
+            endgame_threshold: 5,
             request_timeout: Duration::from_secs(120),
             peer_connect_timeout: Duration::from_secs(2),
             peer_max_retries: 5,
             peer_cooldown: Duration::from_secs(60),
+            choke_interval: Duration::from_secs(20),
+            snub_timeout: Duration::from_secs(120),
+            corrupt_ban_threshold: 5,
+            announce_fallback_interval: Duration::from_secs(60),
+            tracker_timeout: Duration::from_secs(30),
             bootstrap_nodes: None,
             node_id: Some([0xAB; 20]),
+            dht_poll_interval: Duration::from_secs(60),
+            peer_msg_buffer_size: 512,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -192,12 +245,22 @@ mod serde_tests {
         assert_eq!(back.download_rate_limit, Some(1_048_576));
         assert_eq!(back.upload_rate_limit, Some(524_288));
         assert_eq!(back.max_active_torrents, 5);
+        assert_eq!(back.max_concurrent_pieces, 10);
+        assert_eq!(back.piece_cache_size, 128);
+        assert_eq!(back.endgame_threshold, 5);
         assert_eq!(back.request_timeout, Duration::from_secs(120));
         assert_eq!(back.peer_connect_timeout, Duration::from_secs(2));
         assert_eq!(back.peer_max_retries, 5);
         assert_eq!(back.peer_cooldown, Duration::from_secs(60));
+        assert_eq!(back.choke_interval, Duration::from_secs(20));
+        assert_eq!(back.snub_timeout, Duration::from_secs(120));
+        assert_eq!(back.corrupt_ban_threshold, 5);
+        assert_eq!(back.announce_fallback_interval, Duration::from_secs(60));
+        assert_eq!(back.tracker_timeout, Duration::from_secs(30));
         assert!(back.bootstrap_nodes.is_none());
         assert_eq!(back.node_id, Some([0xAB; 20]));
+        assert_eq!(back.dht_poll_interval, Duration::from_secs(60));
+        assert_eq!(back.peer_msg_buffer_size, 512);
     }
 
     #[test]

@@ -3,17 +3,8 @@ use std::time::Instant;
 
 use crate::peer::PeerMessage;
 
-/// Maximum number of pieces to download concurrently.
-pub(super) const MAX_CONCURRENT_DOWNLOADS: usize = 5;
-
 /// How many blocks to keep in-flight per peer (BEP 3 pipelining).
 pub(super) const PIPELINE_SIZE: usize = 5;
-
-/// How many pieces to cache for upload serving (LRU eviction).
-pub(super) const PIECE_CACHE_SIZE: usize = 256;
-
-/// When fewer than this many pieces remain, switch to EndGame mode.
-pub(super) const ENDGAME_THRESHOLD: usize = 10;
 
 /// Default block size (BEP 3: 2^14 = 16 KB).
 pub(super) const BLOCK_SIZE: u32 = 16 * 1024;

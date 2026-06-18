@@ -23,7 +23,6 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::str::FromStr as _;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::RwLock;
 
@@ -97,11 +96,12 @@ impl Session {
                 let node_id = config.node_id.unwrap_or_else(generate_node_id);
                 let node = DhtNode::new(node_id, bind_addr, &bootstrap_refs).await?;
 
-                // Spawn background feeder: poll each torrent's info_hash every 30s
+                // Spawn background feeder: poll each torrent's info_hash on config interval
                 let (dht, t) = (node.clone(), torrents.clone());
+                let poll_interval = config.dht_poll_interval;
                 tokio::spawn(async move {
                     loop {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        tokio::time::sleep(poll_interval).await;
                         let info_hashes: Vec<InfoHash> = t.read().await.keys().copied().collect();
                         for ih in info_hashes {
                             let peers = dht.get_peers(&ih).await;

@@ -71,7 +71,7 @@ impl DownloadLoop {
                 Ok(())
             }
             Err(e) => {
-                self.next_announce = Some(Instant::now() + Duration::from_secs(30));
+                self.next_announce = Some(Instant::now() + self.announce_fallback_interval);
                 tracing::warn!("tracker announce failed: {}", e);
                 Err(e)
             }

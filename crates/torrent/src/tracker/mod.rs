@@ -46,11 +46,15 @@ pub use self::udp::UdpTracker;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::task::JoinSet;
 
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::Metainfo;
+
+/// Default per-request timeout for tracker announces (15 s).
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Unified tracker client that auto-detects HTTP vs UDP from the URL scheme.
 ///
@@ -73,6 +77,8 @@ use crate::metainfo::Metainfo;
 #[derive(Debug, Clone)]
 pub struct Tracker {
     trackers: Vec<Inner>,
+    /// Default timeout for dynamically-added trackers via [`add`](Self::add).
+    default_timeout: Duration,
 }
 
 impl Tracker {
@@ -87,9 +93,10 @@ impl Tracker {
     ///
     /// Returns `None` if the URL is invalid or uses an unsupported scheme.
     pub fn single(url: impl IntoUrl) -> Option<Self> {
-        let inner = Inner::from_url(url.into_url().ok()?).ok()?;
+        let inner = Inner::from_url(url.into_url().ok()?, DEFAULT_TIMEOUT).ok()?;
         Some(Tracker {
             trackers: vec![inner],
+            default_timeout: DEFAULT_TIMEOUT,
         })
     }
 
@@ -108,9 +115,8 @@ impl Tracker {
 
         for url in urls {
             if let Ok(url) = url.into_url() {
-                // Keep first occurrence; skip duplicates
                 if seen.insert(url.as_str().into())
-                    && let Ok(inner) = Inner::from_url(url)
+                    && let Ok(inner) = Inner::from_url(url, DEFAULT_TIMEOUT)
                 {
                     trackers.push(inner);
                 }
@@ -120,7 +126,10 @@ impl Tracker {
         if trackers.is_empty() {
             None
         } else {
-            Some(Tracker { trackers })
+            Some(Tracker {
+                trackers,
+                default_timeout: DEFAULT_TIMEOUT,
+            })
         }
     }
 
@@ -134,6 +143,31 @@ impl Tracker {
     /// Returns `None` if no valid tracker URLs were found.
     pub fn from_metainfo(meta: &Metainfo) -> Option<Self> {
         Self::multi(std::iter::once(&meta.announce).chain(meta.announce_list.iter().flatten()))
+    }
+
+    /// Create a `Tracker` from a parsed [`Metainfo`] with a custom timeout.
+    pub fn from_metainfo_with_timeout(meta: &Metainfo, timeout: Duration) -> Option<Self> {
+        let urls = std::iter::once(&meta.announce).chain(meta.announce_list.iter().flatten());
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut trackers: Vec<Inner> = Vec::new();
+
+        for url_str in urls {
+            if seen.insert(url_str.into())
+                && let Ok(url) = Url::parse(url_str)
+                && let Ok(inner) = Inner::from_url(url, timeout)
+            {
+                trackers.push(inner);
+            }
+        }
+
+        if trackers.is_empty() {
+            None
+        } else {
+            Some(Tracker {
+                trackers,
+                default_timeout: timeout,
+            })
+        }
     }
 
     /// Returns the number of trackers.
@@ -156,7 +190,8 @@ impl Tracker {
         if self.trackers.iter().any(|t| t.url() == url.as_str()) {
             return Ok(());
         }
-        self.trackers.push(Inner::from_url(url)?);
+        self.trackers
+            .push(Inner::from_url(url, self.default_timeout)?);
         Ok(())
     }
 
@@ -175,7 +210,7 @@ impl Tracker {
         for url in urls {
             let url = url.into_url()?;
             if seen.insert(url.as_str().into()) {
-                new_trackers.push(Inner::from_url(url)?);
+                new_trackers.push(Inner::from_url(url, self.default_timeout)?);
             }
         }
 
@@ -275,10 +310,10 @@ impl Inner {
         }
     }
 
-    fn from_url(url: Url) -> Result<Self, Error> {
+    fn from_url(url: Url, timeout: Duration) -> Result<Self, Error> {
         match url.scheme() {
-            "http" | "https" => Ok(Inner::Http(HttpTracker::new(url)?)),
-            "udp" => Ok(Inner::Udp(UdpTracker::new(url)?)),
+            "http" | "https" => Ok(Inner::Http(HttpTracker::with_timeout(url, timeout)?)),
+            "udp" => Ok(Inner::Udp(UdpTracker::with_timeout(url, timeout)?)),
             _ => Err(Error::new(ErrorKind::InvalidInput)),
         }
     }

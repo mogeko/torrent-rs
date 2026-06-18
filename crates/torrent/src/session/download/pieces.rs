@@ -10,9 +10,7 @@ use crate::peer::PeerMessage;
 use crate::piece::EndGame;
 
 use super::DownloadLoop;
-use super::types::{
-    ActiveDownload, BLOCK_SIZE, ENDGAME_THRESHOLD, MAX_CONCURRENT_DOWNLOADS, PIECE_CACHE_SIZE,
-};
+use super::types::{ActiveDownload, BLOCK_SIZE};
 
 impl DownloadLoop {
     /// Fill request pipelines for all peers that can accept more requests.
@@ -39,7 +37,7 @@ impl DownloadLoop {
         };
 
         let missing_count = our_bf.iter().filter(|&&b| !b).count();
-        let in_endgame = missing_count > 0 && missing_count < ENDGAME_THRESHOLD;
+        let in_endgame = missing_count > 0 && missing_count < self.endgame_threshold;
         if in_endgame {
             self.selector = Box::new(EndGame);
         }
@@ -55,7 +53,7 @@ impl DownloadLoop {
 
             let (index, begin) = if let Some(blk) = block_opt {
                 blk
-            } else if self.active_downloads.len() < MAX_CONCURRENT_DOWNLOADS {
+            } else if self.active_downloads.len() < self.max_concurrent_pieces {
                 // If the peer hasn't sent its bitfield yet we cannot
                 // tell which pieces it has — skip for now.
                 let peer_has_bitfield = self
@@ -219,7 +217,7 @@ impl DownloadLoop {
                 let mut pm = self.piece_mgr.write().await;
                 pm.set_piece(index);
             }
-            if self.piece_cache.len() >= PIECE_CACHE_SIZE {
+            if self.piece_cache.len() >= self.piece_cache_size {
                 // LRU eviction: remove oldest (first inserted)
                 self.piece_cache.remove(0);
             }
@@ -249,7 +247,7 @@ impl DownloadLoop {
             // Ban peers with repeated corrupt data.
             let mut ban: Vec<SocketAddr> = Vec::new();
             for (addr, peer) in &self.peers {
-                if peer.corrupt_blocks >= 10 {
+                if peer.corrupt_blocks >= self.corrupt_ban_threshold {
                     ban.push(*addr);
                 }
             }

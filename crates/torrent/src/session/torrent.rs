@@ -52,7 +52,7 @@ impl TorrentHandle {
 
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
         let peer_id = PeerId::random();
-        let tracker = Tracker::from_metainfo(&metainfo);
+        let tracker = Tracker::from_metainfo_with_timeout(&metainfo, config.tracker_timeout);
         let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
         let peer_mgr = Arc::new(RwLock::new(PeerManager::new(
             info_hash,
@@ -74,7 +74,8 @@ impl TorrentHandle {
             state: TorrentState::Queued,
         }));
 
-        let (peer_msg_tx, peer_msg_rx) = mpsc::channel::<(SocketAddr, PeerEvent)>(256);
+        let (peer_msg_tx, peer_msg_rx) =
+            mpsc::channel::<(SocketAddr, PeerEvent)>(config.peer_msg_buffer_size);
         let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
 
         let mut download_loop = DownloadLoop {
@@ -88,6 +89,13 @@ impl TorrentHandle {
             peer_id,
             listen_port: config.listen_port,
             request_timeout: config.request_timeout,
+            max_concurrent_pieces: config.max_concurrent_pieces,
+            piece_cache_size: config.piece_cache_size,
+            endgame_threshold: config.endgame_threshold,
+            choke_interval: config.choke_interval,
+            snub_timeout: config.snub_timeout,
+            corrupt_ban_threshold: config.corrupt_ban_threshold,
+            announce_fallback_interval: config.announce_fallback_interval,
             tracker,
             next_announce: None,
             has_announced: false,

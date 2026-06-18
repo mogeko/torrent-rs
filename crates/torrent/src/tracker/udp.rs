@@ -8,11 +8,11 @@ use crate::error::{Error, ErrorKind};
 
 use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
+/// Per-request timeout (connect + announce).
+use super::DEFAULT_TIMEOUT;
+
 /// Magic connection ID constant used during the connection phase.
 const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
-
-/// Per-request timeout (connect + announce).
-const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Max retries for connect and announce phases (BEP 15: up to 4 retries).
 const MAX_RETRIES: u32 = 4;
@@ -28,14 +28,21 @@ pub struct UdpTracker {
     connection_id: Arc<Mutex<Option<u64>>>,
     /// Cached resolved address to avoid repeated DNS lookups.
     cached_addr: Arc<Mutex<Option<SocketAddr>>>,
+    /// Per-request timeout.
+    timeout: Duration,
 }
 
 impl UdpTracker {
-    /// Create a new UDP tracker client for a given tracker URL.
+    /// Create a new UDP tracker client with the default 15 s timeout.
     ///
     /// `url` must be a `udp://` URL (e.g. `udp://tracker.example.com:6969`).
     /// Accepts `&str`, `String`, `&String`, or `Url`.
     pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
+        Self::with_timeout(url, DEFAULT_TIMEOUT)
+    }
+
+    /// Create a new UDP tracker client with a custom timeout.
+    pub fn with_timeout(url: impl IntoUrl, timeout: Duration) -> Result<Self, Error> {
         let url = url.into_url()?;
 
         if url.scheme() != "udp" {
@@ -46,6 +53,7 @@ impl UdpTracker {
             url,
             connection_id: Arc::new(Mutex::new(None)),
             cached_addr: Arc::new(Mutex::new(None)),
+            timeout,
         })
     }
 
@@ -119,7 +127,7 @@ impl UdpTracker {
             let connection_id = if let Some(cached) = *self.connection_id.lock().unwrap() {
                 cached
             } else {
-                match connect(&socket, addr).await {
+                match connect(&socket, addr, self.timeout).await {
                     Ok(id) => {
                         *self.connection_id.lock().unwrap() = Some(id);
                         id
@@ -142,7 +150,7 @@ impl UdpTracker {
                 }
 
                 let mut buf = vec![0u8; RECV_BUF_SIZE];
-                match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
+                match tokio::time::timeout(self.timeout, socket.recv_from(&mut buf)).await {
                     Ok(Ok((len, src))) => {
                         if src != addr {
                             continue;
@@ -167,7 +175,7 @@ impl UdpTracker {
 }
 
 /// Connect phase: obtain a connection ID from the tracker.
-async fn connect(socket: &UdpSocket, addr: SocketAddr) -> Result<u64, Error> {
+async fn connect(socket: &UdpSocket, addr: SocketAddr, timeout: Duration) -> Result<u64, Error> {
     let transaction_id = rand::random::<u32>();
 
     let connect_packet = build_connect_packet(transaction_id);
@@ -179,7 +187,7 @@ async fn connect(socket: &UdpSocket, addr: SocketAddr) -> Result<u64, Error> {
             .map_err(Error::tracker_failed)?;
 
         let mut buf = vec![0u8; 16];
-        match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
+        match tokio::time::timeout(timeout, socket.recv_from(&mut buf)).await {
             Ok(Ok((len, src))) => {
                 if src != addr {
                     continue;
