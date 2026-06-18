@@ -92,9 +92,8 @@ Defined in [`crates/torrent-core/src/peer/message.rs`](../../../crates/torrent-c
 
 Extension bits are numbered per BEP conventions: bit 0 = MSB of byte 0. Common extensions:
 
-- Bit 43 (byte 5, `0x10`): DHT (BEP 5)
 - Bit 44 (byte 5, `0x08`): Fast Extension (BEP 6)
-- Bit 63 (byte 7, `0x01`): Extension Protocol / LTEP (BEP 10)
+- Bit 63 (byte 7, `0x01`): DHT (BEP 5) / Extension Protocol / LTEP (BEP 10)
 
 Defined in [`crates/torrent-core/src/peer/handshake.rs`](../../../crates/torrent-core/src/peer/handshake.rs).
 
