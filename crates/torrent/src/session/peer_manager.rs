@@ -10,12 +10,6 @@ use crate::peer::{PeerConnection, PeerId, PeerMessage};
 
 use super::uni_deque::UniDeque;
 
-/// Maximum retry attempts per peer before discarding.
-const MAX_RETRIES: u32 = 3;
-
-/// Cooldown period before a failed peer can be retried.
-const PEER_COOLDOWN: Duration = Duration::from_secs(30);
-
 /// Per-peer backoff state tracking connection retries.
 #[derive(Debug)]
 struct BackoffState {
@@ -24,16 +18,16 @@ struct BackoffState {
 }
 
 impl BackoffState {
-    fn new() -> Self {
+    fn new(cooldown: Duration) -> Self {
         BackoffState {
             attempts: 0,
-            cooldown_until: Instant::now() + PEER_COOLDOWN,
+            cooldown_until: Instant::now() + cooldown,
         }
     }
 
-    fn increment(&mut self) {
+    fn increment(&mut self, cooldown: Duration) {
         self.attempts += 1;
-        self.cooldown_until = Instant::now() + PEER_COOLDOWN;
+        self.cooldown_until = Instant::now() + cooldown;
     }
 }
 
@@ -51,11 +45,20 @@ pub(crate) struct PeerManager {
     max_connections: u32,
     /// Per-peer backoff state (retry count + cooldown timer).
     backoff: HashMap<SocketAddr, BackoffState>,
+    /// Per-peer TCP connect timeout.
+    connect_timeout: Duration,
+    /// Maximum connection retries before discarding.
+    max_retries: u32,
+    /// Cooldown before reconnecting a failed peer.
+    cooldown: Duration,
 }
 
 impl PeerManager {
     /// Create a new PeerManager.
-    pub fn new(info_hash: [u8; 20], peer_id: PeerId, max_connections: u32) -> Self {
+    pub fn new(
+        info_hash: [u8; 20], peer_id: PeerId, max_connections: u32, connect_timeout: Duration,
+        max_retries: u32, cooldown: Duration,
+    ) -> Self {
         PeerManager {
             peer_id,
             info_hash,
@@ -63,6 +66,9 @@ impl PeerManager {
             pending: UniDeque::new(),
             max_connections,
             backoff: HashMap::new(),
+            connect_timeout,
+            max_retries,
+            cooldown,
         }
     }
 
@@ -152,13 +158,12 @@ impl PeerManager {
             });
         }
 
-        let per_call_timeout = Duration::from_millis(500);
+        let per_call_timeout = self.connect_timeout;
         let mut connected = Vec::new();
         let mut processed: HashSet<SocketAddr> = HashSet::new();
 
         loop {
-            let remaining = tokio::time::timeout(per_call_timeout, joinset.join_next()).await;
-            match remaining {
+            match tokio::time::timeout(per_call_timeout, joinset.join_next()).await {
                 Ok(Some(Ok((addr, Ok(conn))))) => {
                     processed.insert(addr);
                     tracing::info!("peer connected: {}", addr);
@@ -168,15 +173,18 @@ impl PeerManager {
                 }
                 Ok(Some(Ok((addr, Err(_))))) => {
                     processed.insert(addr);
-                    let state = self.backoff.entry(addr).or_insert_with(BackoffState::new);
-                    if state.attempts < MAX_RETRIES {
-                        state.increment();
+                    let state = self
+                        .backoff
+                        .entry(addr)
+                        .or_insert_with(|| BackoffState::new(self.cooldown));
+                    if state.attempts < self.max_retries {
+                        state.increment(self.cooldown);
                         tracing::debug!(
                             "re-enqueuing peer {} (attempt {}/{}, cooldown {}s)",
                             addr,
                             state.attempts,
-                            MAX_RETRIES,
-                            PEER_COOLDOWN.as_secs()
+                            self.max_retries,
+                            self.cooldown.as_secs()
                         );
                         let re_enqueued = self.pending.push_unique(addr);
                         debug_assert!(
@@ -223,6 +231,17 @@ impl PeerManager {
 mod tests {
     use super::*;
 
+    fn test_pm(max_connections: u32) -> PeerManager {
+        PeerManager::new(
+            [0u8; 20],
+            PeerId::random(),
+            max_connections,
+            Duration::from_millis(500),
+            3,
+            Duration::from_secs(30),
+        )
+    }
+
     fn test_addr(n: u8) -> SocketAddr {
         SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, n)),
@@ -232,14 +251,14 @@ mod tests {
 
     #[test]
     fn new_creates_empty() {
-        let pm = PeerManager::new([0u8; 20], PeerId::random(), 10);
+        let pm = test_pm(10);
         assert_eq!(pm.num_connections(), 0);
         assert!(pm.connection_addrs().is_empty());
     }
 
     #[test]
     fn add_peers_to_pending() {
-        let mut pm = PeerManager::new([0u8; 20], PeerId::random(), 10);
+        let mut pm = test_pm(10);
         pm.add_peers(vec![test_addr(1), test_addr(2)]);
         // connect_next() will attempt to connect; at this point they're pending
         // We can verify by checking that connection_addrs is still empty
@@ -259,6 +278,9 @@ mod tests {
             },
             max_connections: 0,
             backoff: HashMap::new(),
+            connect_timeout: Duration::from_millis(500),
+            max_retries: 3,
+            cooldown: Duration::from_secs(30),
         };
         // Precondition: capacity 0 means no connections will be attempted
         assert_eq!(pm.max_connections, 0);
@@ -266,14 +288,14 @@ mod tests {
 
     #[test]
     fn remove_peer_nonexistent() {
-        let mut pm = PeerManager::new([0u8; 20], PeerId::random(), 10);
+        let mut pm = test_pm(10);
         pm.remove_peer(&test_addr(99)); // should not panic
         assert_eq!(pm.num_connections(), 0);
     }
 
     #[test]
     fn connection_addrs_empty() {
-        let pm = PeerManager::new([0u8; 20], PeerId::random(), 10);
+        let pm = test_pm(10);
         assert!(pm.connection_addrs().is_empty());
     }
 }

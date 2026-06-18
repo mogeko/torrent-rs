@@ -38,6 +38,8 @@ pub(crate) struct DownloadLoop {
     pub(crate) peer_id: PeerId,
     /// TCP listen port.
     pub(crate) listen_port: u16,
+    /// Timeout for a single block request.
+    pub(crate) request_timeout: Duration,
     /// Tracker client for peer discovery.
     pub(crate) tracker: Option<Tracker>,
     /// Next announce time.

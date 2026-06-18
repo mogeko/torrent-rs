@@ -12,7 +12,6 @@ use crate::piece::EndGame;
 use super::DownloadLoop;
 use super::types::{
     ActiveDownload, BLOCK_SIZE, ENDGAME_THRESHOLD, MAX_CONCURRENT_DOWNLOADS, PIECE_CACHE_SIZE,
-    REQUEST_TIMEOUT,
 };
 
 impl DownloadLoop {
@@ -150,9 +149,10 @@ impl DownloadLoop {
         None
     }
 
-    /// Expire stale block requests (timeout > REQUEST_TIMEOUT).
+    /// Expire stale block requests (timeout > request_timeout).
     pub(super) async fn expire_stale_requests(&mut self) {
         let now = Instant::now();
+        let timeout = self.request_timeout;
         let mut dead_peers = Vec::new();
 
         for (addr, peer) in &mut self.peers {
@@ -163,7 +163,7 @@ impl DownloadLoop {
             let mut all_expired = true;
             for slot in &mut peer.pipeline {
                 if let Some((index, begin, sent_at)) = *slot {
-                    if now.duration_since(sent_at) > REQUEST_TIMEOUT {
+                    if now.duration_since(sent_at) > timeout {
                         if let Some(dl) = self.active_downloads.get_mut(&index) {
                             let block_idx = (begin / dl.block_size) as usize;
                             if block_idx < dl.requested.len() {

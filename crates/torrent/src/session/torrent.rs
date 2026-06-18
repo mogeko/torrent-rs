@@ -58,6 +58,9 @@ impl TorrentHandle {
             info_hash,
             peer_id,
             config.max_connections,
+            config.peer_connect_timeout,
+            config.peer_max_retries,
+            config.peer_cooldown,
         )));
 
         let status = Arc::new(RwLock::new(TorrentStatus {
@@ -84,6 +87,7 @@ impl TorrentHandle {
             control_rx,
             peer_id,
             listen_port: config.listen_port,
+            request_timeout: config.request_timeout,
             tracker,
             next_announce: None,
             has_announced: false,

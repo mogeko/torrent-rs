@@ -47,6 +47,7 @@ pub struct Node {
 /// assert_eq!(node.port, 6881);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct BootstrapNode {
     /// Hostname of the bootstrap node.
@@ -325,5 +326,43 @@ mod tests {
     fn bucket_index_same_id() {
         let id = [0x42u8; 20];
         assert_eq!(bucket_index(&id, &id), 0);
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_node_roundtrip() {
+        let node = BootstrapNode::from(("router.bittorrent.com", 6881));
+        let json = serde_json::to_string(&node).unwrap();
+        let back: BootstrapNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.host, "router.bittorrent.com");
+        assert_eq!(back.port, 6881);
+    }
+
+    #[test]
+    fn bootstrap_node_empty_host() {
+        let node = BootstrapNode {
+            host: String::new(),
+            port: 0,
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        let back: BootstrapNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.host, "");
+        assert_eq!(back.port, 0);
+    }
+
+    #[test]
+    fn bootstrap_node_high_port() {
+        let node = BootstrapNode {
+            host: "example.com".into(),
+            port: 65535,
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        let back: BootstrapNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.host, "example.com");
+        assert_eq!(back.port, 65535);
     }
 }

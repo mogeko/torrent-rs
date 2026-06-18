@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::peer::PeerMessage;
 
@@ -14,9 +14,6 @@ pub(super) const PIECE_CACHE_SIZE: usize = 256;
 
 /// When fewer than this many pieces remain, switch to EndGame mode.
 pub(super) const ENDGAME_THRESHOLD: usize = 10;
-
-/// Timeout for an individual block request.
-pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Default block size (BEP 3: 2^14 = 16 KB).
 pub(super) const BLOCK_SIZE: u32 = 16 * 1024;
