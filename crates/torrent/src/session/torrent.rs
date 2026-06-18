@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::sync::{RwLock, mpsc};
@@ -10,7 +11,7 @@ use crate::piece::{PieceManager, RarestFirst};
 use crate::storage::FileStorage;
 use crate::tracker::Tracker;
 
-use super::download::DownloadLoop;
+use super::download::{DownloadLoop, PeerEvent};
 use super::peer_manager::PeerManager;
 use super::upload::UploadManager;
 use super::{SessionConfig, TorrentState, TorrentStatus};
@@ -70,8 +71,8 @@ impl TorrentHandle {
             state: TorrentState::Queued,
         }));
 
+        let (peer_msg_tx, peer_msg_rx) = mpsc::channel::<(SocketAddr, PeerEvent)>(256);
         let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
-        let (peer_msg_tx, peer_msg_rx) = mpsc::unbounded_channel();
 
         let mut download_loop = DownloadLoop {
             info_hash,
@@ -97,7 +98,6 @@ impl TorrentHandle {
             total_uploaded: 0,
             last_downloaded: 0,
             last_uploaded: 0,
-            tick_count: 0,
             piece_cache: HashMap::new(),
         };
 

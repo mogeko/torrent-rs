@@ -22,12 +22,20 @@ use super::{TorrentState, TorrentStatus};
 /// Maximum number of pieces to download concurrently.
 const MAX_CONCURRENT_DOWNLOADS: usize = 5;
 
+/// How many blocks to keep in-flight per peer (BEP 3 pipelining).
+const PIPELINE_SIZE: usize = 5;
+
 /// How many pieces to cache for upload serving (LRU eviction).
 const PIECE_CACHE_SIZE: usize = 256;
 
-/// When fewer than this many pieces remain, switch to EndGame mode
-/// (send duplicate requests to multiple peers simultaneously).
+/// When fewer than this many pieces remain, switch to EndGame mode.
 const ENDGAME_THRESHOLD: usize = 10;
+
+/// Timeout for an individual block request.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default block size (BEP 3: 2^14 = 16 KB).
+const BLOCK_SIZE: u32 = 16 * 1024;
 
 /// Event from a peer reader task.
 pub(crate) enum PeerEvent {
@@ -41,6 +49,9 @@ pub(crate) enum PeerEvent {
 pub(crate) struct PeerInfo {
     /// Which pieces this peer has (from bitfield + have messages).
     bitfield: Vec<bool>,
+    /// Outstanding block requests sent to this peer.
+    /// Fixed-size stack-allocated array: `None` slot = free, `Some` = in-flight.
+    pipeline: [Option<(u32, u32, Instant)>; PIPELINE_SIZE],
     /// We are choked by this peer.
     am_choked: bool,
     /// We've sent Interested to this peer.
@@ -58,11 +69,36 @@ impl PeerInfo {
     fn new() -> Self {
         PeerInfo {
             bitfield: Vec::new(),
+            pipeline: [None; PIPELINE_SIZE],
             am_choked: true,
             am_interested: false,
             peer_interested: false,
             uploaded_bytes: 0,
             downloaded_bytes: 0,
+        }
+    }
+
+    /// Whether this peer can accept a new request.
+    fn can_request(&self) -> bool {
+        !self.am_choked && self.pipeline.iter().any(Option::is_none)
+    }
+
+    /// Record a new outstanding request.
+    fn push_request(&mut self, index: u32, begin: u32) {
+        if let Some(slot) = self.pipeline.iter_mut().find(|s| s.is_none()) {
+            *slot = Some((index, begin, Instant::now()));
+        }
+    }
+
+    /// Remove a specific request (piece arrived or cancelled).
+    fn remove_request(&mut self, index: u32, begin: u32) {
+        for slot in &mut self.pipeline {
+            if let Some((i, b, _)) = *slot {
+                if i == index && b == begin {
+                    *slot = None;
+                    return;
+                }
+            }
         }
     }
 }
@@ -74,6 +110,8 @@ pub(crate) struct ActiveDownload {
     index: u32,
     /// Full piece data buffer (allocated upfront, piece_length bytes).
     data: Vec<u8>,
+    /// Which peer is currently assigned to each block. `None` = unrequested.
+    requested: Vec<Option<SocketAddr>>,
     /// Which blocks have been received (one bool per block).
     received: Vec<bool>,
     /// Block size in bytes (default 16 KB).
@@ -81,8 +119,61 @@ pub(crate) struct ActiveDownload {
     /// Number of blocks per piece.
     #[allow(dead_code)]
     num_blocks: usize,
-    /// Peers we've sent requests to for this piece.
-    requested_from: HashSet<SocketAddr>,
+}
+
+impl ActiveDownload {
+    fn new(index: u32, piece_len: u64, block_size: u32) -> Self {
+        let num_blocks = piece_len.div_ceil(block_size as u64) as usize;
+        ActiveDownload {
+            index,
+            data: vec![0u8; piece_len as usize],
+            received: vec![false; num_blocks],
+            requested: vec![None; num_blocks],
+            block_size,
+            num_blocks,
+        }
+    }
+
+    /// Find the first unrequested block.
+    fn next_unrequested(&self) -> Option<u32> {
+        self.requested
+            .iter()
+            .position(Option::is_none)
+            .map(|i| i as u32 * self.block_size)
+    }
+
+    /// Length of the block at `begin` offset.
+    fn block_len(&self, begin: u32) -> u32 {
+        let piece_len = self.data.len() as u64;
+        let remaining = piece_len.saturating_sub(begin as u64);
+        remaining.min(self.block_size as u64) as u32
+    }
+
+    /// Mark a block as requested by a peer.
+    ///
+    /// In normal mode this is called with blocks that were confirmed
+    /// unrequested. In EndGame mode it may overwrite a previous assignment
+    /// (duplicate requests to multiple peers).
+    fn mark_requested(&mut self, begin: u32, addr: SocketAddr) {
+        let block_idx = (begin / self.block_size) as usize;
+        if block_idx < self.requested.len() {
+            self.requested[block_idx] = Some(addr);
+        }
+    }
+
+    /// Mark a block as received. Returns `true` if this completes the piece.
+    fn mark_received(&mut self, begin: u32, data: &[u8]) -> bool {
+        let block_idx = (begin / self.block_size) as usize;
+        if block_idx < self.received.len() && !self.received[block_idx] {
+            let start = begin as usize;
+            let end = start + data.len();
+            if end <= self.data.len() {
+                self.data[start..end].copy_from_slice(data);
+            }
+            self.received[block_idx] = true;
+        }
+        self.received.iter().all(|&r| r)
+    }
 }
 
 /// The core download engine for a single torrent.
@@ -113,9 +204,9 @@ pub(crate) struct DownloadLoop {
     /// Piece selection strategy (default: rarest-first).
     pub(crate) selector: Box<dyn PieceSelector>,
     /// Receive peer messages from reader tasks.
-    pub(crate) peer_msg_rx: mpsc::UnboundedReceiver<(SocketAddr, PeerEvent)>,
+    pub(crate) peer_msg_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
     /// Clone for spawning new reader tasks.
-    pub(crate) peer_msg_tx: mpsc::UnboundedSender<(SocketAddr, PeerEvent)>,
+    pub(crate) peer_msg_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     /// Upload slot manager.
     pub(crate) upload_mgr: Arc<RwLock<UploadManager>>,
     /// Total bytes downloaded.
@@ -126,21 +217,21 @@ pub(crate) struct DownloadLoop {
     pub(crate) last_downloaded: u64,
     /// Previous uploaded count for rate calc.
     pub(crate) last_uploaded: u64,
-    /// Tick counter for periodic tasks.
-    pub(crate) tick_count: usize,
     /// Cached completed pieces for upload serving (avoid repeated disk reads).
     pub(crate) piece_cache: HashMap<u32, Arc<Vec<u8>>>,
 }
 
 impl DownloadLoop {
-    /// Run the main download loop.
+    /// Run the main download loop — event-driven with periodic maintenance.
     pub async fn run(&mut self) {
         {
             let mut status = self.status.write().await;
             status.state = TorrentState::Downloading;
         }
 
-        let tick_interval = Duration::from_secs(1);
+        let mut status_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut choke_tick = tokio::time::interval(Duration::from_secs(10));
+        let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
 
         loop {
             tokio::select! {
@@ -155,7 +246,6 @@ impl DownloadLoop {
                             status.state = TorrentState::Downloading;
                         }
                         Some(TorrentCommand::Cancel) | None => {
-                            // Best-effort: send Stopped event to tracker
                             let _ = self.announce_to_tracker(AnnounceEvent::Stopped).await;
                             break;
                         }
@@ -163,31 +253,86 @@ impl DownloadLoop {
                 }
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
                     self.handle_peer_event(addr, event).await;
-                }
-                _ = tokio::time::sleep(tick_interval) => {
-                    if let Err(e) = self.tick().await {
-                        tracing::warn!("download tick failed: {}", e);
-                        let mut status = self.status.write().await;
-                        status.state = TorrentState::Error;
+                    if let Err(e) = self.fill_pipelines().await {
+                        tracing::warn!("fill_pipelines failed: {}", e);
                     }
+                }
+                _ = status_tick.tick() => {
+                    self.update_status().await;
+                    self.announce_if_needed().await;
+                    if let Err(e) = self.connect_pending().await {
+                        tracing::warn!("connect_pending failed: {}", e);
+                    }
+                }
+                _ = choke_tick.tick() => {
+                    if let Err(e) = self.run_choke_unchoke().await {
+                        tracing::warn!("choke_unchoke failed: {}", e);
+                    }
+                }
+                _ = stale_tick.tick() => {
+                    self.expire_stale_requests().await;
                 }
             }
         }
     }
 
-    /// Process one tick: announce to tracker, connect peers, request pieces, update status.
-    async fn tick(&mut self) -> Result<(), Error> {
-        tracing::debug!("download tick");
-        // 0. Announce to tracker if needed
-        self.announce_if_needed().await;
+    // ── Periodic tasks ────────────────────────────────────────────
 
-        // 1. Connect to pending peers
+    /// Update TorrentStatus with rate, progress, peers, seeding state.
+    async fn update_status(&mut self) {
+        let (progress, num_peers, download_rate, upload_rate) = {
+            let pm = self.piece_mgr.read().await;
+            let progress = pm.progress();
+            let num_peers = self.peer_mgr.read().await.num_connections();
+            let download_rate = (self.total_downloaded - self.last_downloaded) as f64;
+            let upload_rate = (self.total_uploaded - self.last_uploaded) as f64;
+            self.last_downloaded = self.total_downloaded;
+            self.last_uploaded = self.total_uploaded;
+            (progress, num_peers, download_rate, upload_rate)
+        };
+
+        let num_seeds = {
+            let num_pieces = self.metainfo.info.num_pieces();
+            self.peers
+                .values()
+                .filter(|p| {
+                    !p.bitfield.is_empty()
+                        && p.bitfield.len() >= num_pieces
+                        && p.bitfield.iter().all(|&b| b)
+                })
+                .count()
+        };
+
+        let is_complete = {
+            let pm = self.piece_mgr.read().await;
+            pm.missing_pieces().is_empty()
+        };
+
+        {
+            let mut status = self.status.write().await;
+            status.progress = progress;
+            status.num_peers = num_peers;
+            status.num_seeds = num_seeds;
+            status.download_rate = download_rate;
+            status.upload_rate = upload_rate;
+            if is_complete {
+                status.state = TorrentState::Seeding;
+            }
+        }
+
+        if is_complete && !self.announced_completed {
+            let _ = self.announce_to_tracker(AnnounceEvent::Completed).await;
+            self.announced_completed = true;
+        }
+    }
+
+    /// Connect to pending peers (called from status tick).
+    async fn connect_pending(&mut self) -> Result<(), Error> {
         let newly_connected = {
             let mut pm = self.peer_mgr.write().await;
             pm.connect_pending().await
         };
 
-        // 2. For each new connection: spawn reader + send bitfield
         for addr in &newly_connected {
             let conn_arc = {
                 let pm = self.peer_mgr.read().await;
@@ -199,59 +344,6 @@ impl DownloadLoop {
                 self.send_bitfield(*addr).await?;
             }
         }
-
-        // 3. If below concurrency limit, request more pieces
-        if self.active_downloads.len() < MAX_CONCURRENT_DOWNLOADS {
-            self.maybe_request_piece().await?;
-        }
-
-        // 4. Update status with rate stats
-        self.tick_count += 1;
-
-        {
-            let mut status = self.status.write().await;
-            let pm = self.piece_mgr.read().await;
-            status.progress = pm.progress();
-            status.num_peers = self.peer_mgr.read().await.num_connections();
-            let num_pieces = self.metainfo.info.num_pieces();
-            status.num_seeds = self
-                .peers
-                .values()
-                .filter(|p| {
-                    !p.bitfield.is_empty()
-                        && p.bitfield.len() >= num_pieces
-                        && p.bitfield.iter().all(|&b| b)
-                })
-                .count();
-
-            // Rate calculation (bytes per second, tick runs every 1s)
-            status.download_rate = (self.total_downloaded - self.last_downloaded) as f64;
-            status.upload_rate = (self.total_uploaded - self.last_uploaded) as f64;
-            self.last_downloaded = self.total_downloaded;
-            self.last_uploaded = self.total_uploaded;
-        }
-
-        // Check seeding state + announce
-        let is_seeding = {
-            let pm = self.piece_mgr.read().await;
-            let complete = pm.missing_pieces().is_empty();
-            if complete {
-                let mut status = self.status.write().await;
-                status.state = TorrentState::Seeding;
-            }
-            complete
-        };
-
-        if is_seeding && !self.announced_completed {
-            let _ = self.announce_to_tracker(AnnounceEvent::Completed).await;
-            self.announced_completed = true;
-        }
-
-        // 5. Periodic choke/unchoke round
-        if self.tick_count.is_multiple_of(10) {
-            self.run_choke_unchoke().await?;
-        }
-
         Ok(())
     }
 
@@ -261,21 +353,37 @@ impl DownloadLoop {
     async fn handle_peer_event(&mut self, addr: SocketAddr, event: PeerEvent) {
         match event {
             PeerEvent::Disconnected => {
+                // Clear this peer's pipeline, mark its blocks as unrequested
+                if let Some(peer) = self.peers.get(&addr) {
+                    for slot in &peer.pipeline {
+                        if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b)) {
+                            if let Some(dl) = self.active_downloads.get_mut(&index) {
+                                let block_idx = (begin / dl.block_size) as usize;
+                                if block_idx < dl.requested.len() {
+                                    dl.requested[block_idx] = None;
+                                }
+                            }
+                        }
+                    }
+                }
                 self.peers.remove(&addr);
                 self.peer_mgr.write().await.remove_peer(&addr);
-                // Reassign any active downloads that were assigned to this peer
-                let affected: Vec<u32> = self
-                    .active_downloads
-                    .iter()
-                    .filter(|(_, d)| d.requested_from.contains(&addr))
-                    .map(|(i, _)| *i)
-                    .collect();
-                for idx in affected {
-                    self.active_downloads.remove(&idx);
-                }
             }
             PeerEvent::Message(msg) => {
                 if let Err(_e) = self.handle_peer_message(addr, msg).await {
+                    // Clear pipeline for dead peer
+                    if let Some(peer) = self.peers.get(&addr) {
+                        for slot in &peer.pipeline {
+                            if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b)) {
+                                if let Some(dl) = self.active_downloads.get_mut(&index) {
+                                    let block_idx = (begin / dl.block_size) as usize;
+                                    if block_idx < dl.requested.len() {
+                                        dl.requested[block_idx] = None;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     self.peers.remove(&addr);
                     self.peer_mgr.write().await.remove_peer(&addr);
                 }
@@ -296,9 +404,22 @@ impl DownloadLoop {
             PeerMessage::KeepAlive => {}
             PeerMessage::Choke => {
                 peer.am_choked = true;
+                // Clear this peer's pipeline — they won't send the data
+                for slot in &mut peer.pipeline {
+                    if let Some((index, begin, _)) = *slot {
+                        if let Some(dl) = self.active_downloads.get_mut(&index) {
+                            let block_idx = (begin / dl.block_size) as usize;
+                            if block_idx < dl.requested.len() {
+                                dl.requested[block_idx] = None;
+                            }
+                        }
+                    }
+                    *slot = None;
+                }
             }
             PeerMessage::Unchoke => {
                 peer.am_choked = false;
+                // fill_pipelines() called after handle_peer_event returns
             }
             PeerMessage::Interested => {
                 peer.peer_interested = true;
@@ -315,28 +436,23 @@ impl DownloadLoop {
             PeerMessage::Bitfield(bytes) => {
                 let num_pieces = self.metainfo.info.num_pieces();
                 peer.bitfield = parse_bitfield(&bytes, num_pieces);
-                // If peer has pieces we need, we already send Interested on connect
             }
             PeerMessage::Piece { index, begin, data } => {
                 // Write to storage
                 self.storage.write_block(index, begin, &data).await?;
                 self.total_downloaded += data.len() as u64;
-                if let Some(peer) = self.peers.get_mut(&addr) {
-                    peer.downloaded_bytes += data.len() as u64;
+                if let Some(p) = self.peers.get_mut(&addr) {
+                    p.downloaded_bytes += data.len() as u64;
+                }
+
+                // Remove from pipeline
+                if let Some(p) = self.peers.get_mut(&addr) {
+                    p.remove_request(index, begin);
                 }
 
                 // Update active download
                 let piece_complete = if let Some(dl) = self.active_downloads.get_mut(&index) {
-                    let block_idx = (begin / dl.block_size) as usize;
-                    if block_idx < dl.received.len() {
-                        let start = begin as usize;
-                        let end = start + data.len();
-                        if end <= dl.data.len() {
-                            dl.data[start..end].copy_from_slice(&data);
-                        }
-                        dl.received[block_idx] = true;
-                    }
-                    dl.received.iter().all(|&r| r)
+                    dl.mark_received(begin, &data)
                 } else {
                     false
                 };
@@ -350,7 +466,6 @@ impl DownloadLoop {
                 begin,
                 length,
             } => {
-                // Only serve data if the peer is unchoked
                 let is_unchoked = {
                     let um = self.upload_mgr.read().await;
                     um.is_unchoked(&addr)
@@ -359,7 +474,6 @@ impl DownloadLoop {
                     return Ok(());
                 }
 
-                // Read the piece data (from cache if available, otherwise disk)
                 let piece_data = if let Some(cached) = self.piece_cache.get(&index) {
                     Arc::clone(cached)
                 } else {
@@ -380,140 +494,219 @@ impl DownloadLoop {
                     };
                     self.peer_mgr.read().await.send_to(&addr, &msg).await?;
                     self.total_uploaded += (end - start) as u64;
-
-                    // Track per-peer upload stats
-                    if let Some(peer) = self.peers.get_mut(&addr) {
-                        peer.uploaded_bytes += (end - start) as u64;
+                    if let Some(p) = self.peers.get_mut(&addr) {
+                        p.uploaded_bytes += (end - start) as u64;
                     }
                 }
             }
-            PeerMessage::Cancel { .. } | PeerMessage::Port(_) => {
-                // Cancel and Port messages are not handled yet
+            PeerMessage::Cancel { index, begin, .. } => {
+                if let Some(p) = self.peers.get_mut(&addr) {
+                    p.remove_request(index, begin);
+                }
+                // Mark block as unrequested in ActiveDownload
+                if let Some(dl) = self.active_downloads.get_mut(&index) {
+                    let block_idx = (begin / dl.block_size) as usize;
+                    if block_idx < dl.requested.len() {
+                        dl.requested[block_idx] = None;
+                    }
+                }
+            }
+            PeerMessage::Port(_) => {
+                // DHT port message — handled at the DHT layer, ignore here
             }
         }
 
         Ok(())
     }
 
-    // ── Piece requesting ──────────────────────────────────────────
+    // ── Pipeline / piece requesting ───────────────────────────────
 
-    /// If no active download and not complete, select the next piece
-    /// and request its blocks from suitable peers.
+    /// Fill request pipelines for all peers that can accept more requests.
     ///
-    /// In EndGame mode (fewer than `ENDGAME_THRESHOLD` pieces remaining),
-    /// requests are sent to multiple peers simultaneously.
-    async fn maybe_request_piece(&mut self) -> Result<(), Error> {
-        let missing = {
-            let pm = self.piece_mgr.read().await;
-            pm.missing_pieces()
-        };
-        if missing.is_empty() {
-            return Ok(());
-        }
-
-        // Check EndGame threshold
-        let remaining = missing.len();
-        let in_endgame = remaining < ENDGAME_THRESHOLD;
-        if in_endgame {
-            self.selector = Box::new(EndGame);
-        }
-
-        let local_bf = {
-            let pm = self.piece_mgr.read().await;
-            pm.bitfield().to_vec()
-        };
-
-        // Find a suitable piece
-        let mut piece_idx: Option<u32> = None;
+    /// Called after every peer event. Computes piece availability across
+    /// the swarm, then for each peer with free pipeline slots, finds the
+    /// next block to request.
+    async fn fill_pipelines(&mut self) -> Result<(), Error> {
+        // Compute availability: how many unchoked peers have each piece
+        let num_pieces = self.metainfo.info.num_pieces();
+        let mut availability = vec![0usize; num_pieces];
         for peer in self.peers.values() {
             if peer.am_choked || peer.bitfield.is_empty() {
                 continue;
             }
-            if let Some(idx) = self.selector.select(&peer.bitfield, &local_bf) {
-                piece_idx = Some(idx);
-                break;
-            }
-        }
-
-        if let Some(idx) = piece_idx {
-            if in_endgame {
-                // EndGame: request from ALL peers that have this piece
-                let request_addrs: Vec<SocketAddr> = self
-                    .peers
-                    .iter()
-                    .filter(|(_, p)| {
-                        !p.am_choked
-                            && !p.bitfield.is_empty()
-                            && (idx as usize) < p.bitfield.len()
-                            && p.bitfield[idx as usize]
-                    })
-                    .map(|(a, _)| *a)
-                    .collect();
-                for addr in &request_addrs {
-                    self.request_piece_from(addr, idx).await?;
+            for (i, &has) in peer.bitfield.iter().enumerate() {
+                if i >= num_pieces {
+                    break;
                 }
-            } else if let Some((addr, _)) = self.peers.iter().find(|(_, p)| {
-                !p.am_choked
-                    && !p.bitfield.is_empty()
-                    && (idx as usize) < p.bitfield.len()
-                    && p.bitfield[idx as usize]
-            }) {
-                let addr = *addr;
-                self.request_piece_from(&addr, idx).await?;
+                if has {
+                    availability[i] += 1;
+                }
             }
         }
 
-        Ok(())
-    }
-
-    /// Request all blocks of a piece from a specific peer.
-    async fn request_piece_from(&mut self, addr: &SocketAddr, index: u32) -> Result<(), Error> {
-        let piece_len = self.piece_len_for_index(index);
-        let block_size: u32 = 16 * 1024;
-        let block_size_u64 = block_size as u64;
-        let num_blocks = piece_len.div_ceil(block_size_u64) as usize;
-
-        let mut dl = ActiveDownload {
-            index,
-            data: vec![0u8; piece_len as usize],
-            received: vec![false; num_blocks],
-            block_size,
-            num_blocks,
-            requested_from: HashSet::new(),
+        let our_bf = {
+            let pm = self.piece_mgr.read().await;
+            pm.bitfield().to_vec()
         };
-        dl.requested_from.insert(*addr);
 
-        let pm = self.peer_mgr.read().await;
-        for block_idx in 0..num_blocks {
-            let begin = block_idx as u32 * block_size;
-            let len = std::cmp::min(block_size_u64, piece_len - begin as u64) as u32;
-            if len == 0 {
-                break;
+        // Check EndGame mode
+        let missing_count = our_bf.iter().filter(|&&b| !b).count();
+        if missing_count < ENDGAME_THRESHOLD {
+            self.selector = Box::new(EndGame);
+        }
+
+        let in_endgame = missing_count < ENDGAME_THRESHOLD;
+
+        // For each peer with free pipeline slots, find the next block
+        let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
+        for addr in peer_addrs {
+            // Re-borrow: we need mutable access per iteration
+            let can_req = self.peers.get(&addr).is_some_and(|p| p.can_request());
+            if !can_req {
+                continue;
             }
+
+            // Try to find a block from an existing ActiveDownload
+            let block_opt = self.find_block_for_peer(&addr, in_endgame);
+
+            let (index, begin) = if let Some(blk) = block_opt {
+                blk
+            } else if self.active_downloads.len() < MAX_CONCURRENT_DOWNLOADS {
+                // Start a new piece
+                let selected = self.selector.select(&our_bf, &availability);
+                if let Some(idx) = selected {
+                    let piece_len = self.piece_len_for_index(idx);
+                    if piece_len == 0 {
+                        continue;
+                    }
+                    let dl = ActiveDownload::new(idx, piece_len, BLOCK_SIZE);
+                    // next_unrequested always returns Some for a fresh ActiveDownload
+                    // (all blocks start as None).
+                    let blk_begin = dl.next_unrequested().unwrap();
+                    self.active_downloads.insert(idx, dl);
+                    (idx, blk_begin)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
+
+            // Send the request
+            let dl = match self.active_downloads.get(&index) {
+                Some(d) => d,
+                None => continue,
+            };
+            let len = dl.block_len(begin);
+            if len == 0 {
+                continue;
+            }
+
             let msg = PeerMessage::Request {
                 index,
                 begin,
                 length: len,
             };
-            pm.send_to(addr, &msg).await?;
+            self.peer_mgr.read().await.send_to(&addr, &msg).await?;
+
+            // Record in pipeline and ActiveDownload
+            if let Some(peer) = self.peers.get_mut(&addr) {
+                peer.push_request(index, begin);
+            }
+            if let Some(dl) = self.active_downloads.get_mut(&index) {
+                dl.mark_requested(begin, addr);
+            }
         }
 
-        // In normal mode, skip if this piece is already being downloaded.
-        // In EndGame mode, we intentionally request from multiple peers,
-        // so we merge into the existing ActiveDownload without resetting data.
-        if let Some(existing) = self.active_downloads.get(&index) {
-            if existing.requested_from.contains(addr) {
-                return Ok(()); // Already requested from this peer
-            }
-            // EndGame: add peer to existing download without overwriting data buffer
-            if let Some(existing) = self.active_downloads.get_mut(&index) {
-                existing.requested_from.insert(*addr);
-            }
-            return Ok(());
-        }
-
-        self.active_downloads.insert(index, dl);
         Ok(())
+    }
+
+    /// Find the next block to request from a specific peer.
+    ///
+    /// Scans existing `ActiveDownload`s for unrequested blocks that this
+    /// peer has. In EndGame mode, also considers blocks already requested
+    /// from other peers.
+    fn find_block_for_peer(&self, addr: &SocketAddr, in_endgame: bool) -> Option<(u32, u32)> {
+        let peer = self.peers.get(addr)?;
+        if peer.bitfield.is_empty() {
+            return None;
+        }
+
+        for (idx, dl) in &self.active_downloads {
+            let idx_usize = *idx as usize;
+            if idx_usize >= peer.bitfield.len() || !peer.bitfield[idx_usize] {
+                continue;
+            }
+
+            if let Some(begin) = dl.next_unrequested() {
+                return Some((*idx, begin));
+            }
+
+            // EndGame: also consider blocks requested from other peers
+            if in_endgame {
+                for (block_i, assigned) in dl.requested.iter().enumerate() {
+                    if assigned.as_ref() == Some(addr) {
+                        continue; // already requested from this peer
+                    }
+                    if assigned.is_some() {
+                        // Block is requested from another peer — duplicate request
+                        return Some((*idx, block_i as u32 * dl.block_size));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Expire stale block requests (timeout > REQUEST_TIMEOUT).
+    ///
+    /// Peers whose *existing* requests all timed out are disconnected.
+    /// Peers with no outstanding requests (pipeline all `None`) are
+    /// explicitly NOT affected — they may simply not have been assigned
+    /// any blocks yet.
+    async fn expire_stale_requests(&mut self) {
+        let now = Instant::now();
+        let mut dead_peers = Vec::new();
+
+        for (addr, peer) in &mut self.peers {
+            let had_requests = peer.pipeline.iter().any(Option::is_some);
+            if !had_requests {
+                continue; // nothing to expire
+            }
+            let mut all_expired = true;
+            for slot in &mut peer.pipeline {
+                if let Some((index, begin, sent_at)) = *slot {
+                    if now.duration_since(sent_at) > REQUEST_TIMEOUT {
+                        if let Some(dl) = self.active_downloads.get_mut(&index) {
+                            let block_idx = (begin / dl.block_size) as usize;
+                            if block_idx < dl.requested.len() {
+                                dl.requested[block_idx] = None;
+                            }
+                        }
+                        *slot = None;
+                    } else {
+                        all_expired = false;
+                    }
+                }
+            }
+            if all_expired {
+                dead_peers.push(*addr);
+            }
+        }
+
+        for addr in &dead_peers {
+            // Clear any blocks this dead peer had in ActiveDownloads
+            for dl in self.active_downloads.values_mut() {
+                for assigned in &mut dl.requested {
+                    if *assigned == Some(*addr) {
+                        *assigned = None;
+                    }
+                }
+            }
+            self.peers.remove(addr);
+            self.peer_mgr.write().await.remove_peer(addr);
+        }
     }
 
     // ── Piece verification ───────────────────────────────────────
@@ -728,12 +921,12 @@ impl DownloadLoop {
                 };
                 match msg_result {
                     Ok(msg) => {
-                        if tx.send((addr, PeerEvent::Message(msg))).is_err() {
+                        if tx.send((addr, PeerEvent::Message(msg))).await.is_err() {
                             break; // DownloadLoop dropped
                         }
                     }
                     Err(_) => {
-                        let _ = tx.send((addr, PeerEvent::Disconnected));
+                        let _ = tx.send((addr, PeerEvent::Disconnected)).await;
                         break;
                     }
                 }
@@ -804,17 +997,17 @@ mod unit_tests {
             index: 42,
             data: vec![0u8; 16000],
             received: vec![false; 1],
+            requested: vec![None; 1],
             block_size: 16384,
             num_blocks: 1,
-            requested_from: HashSet::new(),
         };
-        // Verify the index and block metadata are set correctly
         assert_eq!(dl.index, 42);
         assert_eq!(dl.num_blocks, 1);
         assert_eq!(dl.block_size, 16384);
         assert_eq!(dl.data.len(), 16000);
         assert_eq!(dl.received.len(), 1);
-        assert_eq!(dl.requested_from.len(), 0);
+        assert_eq!(dl.requested.len(), 1);
+        assert!(dl.requested[0].is_none());
     }
 }
 
