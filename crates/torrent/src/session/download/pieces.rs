@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -207,6 +208,35 @@ impl DownloadLoop {
             self.active_downloads.remove(&index);
             Ok(true)
         } else {
+            // Corrupt piece: penalize peers that contributed blocks
+            let mut penalized: HashSet<SocketAddr> = HashSet::new();
+            if let Some(dl) = self.active_downloads.get(&index) {
+                for addr in dl.requested.iter().flatten() {
+                    if penalized.insert(*addr) {
+                        if let Some(peer) = self.peers.get_mut(addr) {
+                            peer.corrupt_blocks += 1;
+                            tracing::warn!(
+                                "peer {} sent corrupt data ({} corrupt blocks)",
+                                addr,
+                                peer.corrupt_blocks
+                            );
+                        }
+                    }
+                }
+            }
+            // Disconnect peers with too many corrupt blocks
+            let mut ban: Vec<SocketAddr> = Vec::new();
+            for (addr, peer) in &self.peers {
+                if peer.corrupt_blocks >= 3 {
+                    ban.push(*addr);
+                }
+            }
+            for addr in &ban {
+                tracing::warn!("banning peer {} for repeated corrupt data", addr);
+                self.peers.remove(addr);
+                self.peer_mgr.write().await.remove_peer(addr);
+            }
+
             self.active_downloads.remove(&index);
             Ok(false)
         }

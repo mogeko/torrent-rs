@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::Mutex;
 
@@ -102,6 +103,7 @@ impl DownloadLoop {
                 self.total_downloaded += data.len() as u64;
                 if let Some(p) = self.peers.get_mut(&addr) {
                     p.downloaded_bytes += data.len() as u64;
+                    p.last_data_received = Some(Instant::now());
                 }
 
                 if let Some(p) = self.peers.get_mut(&addr) {

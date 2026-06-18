@@ -49,6 +49,10 @@ pub(crate) struct PeerInfo {
     pub(super) uploaded_this_round: u64,
     /// Bytes downloaded from this peer.
     pub(super) downloaded_bytes: u64,
+    /// Number of corrupt blocks received from this peer.
+    pub(super) corrupt_blocks: u32,
+    /// Last time we received a Piece message from this peer.
+    pub(super) last_data_received: Option<Instant>,
 }
 
 impl PeerInfo {
@@ -62,6 +66,8 @@ impl PeerInfo {
             uploaded_bytes: 0,
             uploaded_this_round: 0,
             downloaded_bytes: 0,
+            corrupt_blocks: 0,
+            last_data_received: None,
         }
     }
 
@@ -208,6 +214,80 @@ mod unit_tests {
         assert_eq!(dl.received.len(), 1);
         assert_eq!(dl.requested.len(), 1);
         assert!(dl.requested[0].is_none());
+    }
+
+    #[test]
+    fn peer_pipeline_push_and_remove() {
+        let mut pi = PeerInfo::new();
+        pi.am_choked = false;
+        assert!(pi.can_request());
+
+        pi.push_request(0, 0);
+        pi.push_request(0, 16384);
+        pi.push_request(1, 0);
+        assert_eq!(pi.pipeline.iter().filter(|s| s.is_some()).count(), 3);
+
+        pi.remove_request(0, 16384);
+        assert_eq!(pi.pipeline.iter().filter(|s| s.is_some()).count(), 2);
+
+        // Removing non-existent request is a no-op
+        pi.remove_request(99, 999);
+        assert_eq!(pi.pipeline.iter().filter(|s| s.is_some()).count(), 2);
+    }
+
+    #[test]
+    fn peer_pipeline_full_cant_request() {
+        let mut pi = PeerInfo::new();
+        pi.am_choked = false;
+
+        // Fill all 5 slots
+        for i in 0..5 {
+            pi.push_request(i, 0);
+        }
+        assert!(!pi.can_request());
+
+        // 6th push should be silently ignored (no free slot)
+        pi.push_request(5, 0);
+        assert!(!pi.can_request());
+    }
+
+    #[test]
+    fn peer_pipeline_choked_cant_request() {
+        let pi = PeerInfo::new();
+        // am_choked defaults to true
+        assert!(!pi.can_request());
+    }
+
+    #[test]
+    fn active_download_new_has_all_unrequested() {
+        let dl = ActiveDownload::new(0, 65536, 16384); // 4 blocks
+        assert_eq!(dl.num_blocks, 4);
+        assert_eq!(dl.next_unrequested(), Some(0));
+        assert!(dl.received.iter().all(|&r| !r));
+        assert!(dl.requested.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn active_download_mark_requested_skips() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 6881));
+        let mut dl = ActiveDownload::new(0, 65536, 16384); // 4 blocks
+
+        dl.mark_requested(0, addr);
+        assert_eq!(dl.next_unrequested(), Some(16384)); // skips block 0
+
+        dl.mark_requested(16384, addr);
+        assert_eq!(dl.next_unrequested(), Some(32768)); // skips block 0,1
+    }
+
+    #[test]
+    fn active_download_mark_received_complete() {
+        let _ = SocketAddr::from(([127, 0, 0, 1], 6881));
+        let mut dl = ActiveDownload::new(0, 32768, 16384); // 2 blocks
+
+        assert!(!dl.mark_received(0, &[0x42u8; 16384]));
+        assert!(!dl.received[1]);
+        assert!(dl.mark_received(16384, &[0xFFu8; 16384]));
+        assert!(dl.received.iter().all(|&r| r));
     }
 }
 

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use rand::RngExt;
 
@@ -38,6 +39,15 @@ impl DownloadLoop {
             let idx = rand::rng().random_range(0..candidates.len());
             to_unchoke.insert(candidates[idx]);
         }
+
+        // Snubbing: remove peers idle for >60s (BEP 3)
+        let snub_timeout = Duration::from_secs(60);
+        to_unchoke.retain(|addr| {
+            self.peers.get(addr).is_none_or(|p| {
+                p.last_data_received
+                    .is_none_or(|t| t.elapsed() < snub_timeout)
+            })
+        });
 
         for addr in self.peers.keys() {
             if to_unchoke.len() >= max_uploads as usize {
