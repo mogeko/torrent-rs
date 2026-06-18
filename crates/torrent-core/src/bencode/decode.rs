@@ -169,11 +169,18 @@ fn parse_dict(data: &[u8]) -> Result<(Bencode, &[u8]), Error> {
             _ => return Err(Error::new(ErrorKind::BencodeInvalidSyntax)),
         };
 
-        if rest.is_empty() {
+        // Check that there are bytes remaining after the key for the value
+        if remaining.is_empty() {
             return Err(Error::new(ErrorKind::BencodeUnexpectedEof));
         }
 
         let (val, remaining) = decode(remaining)?;
+
+        // Reject duplicate keys (BEP 3 requires unique dict keys).
+        if entries.iter().any(|(k, _)| k == &key) {
+            return Err(Error::new(ErrorKind::BencodeInvalidSyntax));
+        }
+
         entries.push((key, val));
         rest = remaining;
     }

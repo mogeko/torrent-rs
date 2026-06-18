@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rand::RngExt;
+use sha1::{Digest, Sha1};
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error::Error;
@@ -17,6 +18,16 @@ use super::peer_manager::PeerManager;
 use super::torrent::TorrentCommand;
 use super::upload::UploadManager;
 use super::{TorrentState, TorrentStatus};
+
+/// Maximum number of pieces to download concurrently.
+const MAX_CONCURRENT_DOWNLOADS: usize = 5;
+
+/// How many pieces to cache for upload serving (LRU eviction).
+const PIECE_CACHE_SIZE: usize = 256;
+
+/// When fewer than this many pieces remain, switch to EndGame mode
+/// (send duplicate requests to multiple peers simultaneously).
+const ENDGAME_THRESHOLD: usize = 10;
 
 /// Event from a peer reader task.
 pub(crate) enum PeerEvent {
@@ -121,10 +132,6 @@ pub(crate) struct DownloadLoop {
     pub(crate) piece_cache: HashMap<u32, Arc<Vec<u8>>>,
 }
 
-/// When fewer than this many pieces remain, switch to EndGame mode
-/// (send duplicate requests to multiple peers simultaneously).
-const ENDGAME_THRESHOLD: usize = 10;
-
 impl DownloadLoop {
     /// Run the main download loop.
     pub async fn run(&mut self) {
@@ -193,8 +200,8 @@ impl DownloadLoop {
             }
         }
 
-        // 3. If idle, request a new piece
-        if self.active_downloads.is_empty() {
+        // 3. If below concurrency limit, request more pieces
+        if self.active_downloads.len() < MAX_CONCURRENT_DOWNLOADS {
             self.maybe_request_piece().await?;
         }
 
@@ -206,6 +213,16 @@ impl DownloadLoop {
             let pm = self.piece_mgr.read().await;
             status.progress = pm.progress();
             status.num_peers = self.peer_mgr.read().await.num_connections();
+            let num_pieces = self.metainfo.info.num_pieces();
+            status.num_seeds = self
+                .peers
+                .values()
+                .filter(|p| {
+                    !p.bitfield.is_empty()
+                        && p.bitfield.len() >= num_pieces
+                        && p.bitfield.iter().all(|&b| b)
+                })
+                .count();
 
             // Rate calculation (bytes per second, tick runs every 1s)
             status.download_rate = (self.total_downloaded - self.last_downloaded) as f64;
@@ -481,6 +498,20 @@ impl DownloadLoop {
             pm.send_to(addr, &msg).await?;
         }
 
+        // In normal mode, skip if this piece is already being downloaded.
+        // In EndGame mode, we intentionally request from multiple peers,
+        // so we merge into the existing ActiveDownload without resetting data.
+        if let Some(existing) = self.active_downloads.get(&index) {
+            if existing.requested_from.contains(addr) {
+                return Ok(()); // Already requested from this peer
+            }
+            // EndGame: add peer to existing download without overwriting data buffer
+            if let Some(existing) = self.active_downloads.get_mut(&index) {
+                existing.requested_from.insert(*addr);
+            }
+            return Ok(());
+        }
+
         self.active_downloads.insert(index, dl);
         Ok(())
     }
@@ -499,12 +530,22 @@ impl DownloadLoop {
             None => return Ok(false),
         };
 
-        let expected = self.metainfo.info.pieces[index as usize];
+        let expected = match self.metainfo.info.pieces.get(index as usize) {
+            Some(h) => *h,
+            None => return Ok(false),
+        };
 
         if verify_piece_hash(&data, expected) {
             {
                 let mut pm = self.piece_mgr.write().await;
                 pm.set_piece(index);
+            }
+            // LRU-like eviction: if cache exceeds limit, remove oldest (simplified: remove first)
+            if self.piece_cache.len() >= PIECE_CACHE_SIZE {
+                let oldest = self.piece_cache.keys().next().copied();
+                if let Some(old) = oldest {
+                    self.piece_cache.remove(&old);
+                }
             }
             self.piece_cache.insert(index, Arc::new(data));
             self.active_downloads.remove(&index);
@@ -736,7 +777,6 @@ impl DownloadLoop {
 
 /// Compute SHA-1 of `data` and compare with `expected`.
 fn verify_piece_hash(data: &[u8], expected: [u8; 20]) -> bool {
-    use sha1::{Digest, Sha1};
     let mut hasher = Sha1::new();
     hasher.update(data);
     let computed: [u8; 20] = hasher.finalize().into();
@@ -799,7 +839,6 @@ mod tests {
     fn verify_piece_hash_match() {
         let data = b"hello world test piece data";
         let expected = {
-            use sha1::{Digest, Sha1};
             let mut h = Sha1::new();
             h.update(data);
             h.finalize().into()
@@ -818,7 +857,6 @@ mod tests {
     fn verify_piece_hash_empty() {
         let data = b"";
         let expected = {
-            use sha1::{Digest, Sha1};
             let mut h = Sha1::new();
             h.update(b"");
             h.finalize().into()
@@ -830,7 +868,6 @@ mod tests {
     fn verify_piece_hash_binary_data() {
         let data = [0x00u8, 0xFF, 0x42, 0x7F, 0x80];
         let expected = {
-            use sha1::{Digest, Sha1};
             let mut h = Sha1::new();
             h.update(&data);
             h.finalize().into()
@@ -843,7 +880,6 @@ mod tests {
         let data = b"correct data";
         let wrong_data = b"wrong data";
         let wrong_hash = {
-            use sha1::{Digest, Sha1};
             let mut h = Sha1::new();
             h.update(wrong_data);
             h.finalize().into()

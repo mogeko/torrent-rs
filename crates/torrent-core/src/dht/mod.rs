@@ -14,6 +14,7 @@ use self::kbucket::KBucket;
 use std::net::SocketAddr;
 
 use rand::RngExt;
+use sha1::{Digest, Sha1};
 
 /// Represents a node in the DHT (BEP 5).
 ///
@@ -125,7 +126,6 @@ fn bucket_index(our_id: &[u8; 20], node_id: &[u8; 20]) -> usize {
 
 /// Generate a random 20-byte node ID using SHA-1.
 pub fn generate_node_id() -> [u8; 20] {
-    use sha1::{Digest, Sha1};
     let seed: u64 = rand::rng().random();
     let mut hasher = Sha1::new();
     hasher.update(seed.to_be_bytes());

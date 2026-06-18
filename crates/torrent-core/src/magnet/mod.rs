@@ -98,10 +98,17 @@ impl FromStr for MagnetUri {
         tracing::debug!("parsing magnet URI: {}", s);
         let s = s.trim();
 
-        // Check prefix (case-insensitive)
+        // Check prefix (case-insensitive per BEP 9)
         let body = s
             .strip_prefix("magnet:")
-            .or_else(|| s.strip_prefix("MAGNET:"))
+            .or_else(|| {
+                // Handle "Magnet:", "MAGNET:", "mAgNeT:", etc.
+                if s.len() > 7 && s[..7].eq_ignore_ascii_case("magnet:") {
+                    Some(&s[7..])
+                } else {
+                    None
+                }
+            })
             .ok_or(Error::new(ErrorKind::InvalidInput))?
             .strip_prefix('?')
             .ok_or(Error::new(ErrorKind::InvalidInput))?;

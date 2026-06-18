@@ -10,6 +10,12 @@ use super::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
 
 /// Timeout for TCP connect + handshake exchange.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum peer message payload size (2 MiB). Prevents OOM from malicious peers.
+const MAX_MESSAGE_SIZE: u32 = 2 * 1024 * 1024;
+/// Timeout for reading a single message body from a peer.
+const MESSAGE_READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Timeout for flushing data to a peer.
+const MESSAGE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A managed peer connection with buffered message I/O.
 pub struct PeerConnection {
@@ -87,22 +93,30 @@ impl PeerConnection {
         tracing::trace!("sending {:?} to peer", msg);
         let data = encode(msg);
 
-        if let Err(e) = self.stream.get_mut().write_all(&data).await {
-            return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
-        }
+        tokio::time::timeout(
+            MESSAGE_WRITE_TIMEOUT,
+            self.stream.get_mut().write_all(&data),
+        )
+        .await
+        .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+        .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
 
-        if let Err(e) = self.stream.get_mut().flush().await {
-            return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
-        }
+        tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, self.stream.get_mut().flush())
+            .await
+            .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
 
         Ok(())
     }
 
     /// Receive the next message from the peer.
     pub async fn recv(&mut self) -> Result<PeerMessage, Error> {
-        // Read 4-byte length prefix
+        // Read 4-byte length prefix with timeout
         let mut len_buf = [0u8; 4];
-        read_exact(self, &mut len_buf).await?;
+        tokio::time::timeout(MESSAGE_READ_TIMEOUT, read_exact(self, &mut len_buf))
+            .await
+            .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
 
         let len = u32::from_be_bytes(len_buf);
 
@@ -112,9 +126,17 @@ impl PeerConnection {
             return Ok(PeerMessage::KeepAlive);
         }
 
-        // Read the rest: message id + payload
+        // Enforce maximum message size to prevent OOM from malicious peers
+        if len > MAX_MESSAGE_SIZE {
+            return Err(Error::new(ErrorKind::PeerConnectionClosed));
+        }
+
+        // Read the rest: message id + payload with timeout
         let mut msg_buf = vec![0u8; len as usize];
-        read_exact(self, &mut msg_buf).await?;
+        tokio::time::timeout(MESSAGE_READ_TIMEOUT, read_exact(self, &mut msg_buf))
+            .await
+            .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
 
         // Build full wire format for decode: length prefix + msg_buf
         let mut full_msg = len_buf.to_vec();

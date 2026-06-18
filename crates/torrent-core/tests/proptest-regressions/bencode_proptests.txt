@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc ef1116dfb4595cf437d5d2e3709af4d0caf1fe3d211ae4f88062b53fa9179008 # shrinks to val = Dict([(b"\xd4", Bytes(b"")), (b"\0", Bytes(b""))])
+cc c2adff10237bbdd246f1c7ca1a377ebb6f4ac2a4a6434893108158fa7ec9ceef # shrinks to val = Dict([(b"", Dict([(b"", Dict([(b"", Bytes(b"")), (b"", Bytes(b""))]))]))])

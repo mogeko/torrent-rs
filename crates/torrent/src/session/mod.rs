@@ -298,6 +298,8 @@ impl Session {
         let handle = self.torrents.write().await.remove(info_hash);
         if let Some(mut h) = handle {
             h.cancel().await;
+            // Await the task to ensure clean shutdown
+            let _ = h.task.await;
         }
         Ok(())
     }

@@ -7,7 +7,7 @@
 //!
 //! Async HTTP and UDP tracker implementations live in the `torrent` crate.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::bencode::{self, Bencode, dict_get, dict_get_bytes, dict_get_int};
 use crate::error::{Error, ErrorKind};
@@ -99,15 +99,17 @@ impl AnnounceResponse {
         tracing::debug!("parsing tracker response");
         let (val, _rest) = bencode::decode(data)?;
 
-        let interval = dict_get_int(&val, b"interval")
-            .ok_or(Error::new(ErrorKind::TrackerInvalidResponse))? as u32;
+        let interval_i64 =
+            dict_get_int(&val, b"interval").ok_or(Error::new(ErrorKind::TrackerInvalidResponse))?;
+        let interval = u32::try_from(interval_i64)
+            .map_err(|_| Error::new(ErrorKind::TrackerInvalidResponse))?;
 
         let complete = dict_get_int(&val, b"complete")
-            .map(|v| v as u32)
+            .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
 
         let incomplete = dict_get_int(&val, b"incomplete")
-            .map(|v| v as u32)
+            .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
 
         let warning_message = dict_get(&val, b"warning message").and_then(|v| match v {
@@ -120,7 +122,7 @@ impl AnnounceResponse {
             _ => None,
         });
 
-        let min_interval = dict_get_int(&val, b"min interval").map(|v| v as u32);
+        let min_interval = dict_get_int(&val, b"min interval").and_then(|v| u32::try_from(v).ok());
 
         let peers = parse_peers(&val)?;
 
@@ -157,12 +159,34 @@ impl AnnounceResponse {
 ///
 /// Supports both compact format (binary blob: 6 bytes per IPv4 peer)
 /// and list-of-dict format.
+///
+/// Also parses `peers6` (BEP 7) for compact IPv6 peer lists
+/// (18 bytes per peer: 16 IPv6 + 2 port).
 fn parse_peers(val: &Bencode) -> Result<Vec<SocketAddr>, Error> {
-    // Try compact format first (binary string of peer data)
+    // Try compact IPv4 format first (binary string of peer data)
     if let Some(bytes) = dict_get_bytes(val, b"peers")
         && !bytes.is_empty()
     {
         return parse_compact_peers_ipv4(bytes);
+    }
+
+    // Try compact IPv6 format (BEP 7) — 18 bytes per peer: 16 IPv6 + 2 port
+    if let Some(bytes) = dict_get_bytes(val, b"peers6")
+        && !bytes.is_empty()
+    {
+        let mut peers = Vec::with_capacity(bytes.len() / 18);
+        for chunk in bytes.chunks_exact(18) {
+            let mut ip_bytes = [0u8; 16];
+            ip_bytes.copy_from_slice(&chunk[..16]);
+            let ip = Ipv6Addr::from(ip_bytes);
+            let port = u16::from_be_bytes([chunk[16], chunk[17]]);
+            peers.push(SocketAddr::new(IpAddr::V6(ip), port));
+        }
+        // Handle trailing incomplete bytes
+        if !bytes.chunks_exact(18).remainder().is_empty() {
+            return Err(Error::new(ErrorKind::TrackerInvalidResponse));
+        }
+        return Ok(peers);
     }
 
     // Try list-of-dict format

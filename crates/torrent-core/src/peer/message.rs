@@ -115,7 +115,7 @@ pub fn encode(msg: &PeerMessage) -> Vec<u8> {
             buf
         }
         PeerMessage::Bitfield(bitfield) => {
-            let len = 1 + bitfield.len() as u32;
+            let len = 1u32 + u32::try_from(bitfield.len()).unwrap_or(u32::MAX);
             let mut buf = Vec::with_capacity(4 + len as usize);
             buf.extend_from_slice(&len.to_be_bytes());
             buf.push(5);
@@ -144,7 +144,7 @@ pub fn encode(msg: &PeerMessage) -> Vec<u8> {
             buf
         }
         PeerMessage::Piece { index, begin, data } => {
-            let len = 9 + data.len() as u32;
+            let len = 9u32 + u32::try_from(data.len()).unwrap_or(u32::MAX);
             let mut buf = Vec::with_capacity(4 + len as usize);
             buf.extend_from_slice(&len.to_be_bytes());
             buf.push(7);

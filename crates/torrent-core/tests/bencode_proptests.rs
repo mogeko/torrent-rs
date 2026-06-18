@@ -37,8 +37,10 @@ fn bencode_strategy() -> impl Strategy<Value = Bencode> {
                     ),
                     0..8,
                 )
-                .prop_map(|mut entries| {
+                .prop_map(|mut entries: Vec<(Bytes, Bencode)>| {
+                    // Sort by key (BEP 3 lexicographic order) and deduplicate
                     entries.sort_by(|a, b| a.0.cmp(&b.0));
+                    entries.dedup_by(|a, b| a.0 == b.0);
                     Bencode::Dict(entries)
                 }),
             ]

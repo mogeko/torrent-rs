@@ -25,6 +25,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> TrackerStream for T {}
 /// Supports both `http://` (plain TCP) and `https://` (TLS via `tokio-rustls`).
 pub struct HttpTracker {
     url: Url,
+    /// Pre-extracted host string to avoid `Box::leak` on every announce.
+    host: String,
+    /// Port to connect to (80 for http, 443 for https, or URL-specified).
+    port: u16,
     /// TLS connector for `https://` URLs; `None` for plain `http://`.
     tls: Option<TlsConnector>,
 }
@@ -42,6 +46,8 @@ impl Clone for HttpTracker {
     fn clone(&self) -> Self {
         HttpTracker {
             url: self.url.clone(),
+            host: self.host.clone(),
+            port: self.port,
             tls: self.tls.clone(),
         }
     }
@@ -55,12 +61,22 @@ impl HttpTracker {
     /// Accepts `&str`, `String`, `&String`, or `Url`.
     pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
         let url = url.into_url()?;
+        let host = url
+            .host_str()
+            .ok_or(Error::new(ErrorKind::InvalidInput))?
+            .to_owned();
+        let port = url.port_or_known_default().unwrap_or(80);
         let tls = if url.scheme() == "https" {
             Some(build_tls_connector()?)
         } else {
             None
         };
-        Ok(HttpTracker { url, tls })
+        Ok(HttpTracker {
+            url,
+            host,
+            port,
+            tls,
+        })
     }
 
     /// Returns the tracker's URL.
@@ -74,34 +90,12 @@ impl HttpTracker {
         // Build path + query string (avoid intermediate Url clone).
         let path_and_query = format!("{}?{}", self.url.path(), build_query_string(req));
 
-        // Owned copy for the async block (TlsConnector::connect requires 'static).
-        let host: &'static str = Box::leak(
-            self.url
-                .host_str()
-                .ok_or(Error::new(ErrorKind::InvalidInput))?
-                .to_owned()
-                .into_boxed_str(),
-        );
-        // Use the correct default port for the scheme (80 for http, 443 for https).
-        let port = self.url.port_or_known_default().unwrap_or(80);
-
-        // Build host header
-        let host_header = match self.url.port() {
-            Some(p) => format!("{}:{}", host, p),
-            None => host.to_string(),
-        };
-
-        // Build HTTP GET request
-        let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
-            path_and_query, host_header
-        );
-
-        // Perform the full HTTP round-trip with a single timeout guard.
-        // Clone TLS connector before the async block to avoid borrowing self.
+        // Clone host/port/tls for the async block (avoids borrowing &self).
+        let host = self.host.clone();
+        let port = self.port;
         let tls = self.tls.clone();
         let response = tokio::time::timeout(TIMEOUT, async move {
-            let tcp_stream = TcpStream::connect((host, port))
+            let tcp_stream = TcpStream::connect((&*host, port))
                 .await
                 .map_err(Error::tracker_failed)?;
 
@@ -109,7 +103,8 @@ impl HttpTracker {
             let mut stream: Box<dyn TrackerStream> = if let Some(ref connector) = tls {
                 use rustls::pki_types::ServerName;
 
-                let domain = ServerName::try_from(host).map_err(Error::invalid_input)?;
+                let domain = ServerName::try_from(host.clone())
+                    .map_err(Error::invalid_input)?;
                 let tls_stream = connector
                     .connect(domain, tcp_stream)
                     .await
@@ -118,6 +113,11 @@ impl HttpTracker {
             } else {
                 Box::new(tcp_stream)
             };
+
+            let request = format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: torrent-rs/0.1.0\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+                path_and_query, host
+            );
 
             stream
                 .write_all(request.as_bytes())
@@ -158,7 +158,23 @@ impl HttpTracker {
         let status_code = first_line.split_whitespace().nth(1).unwrap_or("");
 
         match status_code {
-            "301" | "302" => Err(Error::new(ErrorKind::TrackerProtocolError)),
+            "301" | "302" => {
+                // Follow redirect via Location header
+                let location = headers_str
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("location: "))
+                    .and_then(|l| l.split_once(": ").map(|x| x.1))
+                    .map(|l| l.trim())
+                    .unwrap_or("");
+                if location.is_empty() {
+                    return Err(Error::new(ErrorKind::TrackerProtocolError));
+                }
+                tracing::info!("HTTP redirect to {} — not yet supported", location);
+                // Redirect following would require a new tracker and request, but
+                // recursive async fn is not allowed. Return a protocol error so the
+                // caller can handle the redirect (TODO: non-recursive follow).
+                Err(Error::new(ErrorKind::TrackerProtocolError))
+            }
             "200" => AnnounceResponse::from_bencode(body),
             _ => Err(Error::new(ErrorKind::TrackerRequestFailed)),
         }

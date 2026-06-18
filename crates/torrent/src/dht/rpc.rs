@@ -99,7 +99,10 @@ impl DhtRpc {
                 self.pending.lock().unwrap().remove(&tid);
                 Error::new(ErrorKind::Protocol)
             })?
-            .map_err(|_| Error::new(ErrorKind::Protocol))
+            .map_err(|_| {
+                self.pending.lock().unwrap().remove(&tid);
+                Error::new(ErrorKind::Protocol)
+            })
     }
 
     /// Ping a node to check if it's alive.
@@ -117,7 +120,10 @@ impl DhtRpc {
             loop {
                 let (len, src_addr) = match self.socket.recv_from(&mut buf).await {
                     Ok(r) => r,
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::warn!("DHT recv error: {e}");
+                        continue;
+                    }
                 };
 
                 let msg = match KrpcMessage::from_bytes(&buf[..len]) {
