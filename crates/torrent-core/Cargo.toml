@@ -12,7 +12,7 @@ categories = ["network-programming", "parsing"]
 readme = "README.md"
 
 [features]
-serde = ["dep:serde"]
+serde = ["bytes/serde", "dep:serde"]
 
 [dependencies]
 bytes.workspace = true

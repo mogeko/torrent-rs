@@ -54,15 +54,12 @@ pub struct SessionConfig {
     ///
     /// If a peer does not deliver the requested block within this
     /// duration, the request is cancelled and re-assigned.
-    #[cfg_attr(feature = "serde", serde(with = "serde_duration"))]
     pub request_timeout: Duration,
     /// Per-peer TCP connection timeout.
-    #[cfg_attr(feature = "serde", serde(with = "serde_duration"))]
     pub peer_connect_timeout: Duration,
     /// Maximum connection retries per peer before discarding.
     pub peer_max_retries: u32,
     /// Cooldown before reconnecting a failed peer.
-    #[cfg_attr(feature = "serde", serde(with = "serde_duration"))]
     pub peer_cooldown: Duration,
 
     // ── DHT ──
@@ -76,29 +73,6 @@ pub struct SessionConfig {
     /// each session. Set this to a persisted value to keep a stable identity
     /// across restarts (BEP 5 recommends persisting the node ID).
     pub node_id: Option<[u8; 20]>,
-}
-
-/// Custom serde module for `Duration` — serializes as f64 seconds.
-#[cfg(feature = "serde")]
-mod serde_duration {
-    use std::time::Duration;
-
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub(super) fn serialize<S>(d: &Duration, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        s.serialize_f64(d.as_secs_f64())
-    }
-
-    pub(super) fn deserialize<'de, D>(d: D) -> Result<Duration, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let secs = f64::deserialize(d)?;
-        Ok(Duration::from_secs_f64(secs))
-    }
 }
 
 impl Default for SessionConfig {
@@ -126,6 +100,7 @@ impl Default for SessionConfig {
 
 /// Status of a torrent, exposed via the public API.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TorrentStatus {
     /// The 20-byte info hash.
     pub info_hash: InfoHash,
@@ -147,6 +122,7 @@ pub struct TorrentStatus {
 
 /// Possible states of a torrent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TorrentState {
     /// Waiting to start.
     Queued,
@@ -165,72 +141,6 @@ mod serde_tests {
     use std::time::Duration;
 
     use super::*;
-
-    /// Wrapper to exercise `serde_duration` on a standalone Duration.
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct DurationWrapper {
-        #[serde(with = "serde_duration")]
-        value: Duration,
-    }
-
-    // ── serde_duration ────────────────────────────────────────
-
-    #[test]
-    fn duration_serialize_zero() {
-        let w = DurationWrapper {
-            value: Duration::ZERO,
-        };
-        let json = serde_json::to_string(&w).unwrap();
-        assert_eq!(json, r#"{"value":0.0}"#);
-    }
-
-    #[test]
-    fn duration_serialize_one_second() {
-        let w = DurationWrapper {
-            value: Duration::from_secs(1),
-        };
-        let json = serde_json::to_string(&w).unwrap();
-        assert_eq!(json, r#"{"value":1.0}"#);
-    }
-
-    #[test]
-    fn duration_serialize_millis() {
-        let w = DurationWrapper {
-            value: Duration::from_millis(500),
-        };
-        let json = serde_json::to_string(&w).unwrap();
-        assert_eq!(json, r#"{"value":0.5}"#);
-    }
-
-    #[test]
-    fn duration_deserialize_one_second() {
-        let w: DurationWrapper = serde_json::from_str(r#"{"value":1.0}"#).unwrap();
-        assert_eq!(w.value, Duration::from_secs(1));
-    }
-
-    #[test]
-    fn duration_deserialize_millis() {
-        let w: DurationWrapper = serde_json::from_str(r#"{"value":0.5}"#).unwrap();
-        assert_eq!(w.value, Duration::from_millis(500));
-    }
-
-    #[test]
-    fn duration_roundtrip() {
-        let values = [
-            Duration::ZERO,
-            Duration::from_millis(1),
-            Duration::from_millis(500),
-            Duration::from_secs(1),
-            Duration::from_secs(60),
-            Duration::from_secs(3600),
-        ];
-        for &v in &values {
-            let w = DurationWrapper { value: v };
-            let json = serde_json::to_string(&w).unwrap();
-            let back: DurationWrapper = serde_json::from_str(&json).unwrap();
-            assert_eq!(back.value, v, "roundtrip failed for {v:?}");
-        }
-    }
 
     // ── SessionConfig ─────────────────────────────────────────
 
@@ -291,12 +201,51 @@ mod serde_tests {
     }
 
     #[test]
-    fn session_config_duration_fields_are_f64() {
+    fn session_config_duration_fields_use_default_serde() {
         let config = SessionConfig::default();
         let json = serde_json::to_value(&config).unwrap();
-        // Duration fields should serialize as f64, not as {secs, nanos}
-        assert!(json["request_timeout"].is_f64());
-        assert!(json["peer_connect_timeout"].is_f64());
-        assert!(json["peer_cooldown"].is_f64());
+        // serde's default Duration format: {"secs": N, "nanos": N}
+        assert!(json["request_timeout"].is_object());
+        assert_eq!(json["request_timeout"]["secs"], 60);
+        assert_eq!(json["peer_connect_timeout"]["nanos"], 500_000_000);
+    }
+
+    // ── TorrentStatus / TorrentState ───────────────────────────
+
+    #[test]
+    fn torrent_status_serialize() {
+        let status = TorrentStatus {
+            info_hash: [0x42; 20],
+            name: "test.iso".into(),
+            progress: 0.75,
+            download_rate: 1_048_576.0,
+            upload_rate: 512_000.0,
+            num_peers: 12,
+            num_seeds: 3,
+            state: TorrentState::Downloading,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "test.iso");
+        assert!((v["progress"].as_f64().unwrap() - 0.75).abs() < 0.001);
+        assert_eq!(v["num_peers"], 12);
+        assert_eq!(v["num_seeds"], 3);
+        assert_eq!(v["state"], "Downloading");
+    }
+
+    #[test]
+    fn torrent_state_roundtrip() {
+        let states = [
+            TorrentState::Queued,
+            TorrentState::Downloading,
+            TorrentState::Seeding,
+            TorrentState::Paused,
+            TorrentState::Error,
+        ];
+        for &state in &states {
+            let json = serde_json::to_string(&state).unwrap();
+            let back: TorrentState = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, state);
+        }
     }
 }

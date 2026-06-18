@@ -53,6 +53,7 @@ use crate::error::Error;
 /// println!("Announce: {}", meta.announce);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Metainfo {
     /// The URL of the tracker.
     pub announce: String,
@@ -76,6 +77,7 @@ pub struct Metainfo {
 /// computes SHA-1 from them. From a magnet URI we only have the hash itself
 /// (`Hash`) — see BEP 9.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RawInfo {
     /// Full bencoded info dict bytes (from a `.torrent` file).
     Bytes(Bytes),
@@ -85,6 +87,7 @@ pub enum RawInfo {
 
 /// The `info` dictionary from a `.torrent` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Info {
     /// Length of each piece in bytes.
     pub piece_length: u64,
@@ -98,6 +101,7 @@ pub struct Info {
 
 /// File layout mode for a torrent.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Mode {
     /// Single file mode: just one file.
     Single {
@@ -117,6 +121,7 @@ pub enum Mode {
 
 /// A single file entry in a multi-file torrent (BEP 52).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FileInfo {
     /// File length in bytes.
     pub length: u64,
@@ -448,5 +453,120 @@ mod tests {
         let re_parsed = Metainfo::try_from(&re_encoded).unwrap();
         assert_eq!(re_parsed.comment.as_deref(), Some("test"));
         assert_eq!(re_parsed.created_by.as_deref(), Some("tool"));
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn metainfo_roundtrip_single_file() {
+        let raw = RawInfo::Bytes(Bytes::from_static(b"d4:infod...e"));
+        let info = Info {
+            piece_length: 262144,
+            pieces: vec![[0x42u8; 20]],
+            mode: Mode::Single {
+                name: "test.txt".into(),
+                length: 1024,
+            },
+            raw_info: raw,
+        };
+        let meta = Metainfo {
+            announce: "http://tracker.example.com/announce".into(),
+            announce_list: vec![vec!["http://t2.com/ann".into()]],
+            info,
+            creation_date: Some(1672531200),
+            comment: Some("test torrent".into()),
+            created_by: Some("torrent-rs".into()),
+            encoding: Some("UTF-8".into()),
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: Metainfo = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.announce, meta.announce);
+        assert_eq!(back.announce_list, meta.announce_list);
+        assert_eq!(back.info.piece_length, meta.info.piece_length);
+        assert_eq!(back.info.pieces, meta.info.pieces);
+        assert_eq!(back.creation_date, meta.creation_date);
+        assert_eq!(back.comment.as_deref(), Some("test torrent"));
+        assert_eq!(back.created_by.as_deref(), Some("torrent-rs"));
+        assert_eq!(back.encoding.as_deref(), Some("UTF-8"));
+    }
+
+    #[test]
+    fn metainfo_roundtrip_multi_file() {
+        let info = Info {
+            piece_length: 65536,
+            pieces: vec![[0u8; 20]],
+            mode: Mode::Multiple {
+                name: "my_data".into(),
+                files: vec![
+                    FileInfo {
+                        length: 100,
+                        path: vec!["dir".into(), "a.txt".into()],
+                    },
+                    FileInfo {
+                        length: 200,
+                        path: vec!["dir".into(), "b.txt".into()],
+                    },
+                ],
+            },
+            raw_info: RawInfo::Hash([0xAB; 20]),
+        };
+        let meta = Metainfo {
+            announce: "http://t.com/a".into(),
+            announce_list: vec![],
+            info,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: Metainfo = serde_json::from_str(&json).unwrap();
+
+        match &back.info.mode {
+            Mode::Multiple { name, files } => {
+                assert_eq!(name, "my_data");
+                assert_eq!(files.len(), 2);
+                assert_eq!(files[0].length, 100);
+                assert_eq!(files[0].path, vec!["dir", "a.txt"]);
+                assert_eq!(files[1].length, 200);
+                assert_eq!(files[1].path, vec!["dir", "b.txt"]);
+            }
+            _ => panic!("expected Multiple mode"),
+        }
+    }
+
+    #[test]
+    fn magnet_origin_roundtrip() {
+        // Simulates a Metainfo created from a magnet URI (minimal fields)
+        let meta = Metainfo {
+            announce: String::new(),
+            announce_list: vec![],
+            info: Info {
+                piece_length: 0,
+                pieces: vec![],
+                mode: Mode::Single {
+                    name: "magnet-origin".into(),
+                    length: 0,
+                },
+                raw_info: RawInfo::Hash([0x11; 20]),
+            },
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: Metainfo = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.info_hash(), meta.info_hash());
+        assert_eq!(back.announce, "");
+        assert_eq!(back.announce_list.len(), 0);
     }
 }
