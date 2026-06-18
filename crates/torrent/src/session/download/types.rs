@@ -43,8 +43,10 @@ pub(crate) struct PeerInfo {
     pub(super) am_interested: bool,
     /// This peer has sent Interested to us.
     pub(super) peer_interested: bool,
-    /// Bytes uploaded to this peer.
+    /// Bytes uploaded to this peer (cumulative).
     pub(super) uploaded_bytes: u64,
+    /// Bytes uploaded during the current choke round.
+    pub(super) uploaded_this_round: u64,
     /// Bytes downloaded from this peer.
     pub(super) downloaded_bytes: u64,
 }
@@ -58,6 +60,7 @@ impl PeerInfo {
             am_interested: false,
             peer_interested: false,
             uploaded_bytes: 0,
+            uploaded_this_round: 0,
             downloaded_bytes: 0,
         }
     }

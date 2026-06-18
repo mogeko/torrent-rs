@@ -67,7 +67,8 @@ pub(crate) struct DownloadLoop {
     /// Previous uploaded count for rate calc.
     pub(crate) last_uploaded: u64,
     /// Cached completed pieces for upload serving (avoid repeated disk reads).
-    pub(crate) piece_cache: HashMap<u32, Arc<Vec<u8>>>,
+    /// Ordered by insertion time — oldest first for LRU eviction.
+    pub(crate) piece_cache: Vec<(u32, Arc<Vec<u8>>)>,
 }
 
 impl DownloadLoop {

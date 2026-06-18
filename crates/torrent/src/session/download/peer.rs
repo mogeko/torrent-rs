@@ -131,28 +131,31 @@ impl DownloadLoop {
                     return Ok(());
                 }
 
-                let piece_data = if let Some(cached) = self.piece_cache.get(&index) {
-                    Arc::clone(cached)
-                } else {
-                    let piece_len = self.piece_len_for_index(index) as usize;
-                    let mut piece_buf = vec![0u8; piece_len];
-                    self.storage.read_piece(index, &mut piece_buf).await?;
-                    Arc::new(piece_buf)
-                };
+                let block_data =
+                    if let Some(cached) = self.piece_cache.iter().find(|(i, _)| *i == index) {
+                        let start = begin as usize;
+                        let end = (start + length as usize).min(cached.1.len());
+                        cached.1[start..end].to_vec()
+                    } else {
+                        let mut block_buf = vec![0u8; length as usize];
+                        self.storage
+                            .read_block(index, begin, &mut block_buf)
+                            .await?;
+                        block_buf
+                    };
 
-                let start = begin as usize;
-                let end = (start + length as usize).min(piece_data.len());
-                if start < end {
-                    let block_data = piece_data[start..end].to_vec();
+                if !block_data.is_empty() {
+                    let uploaded = block_data.len() as u64;
                     let msg = PeerMessage::Piece {
                         index,
                         begin,
                         data: block_data,
                     };
                     self.peer_mgr.read().await.send_to(&addr, &msg).await?;
-                    self.total_uploaded += (end - start) as u64;
+                    self.total_uploaded += uploaded;
                     if let Some(p) = self.peers.get_mut(&addr) {
-                        p.uploaded_bytes += (end - start) as u64;
+                        p.uploaded_bytes += uploaded;
+                        p.uploaded_this_round += uploaded;
                     }
                 }
             }

@@ -98,7 +98,7 @@ impl TorrentHandle {
             total_uploaded: 0,
             last_downloaded: 0,
             last_uploaded: 0,
-            piece_cache: HashMap::new(),
+            piece_cache: Vec::new(),
         };
 
         let task = tokio::spawn(async move {

@@ -139,6 +139,23 @@ impl FileStorage {
         }
     }
 
+    /// Read a block (partial piece) without reading the entire piece.
+    ///
+    /// Significantly reduces I/O for upload serving: reads only the
+    /// requested 16 KB block instead of the entire piece (up to 4 MB+).
+    pub(crate) async fn read_block(
+        &self, piece: u32, offset: u32, buf: &mut [u8],
+    ) -> Result<(), Error> {
+        tracing::trace!(
+            "reading block: piece {} offset {} ({} bytes)",
+            piece,
+            offset,
+            buf.len()
+        );
+        let global_offset = self.piece_offset(piece) + offset as u64;
+        self.read_range(global_offset, buf.len(), buf).await
+    }
+
     /// Read a byte range from the file(s).
     ///
     /// Uses `tokio::task::spawn_blocking` to keep POSIX `pread` syscalls

@@ -200,12 +200,10 @@ impl DownloadLoop {
                 pm.set_piece(index);
             }
             if self.piece_cache.len() >= PIECE_CACHE_SIZE {
-                let oldest = self.piece_cache.keys().next().copied();
-                if let Some(old) = oldest {
-                    self.piece_cache.remove(&old);
-                }
+                // LRU eviction: remove oldest (first inserted)
+                self.piece_cache.remove(0);
             }
-            self.piece_cache.insert(index, Arc::new(data));
+            self.piece_cache.push((index, Arc::new(data)));
             self.active_downloads.remove(&index);
             Ok(true)
         } else {

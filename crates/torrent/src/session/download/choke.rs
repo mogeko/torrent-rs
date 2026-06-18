@@ -19,10 +19,11 @@ impl DownloadLoop {
             return Ok(());
         }
 
+        // Sort by upload rate this round (sliding window, not cumulative)
         let mut peer_stats: Vec<(SocketAddr, u64)> = self
             .peers
             .iter()
-            .map(|(addr, info)| (*addr, info.uploaded_bytes))
+            .map(|(addr, info)| (*addr, info.uploaded_this_round))
             .collect();
 
         peer_stats.sort_by_key(|(_, u)| std::cmp::Reverse(*u));
@@ -58,9 +59,39 @@ impl DownloadLoop {
         let previously_unchoked: Vec<SocketAddr> = um.unchoked_peers().copied().collect();
         for addr in previously_unchoked {
             if !to_unchoke.contains(&addr) {
+                // Cancel outstanding requests before choking
+                if let Some(peer) = self.peers.get(&addr) {
+                    for (index, begin, _) in peer.pipeline.iter().flatten() {
+                        let msg = PeerMessage::Cancel {
+                            index: *index,
+                            begin: *begin,
+                            length: 0,
+                        };
+                        let _ = pm.send_to(&addr, &msg).await;
+                    }
+                }
+                // Clear pipeline for this peer
+                if let Some(peer) = self.peers.get_mut(&addr) {
+                    for slot in &mut peer.pipeline {
+                        if let Some((index, begin, _)) = *slot {
+                            if let Some(dl) = self.active_downloads.get_mut(&index) {
+                                let block_idx = (begin / dl.block_size) as usize;
+                                if block_idx < dl.requested.len() {
+                                    dl.requested[block_idx] = None;
+                                }
+                            }
+                        }
+                        *slot = None;
+                    }
+                }
                 um.choke(&addr);
                 let _ = pm.send_to(&addr, &PeerMessage::Choke).await;
             }
+        }
+
+        // Reset per-round upload counters
+        for info in self.peers.values_mut() {
+            info.uploaded_this_round = 0;
         }
 
         Ok(())
