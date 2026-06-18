@@ -32,12 +32,6 @@ pub struct PeerConnection {
     writer: Mutex<BufWriter<OwnedWriteHalf>>,
     /// Current protocol state.
     state: PeerState,
-    /// Info hash expected for this connection.
-    #[allow(dead_code)]
-    info_hash: [u8; 20],
-    /// Our peer ID.
-    #[allow(dead_code)]
-    our_peer_id: PeerId,
     /// The remote peer's ID (set after handshake).
     remote_peer_id: Option<PeerId>,
 }
@@ -97,8 +91,6 @@ impl PeerConnection {
             reader: Mutex::new(BufReader::new(read_half)),
             writer: Mutex::new(BufWriter::new(write_half)),
             state: PeerState::Init,
-            info_hash,
-            our_peer_id,
             remote_peer_id: Some(PeerId(remote_handshake.peer_id)),
         })
     }
@@ -132,7 +124,7 @@ impl PeerConnection {
 
         // Read 4-byte length prefix with timeout
         let mut len_buf = [0u8; 4];
-        tokio::time::timeout(MESSAGE_READ_TIMEOUT, read_exact(&mut reader, &mut len_buf))
+        tokio::time::timeout(MESSAGE_READ_TIMEOUT, reader.read_exact(&mut len_buf))
             .await
             .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
             .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
@@ -152,7 +144,7 @@ impl PeerConnection {
 
         // Read the rest: message id + payload with timeout
         let mut msg_buf = vec![0u8; len as usize];
-        tokio::time::timeout(MESSAGE_READ_TIMEOUT, read_exact(&mut reader, &mut msg_buf))
+        tokio::time::timeout(MESSAGE_READ_TIMEOUT, reader.read_exact(&mut msg_buf))
             .await
             .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
             .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
@@ -178,13 +170,4 @@ impl PeerConnection {
     pub fn remote_peer_id(&self) -> Option<PeerId> {
         self.remote_peer_id
     }
-}
-
-/// Read exactly `n` bytes from the buffered read half.
-async fn read_exact(reader: &mut BufReader<OwnedReadHalf>, buf: &mut [u8]) -> Result<(), Error> {
-    if let Err(e) = reader.read_exact(buf).await {
-        return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
-    }
-
-    Ok(())
 }
