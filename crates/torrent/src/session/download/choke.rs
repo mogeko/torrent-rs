@@ -20,11 +20,12 @@ impl DownloadLoop {
             return Ok(());
         }
 
-        // Sort by upload rate this round (sliding window, not cumulative)
+        // Tit-for-tat (BEP 3): unchoke peers that upload the most TO us.
+        // Use downloaded_this_round (bytes peer → us) in this round.
         let mut peer_stats: Vec<(SocketAddr, u64)> = self
             .peers
             .iter()
-            .map(|(addr, info)| (*addr, info.uploaded_this_round))
+            .map(|(addr, info)| (*addr, info.downloaded_this_round))
             .collect();
 
         peer_stats.sort_by_key(|(_, u)| std::cmp::Reverse(*u));
@@ -44,12 +45,17 @@ impl DownloadLoop {
         let snub_timeout = Duration::from_secs(60);
         to_unchoke.retain(|addr| {
             self.peers.get(addr).is_none_or(|p| {
+                // Snub peers that haven't sent data in >60s.
+                // Never-sent peers (last_data_received = None) are also snubbed.
                 p.last_data_received
-                    .is_none_or(|t| t.elapsed() < snub_timeout)
+                    .is_some_and(|t| t.elapsed() < snub_timeout)
             })
         });
 
-        for addr in self.peers.keys() {
+        // Fill remaining slots with next-best uploaders (not yet in to_unchoke).
+        // This preserves the snubbing filter above by only adding peers from
+        // the rate-sorted list, not all connected peers unconditionally.
+        for (addr, _) in &peer_stats {
             if to_unchoke.len() >= max_uploads as usize {
                 break;
             }
@@ -99,9 +105,10 @@ impl DownloadLoop {
             }
         }
 
-        // Reset per-round upload counters
+        // Reset per-round counters
         for info in self.peers.values_mut() {
             info.uploaded_this_round = 0;
+            info.downloaded_this_round = 0;
         }
 
         Ok(())

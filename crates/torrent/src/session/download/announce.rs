@@ -45,14 +45,10 @@ impl DownloadLoop {
             None => return Ok(()),
         };
 
-        let (downloaded, left) = {
-            let pm = self.piece_mgr.read().await;
-            let have = pm.completed_pieces().len() as u64;
-            let piece_len = self.metainfo.info.piece_length;
+        let downloaded = self.total_downloaded;
+        let left = {
             let total_size = self.metainfo.info.total_size();
-            let d = have * piece_len;
-            let l = total_size.saturating_sub(d);
-            (d, l)
+            total_size.saturating_sub(self.total_downloaded)
         };
 
         let mut req = AnnounceRequest::new(self.info_hash, self.peer_id, self.listen_port);

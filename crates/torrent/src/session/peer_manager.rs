@@ -26,7 +26,7 @@ struct BackoffState {
 impl BackoffState {
     fn new() -> Self {
         BackoffState {
-            attempts: 1,
+            attempts: 0,
             cooldown_until: Instant::now() + PEER_COOLDOWN,
         }
     }
@@ -92,6 +92,7 @@ impl PeerManager {
     pub fn remove_peer(&mut self, addr: &SocketAddr) {
         tracing::debug!("peer disconnected: {}", addr);
         self.connections.remove(addr);
+        self.backoff.remove(addr);
     }
 
     /// Get the number of active connections.

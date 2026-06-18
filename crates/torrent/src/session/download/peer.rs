@@ -102,7 +102,9 @@ impl DownloadLoop {
                 self.storage.write_block(index, begin, &data).await?;
                 self.total_downloaded += data.len() as u64;
                 if let Some(p) = self.peers.get_mut(&addr) {
-                    p.downloaded_bytes += data.len() as u64;
+                    let len = data.len() as u64;
+                    p.downloaded_bytes += len;
+                    p.downloaded_this_round += len;
                     p.last_data_received = Some(Instant::now());
                 }
 

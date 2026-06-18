@@ -47,8 +47,10 @@ pub(crate) struct PeerInfo {
     pub(super) uploaded_bytes: u64,
     /// Bytes uploaded during the current choke round.
     pub(super) uploaded_this_round: u64,
-    /// Bytes downloaded from this peer.
+    /// Bytes downloaded from this peer (cumulative).
     pub(super) downloaded_bytes: u64,
+    /// Bytes downloaded during the current choke round (tit-for-tat metric).
+    pub(super) downloaded_this_round: u64,
     /// Number of corrupt blocks received from this peer.
     pub(super) corrupt_blocks: u32,
     /// Last time we received a Piece message from this peer.
@@ -66,6 +68,7 @@ impl PeerInfo {
             uploaded_bytes: 0,
             uploaded_this_round: 0,
             downloaded_bytes: 0,
+            downloaded_this_round: 0,
             corrupt_blocks: 0,
             last_data_received: None,
         }

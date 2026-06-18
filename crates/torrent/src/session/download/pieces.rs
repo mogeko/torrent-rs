@@ -40,11 +40,10 @@ impl DownloadLoop {
         };
 
         let missing_count = our_bf.iter().filter(|&&b| !b).count();
-        if missing_count < ENDGAME_THRESHOLD {
+        let in_endgame = missing_count > 0 && missing_count < ENDGAME_THRESHOLD;
+        if in_endgame {
             self.selector = Box::new(EndGame);
         }
-
-        let in_endgame = missing_count < ENDGAME_THRESHOLD;
 
         let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
         for addr in peer_addrs {
@@ -185,17 +184,23 @@ impl DownloadLoop {
     pub(super) async fn verify_and_complete_piece(&mut self, index: u32) -> Result<bool, Error> {
         let piece_len = self.piece_len_for_index(index) as usize;
 
-        let data = match self.active_downloads.get(&index) {
-            Some(dl) => dl.data[..piece_len].to_vec(),
-            None => return Ok(false),
-        };
-
         let expected = match self.metainfo.info.pieces.get(index as usize) {
             Some(h) => *h,
             None => return Ok(false),
         };
 
-        if verify_piece_hash(&data, expected) {
+        // Verify hash via reference (avoids unnecessary piece-sized allocation).
+        let hash_ok = match self.active_downloads.get(&index) {
+            Some(dl) => verify_piece_hash(&dl.data[..piece_len], expected),
+            None => return Ok(false),
+        };
+
+        if hash_ok {
+            // Clone piece data for caching (only on success).
+            let data = match self.active_downloads.get(&index) {
+                Some(dl) => dl.data[..piece_len].to_vec(),
+                None => return Ok(false),
+            };
             {
                 let mut pm = self.piece_mgr.write().await;
                 pm.set_piece(index);
@@ -208,7 +213,10 @@ impl DownloadLoop {
             self.active_downloads.remove(&index);
             Ok(true)
         } else {
-            // Corrupt piece: penalize peers that contributed blocks
+            // Corrupt piece: penalize peers that contributed blocks.
+            // Since SHA-1 is per-piece, we can't identify which specific
+            // block(s) failed. Each contributing peer gets one strike.
+            // Ban threshold is 10 to tolerate false positives in EndGame.
             let mut penalized: HashSet<SocketAddr> = HashSet::new();
             if let Some(dl) = self.active_downloads.get(&index) {
                 for addr in dl.requested.iter().flatten() {
@@ -216,7 +224,7 @@ impl DownloadLoop {
                         if let Some(peer) = self.peers.get_mut(addr) {
                             peer.corrupt_blocks += 1;
                             tracing::warn!(
-                                "peer {} sent corrupt data ({} corrupt blocks)",
+                                "peer {} sent corrupt data ({} strikes)",
                                 addr,
                                 peer.corrupt_blocks
                             );
@@ -224,10 +232,10 @@ impl DownloadLoop {
                     }
                 }
             }
-            // Disconnect peers with too many corrupt blocks
+            // Ban peers with repeated corrupt data.
             let mut ban: Vec<SocketAddr> = Vec::new();
             for (addr, peer) in &self.peers {
-                if peer.corrupt_blocks >= 3 {
+                if peer.corrupt_blocks >= 10 {
                     ban.push(*addr);
                 }
             }
