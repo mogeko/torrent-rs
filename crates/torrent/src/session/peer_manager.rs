@@ -3,8 +3,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Mutex;
-
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerId, PeerMessage};
 
@@ -43,8 +41,8 @@ pub(crate) struct PeerManager {
     peer_id: PeerId,
     /// Info hash of the torrent.
     info_hash: [u8; 20],
-    /// Active connections by remote address (behind Mutex for interior mutability).
-    connections: HashMap<SocketAddr, Arc<Mutex<PeerConnection>>>,
+    /// Active connections by remote address.
+    connections: HashMap<SocketAddr, Arc<PeerConnection>>,
     /// Pending connection attempts (O(1) contains via internal HashSet).
     pending: UniDeque<SocketAddr>,
     /// Maximum connections.
@@ -81,8 +79,7 @@ impl PeerManager {
     /// Send a message to a specific peer.
     pub async fn send_to(&self, addr: &SocketAddr, msg: &PeerMessage) -> Result<(), Error> {
         if let Some(conn) = self.connections.get(addr) {
-            let mut guard = conn.lock().await;
-            guard.send(msg).await
+            conn.send(msg).await
         } else {
             Ok(())
         }
@@ -151,7 +148,7 @@ impl PeerManager {
             match handle.await {
                 Ok((addr, Ok(conn))) => {
                     tracing::info!("peer connected: {}", addr);
-                    self.connections.insert(addr, Arc::new(Mutex::new(conn)));
+                    self.connections.insert(addr, Arc::new(conn));
                     self.backoff.remove(&addr); // clear backoff on success
                     connected.push(addr);
                 }
@@ -187,7 +184,7 @@ impl PeerManager {
     }
 
     /// Get a clone of the connection Arc for a peer.
-    pub fn connection(&self, addr: &SocketAddr) -> Option<Arc<Mutex<PeerConnection>>> {
+    pub fn connection(&self, addr: &SocketAddr) -> Option<Arc<PeerConnection>> {
         self.connections.get(addr).cloned()
     }
 

@@ -2,8 +2,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::Mutex;
-
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerMessage};
 use crate::storage::Storage;
@@ -182,14 +180,11 @@ impl DownloadLoop {
 
     /// Spawn a tokio task that loops `recv()` on a peer connection
     /// and sends messages to the download loop via the channel.
-    pub(super) fn spawn_peer_reader(&self, addr: SocketAddr, conn_arc: Arc<Mutex<PeerConnection>>) {
+    pub(super) fn spawn_peer_reader(&self, addr: SocketAddr, conn_arc: Arc<PeerConnection>) {
         let tx = self.peer_msg_tx.clone();
         tokio::spawn(async move {
             loop {
-                let msg_result = {
-                    let mut conn = conn_arc.lock().await;
-                    conn.recv().await
-                };
+                let msg_result = conn_arc.recv().await;
                 match msg_result {
                     Ok(msg) => {
                         if tx.send((addr, PeerEvent::Message(msg))).await.is_err() {

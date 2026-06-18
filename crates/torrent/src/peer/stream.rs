@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::Mutex;
 
 use crate::error::{Error, ErrorKind};
 
@@ -17,9 +19,18 @@ const MESSAGE_READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// Timeout for flushing data to a peer.
 const MESSAGE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A managed peer connection with buffered message I/O.
+/// A managed peer connection with independent read/write halves.
+///
+/// Uses [`OwnedReadHalf`] + [`OwnedWriteHalf`] behind separate [`Mutex`] guards
+/// so that the reader task (recv) and the download loop (send) never contend
+/// for the same lock. This is essential for BitTorrent's full-duplex wire protocol
+/// where requests and piece data flow in both directions concurrently.
 pub struct PeerConnection {
-    stream: BufReader<BufWriter<TcpStream>>,
+    /// Buffered read half (owned, behind Mutex for concurrent access).
+    reader: Mutex<BufReader<OwnedReadHalf>>,
+    /// Buffered write half (owned, behind Mutex for concurrent access).
+    writer: Mutex<BufWriter<OwnedWriteHalf>>,
+    /// Current protocol state.
     state: PeerState,
     /// Info hash expected for this connection.
     #[allow(dead_code)]
@@ -45,32 +56,25 @@ impl PeerConnection {
                 _ => return Err(Error::new(ErrorKind::PeerConnectionClosed)),
             };
 
-        let stream = BufReader::new(BufWriter::new(raw_stream));
-
-        let mut conn = PeerConnection {
-            stream,
-            state: PeerState::Handshake,
-            info_hash,
-            our_peer_id,
-            remote_peer_id: None,
-        };
+        // Use a combined BufReader<BufWriter<TcpStream>> for the handshake phase.
+        let mut stream = BufReader::new(BufWriter::new(raw_stream));
 
         // Send our handshake
         let handshake = Handshake::new(info_hash, our_peer_id.0);
         let handshake_bytes = handshake.to_bytes();
 
-        if let Err(e) = conn.stream.get_mut().write_all(&handshake_bytes).await {
+        if let Err(e) = stream.get_mut().write_all(&handshake_bytes).await {
             return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
         }
 
-        if let Err(e) = conn.stream.get_mut().flush().await {
+        if let Err(e) = stream.get_mut().flush().await {
             return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
         }
 
         // Read remote handshake with timeout
         let mut buf = [0u8; 68];
-        match tokio::time::timeout(HANDSHAKE_TIMEOUT, read_exact(&mut conn, &mut buf)).await {
-            Ok(Ok(())) => {}
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut buf)).await {
+            Ok(Ok(_n)) => {}
             _ => return Err(Error::new(ErrorKind::PeerConnectionClosed)),
         };
         let remote_handshake = Handshake::from_bytes(&buf)?;
@@ -80,28 +84,37 @@ impl PeerConnection {
             return Err(Error::new(ErrorKind::PeerInvalidHandshake));
         }
 
-        conn.remote_peer_id = Some(PeerId(remote_handshake.peer_id));
-        conn.state = PeerState::Init;
+        // Split into independent read/write halves so that recv and send
+        // can proceed concurrently without lock contention.
+        let inner = stream.into_inner().into_inner();
+        let (read_half, write_half) = inner.into_split();
 
         tracing::info!("handshake complete with {}", addr);
 
-        Ok(conn)
+        Ok(PeerConnection {
+            reader: Mutex::new(BufReader::new(read_half)),
+            writer: Mutex::new(BufWriter::new(write_half)),
+            state: PeerState::Init,
+            info_hash,
+            our_peer_id,
+            remote_peer_id: Some(PeerId(remote_handshake.peer_id)),
+        })
     }
 
     /// Send a message to the peer.
-    pub async fn send(&mut self, msg: &PeerMessage) -> Result<(), Error> {
+    ///
+    /// Locks the write half only — does not block concurrent reads.
+    pub async fn send(&self, msg: &PeerMessage) -> Result<(), Error> {
         tracing::trace!("sending {:?} to peer", msg);
         let data = encode(msg);
+        let mut writer = self.writer.lock().await;
 
-        tokio::time::timeout(
-            MESSAGE_WRITE_TIMEOUT,
-            self.stream.get_mut().write_all(&data),
-        )
-        .await
-        .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
-        .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+        tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, writer.write_all(&data))
+            .await
+            .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
 
-        tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, self.stream.get_mut().flush())
+        tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, writer.flush())
             .await
             .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
             .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
@@ -110,10 +123,14 @@ impl PeerConnection {
     }
 
     /// Receive the next message from the peer.
-    pub async fn recv(&mut self) -> Result<PeerMessage, Error> {
+    ///
+    /// Locks the read half only — does not block concurrent writes.
+    pub async fn recv(&self) -> Result<PeerMessage, Error> {
+        let mut reader = self.reader.lock().await;
+
         // Read 4-byte length prefix with timeout
         let mut len_buf = [0u8; 4];
-        tokio::time::timeout(MESSAGE_READ_TIMEOUT, read_exact(self, &mut len_buf))
+        tokio::time::timeout(MESSAGE_READ_TIMEOUT, read_exact(&mut reader, &mut len_buf))
             .await
             .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
             .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
@@ -133,7 +150,7 @@ impl PeerConnection {
 
         // Read the rest: message id + payload with timeout
         let mut msg_buf = vec![0u8; len as usize];
-        tokio::time::timeout(MESSAGE_READ_TIMEOUT, read_exact(self, &mut msg_buf))
+        tokio::time::timeout(MESSAGE_READ_TIMEOUT, read_exact(&mut reader, &mut msg_buf))
             .await
             .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
             .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
@@ -161,9 +178,9 @@ impl PeerConnection {
     }
 }
 
-/// Read exactly `n` bytes from the buffered stream.
-async fn read_exact(conn: &mut PeerConnection, buf: &mut [u8]) -> Result<(), Error> {
-    if let Err(e) = conn.stream.read_exact(buf).await {
+/// Read exactly `n` bytes from the buffered read half.
+async fn read_exact(reader: &mut BufReader<OwnedReadHalf>, buf: &mut [u8]) -> Result<(), Error> {
+    if let Err(e) = reader.read_exact(buf).await {
         return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
     }
 
