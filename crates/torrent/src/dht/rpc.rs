@@ -17,6 +17,9 @@ use crate::error::{Error, ErrorKind};
 
 use super::krpc::{KrpcMessage, TransactionId};
 
+/// Default timeout for DHT RPC calls.
+const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Callback type for handling incoming DHT queries.
 ///
 /// Receives the decoded [`KrpcMessage`] and the source address, returns
@@ -38,9 +41,6 @@ pub struct DhtRpc {
     query_handler: Mutex<Option<QueryHandler>>,
     timeout: Duration,
 }
-
-/// Default timeout for DHT RPC calls.
-const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl DhtRpc {
     /// Create a new DHT RPC client bound to a local address.

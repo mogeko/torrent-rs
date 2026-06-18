@@ -16,6 +16,9 @@ use std::net::SocketAddr;
 use rand::RngExt;
 use sha1::{Digest, Sha1};
 
+/// Number of buckets (160-bit address space).
+const NUM_BUCKETS: usize = 160;
+
 /// Represents a node in the DHT (BEP 5).
 ///
 /// Each node is identified by a 20-byte Node ID (typically a SHA-1 hash)
@@ -26,6 +29,44 @@ pub struct Node {
     pub id: [u8; 20],
     /// Socket address (IP + port).
     pub addr: SocketAddr,
+}
+
+/// A DHT bootstrap node address (BEP 5).
+///
+/// Represents a well-known DHT node used to join the DHT network.
+/// The hostname is resolved to a [`SocketAddr`] at connection time.
+///
+/// # Examples
+///
+/// ```
+/// use torrent_core::dht::BootstrapNode;
+///
+/// let node = BootstrapNode::from(("router.bittorrent.com", 6881));
+/// assert_eq!(node.host, "router.bittorrent.com");
+/// assert_eq!(node.port, 6881);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BootstrapNode {
+    /// Hostname of the bootstrap node.
+    pub host: String,
+    /// UDP port of the bootstrap node.
+    pub port: u16,
+}
+
+impl From<(String, u16)> for BootstrapNode {
+    fn from((host, port): (String, u16)) -> Self {
+        BootstrapNode { host, port }
+    }
+}
+
+impl From<(&str, u16)> for BootstrapNode {
+    fn from((host, port): (&str, u16)) -> Self {
+        BootstrapNode {
+            host: host.to_owned(),
+            port,
+        }
+    }
 }
 
 /// Kademlia routing table (BEP 5).
@@ -43,9 +84,6 @@ pub struct RoutingTable {
     /// K-buckets: 160 buckets, each with up to K nodes.
     buckets: Vec<KBucket>,
 }
-
-/// Number of buckets (160-bit address space).
-const NUM_BUCKETS: usize = 160;
 
 impl Default for RoutingTable {
     fn default() -> Self {

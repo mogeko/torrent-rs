@@ -1,5 +1,11 @@
 use crate::error::{Error, ErrorKind};
 
+/// BitTorrent protocol string (always "BitTorrent protocol").
+const PROTOCOL_STR: &[u8; 19] = b"BitTorrent protocol";
+
+/// Total size of a handshake message: 1 + 19 + 8 + 20 + 20 = 68.
+const HANDSHAKE_SIZE: usize = 68;
+
 /// BitTorrent protocol handshake (BEP 3).
 ///
 /// The handshake is a 68-byte message sent when a TCP connection is established:
@@ -38,12 +44,6 @@ pub struct Handshake {
     /// Reserved bytes for extension negotiation.
     pub reserved: [u8; 8],
 }
-
-/// BitTorrent protocol string (always "BitTorrent protocol").
-const PROTOCOL_STR: &[u8; 19] = b"BitTorrent protocol";
-
-/// Total size of a handshake message: 1 + 19 + 8 + 20 + 20 = 68.
-const HANDSHAKE_SIZE: usize = 68;
 
 impl Handshake {
     /// Create a new handshake with all extension bits cleared.
