@@ -1,5 +1,11 @@
 use crate::error::{Error, ErrorKind};
 
+/// BitTorrent protocol string (always "BitTorrent protocol").
+const PROTOCOL_STR: &[u8; 19] = b"BitTorrent protocol";
+
+/// Total size of a handshake message: 1 + 19 + 8 + 20 + 20 = 68.
+const HANDSHAKE_SIZE: usize = 68;
+
 /// BitTorrent protocol handshake (BEP 3).
 ///
 /// The handshake is a 68-byte message sent when a TCP connection is established:
@@ -25,9 +31,9 @@ use crate::error::{Error, ErrorKind};
 /// use torrent_core::peer::Handshake;
 ///
 /// let mut hs = Handshake::new([0u8; 20], [0u8; 20]);
-/// // Set the DHT bit (bit 43: byte 5, bit 4 from LSB)
-/// hs.reserved[5] = 0x10;
-/// assert!(hs.has_extension(43));
+/// // Set the DHT bit (bit 63: byte 7, LSB — BEP 5)
+/// hs.reserved[7] = 0x01;
+/// assert!(hs.has_extension(63));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handshake {
@@ -39,20 +45,33 @@ pub struct Handshake {
     pub reserved: [u8; 8],
 }
 
-/// BitTorrent protocol string (always "BitTorrent protocol").
-const PROTOCOL_STR: &[u8; 19] = b"BitTorrent protocol";
-
-/// Total size of a handshake message: 1 + 19 + 8 + 20 + 20 = 68.
-const HANDSHAKE_SIZE: usize = 68;
-
 impl Handshake {
-    /// Create a new handshake.
+    /// Create a new handshake with all extension bits cleared.
     pub fn new(info_hash: [u8; 20], peer_id: [u8; 20]) -> Self {
         Handshake {
             info_hash,
             peer_id,
             reserved: [0u8; 8],
         }
+    }
+
+    /// Create a new handshake with the given extension bits set.
+    ///
+    /// `extensions` should be a list of bit indices (BEP 3 numbering: bit 0 = MSB of byte 0).
+    /// Common extension bits:
+    /// - Bit 44: Fast Extension (BEP 6)
+    /// - Bit 63: DHT (BEP 5)
+    /// - Bit 63: Extension Protocol / LTEP (BEP 10) — note: reuses same bit as DHT
+    pub fn with_extensions(info_hash: [u8; 20], peer_id: [u8; 20], extensions: &[usize]) -> Self {
+        let mut hs = Handshake::new(info_hash, peer_id);
+        for &bit in extensions {
+            if bit < 64 {
+                let byte = bit / 8;
+                let bit_in_byte = 7 - (bit % 8);
+                hs.reserved[byte] |= 1 << bit_in_byte;
+            }
+        }
+        hs
     }
 
     /// Serialize the handshake to a 68-byte array.
@@ -102,12 +121,11 @@ impl Handshake {
 
     /// Check if a specific extension bit is set in the reserved bytes.
     ///
-    /// Bit numbering follows BEP conventions where bit 0 is the most significant
+    /// Bit numbering follows BEP 3 conventions where bit 0 is the most significant
     /// bit of byte 0. Common extensions:
     ///
-    /// - Bit 43 (byte 5, bit 3): DHT (BEP 5)
     /// - Bit 44 (byte 5, bit 4): Fast Extension (BEP 6)
-    /// - Bit 63 (byte 7, bit 7): Extension Protocol / LTEP (BEP 10)
+    /// - Bit 63 (byte 7, bit 7): DHT (BEP 5) and Extension Protocol / LTEP (BEP 10)
     pub fn has_extension(&self, bit: usize) -> bool {
         if bit >= 64 {
             return false;
@@ -118,7 +136,12 @@ impl Handshake {
     }
 
     /// Set a reserved byte directly (e.g., for BEP 10 extension protocol).
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `index >= 8`.
     pub fn set_reserved_byte(&mut self, index: usize, value: u8) {
+        debug_assert!(index < 8, "reserved byte index must be < 8, got {index}");
         if index < 8 {
             self.reserved[index] = value;
         }
@@ -184,13 +207,21 @@ mod tests {
         // bit 44 → byte 5, shift = 7 - (44%8) = 3
         hs.reserved[5] = 0x08;
         assert!(hs.has_extension(44));
-        // DHT bit (43) should not be set
-        assert!(!hs.has_extension(43));
+        // DHT/LTEP bit (63) should not be set
+        assert!(!hs.has_extension(63));
     }
 
     #[test]
     fn handshake_extension_out_of_range() {
         let hs = Handshake::new([1u8; 20], [2u8; 20]);
         assert!(!hs.has_extension(64));
+    }
+
+    #[test]
+    fn handshake_with_extensions() {
+        let hs = Handshake::with_extensions([0u8; 20], [0u8; 20], &[44, 63]);
+        assert!(hs.has_extension(44));
+        assert!(hs.has_extension(63));
+        assert!(!hs.has_extension(43));
     }
 }

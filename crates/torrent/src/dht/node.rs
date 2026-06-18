@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rand::RngExt;
+use sha1::{Digest, Sha1};
 use tokio::sync::Mutex;
 
 use crate::error::Error;
@@ -294,7 +295,6 @@ fn create_query_handler(node: Arc<DhtNode>) -> QueryHandler {
 /// The token is `SHA-1(secret || ip)[..4]` — simple, stateless,
 /// and bound to the requesting IP address.
 fn generate_token(secret: &[u8; 20], addr: &SocketAddr) -> Vec<u8> {
-    use sha1::{Digest, Sha1};
     let mut hasher = Sha1::new();
     hasher.update(secret);
     hasher.update(format!("{}", addr.ip()).as_bytes());

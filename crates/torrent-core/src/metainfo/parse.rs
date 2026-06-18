@@ -3,6 +3,51 @@ use crate::error::{Error, ErrorKind};
 
 use super::{FileInfo, Info, Metainfo, Mode, RawInfo};
 
+/// Find the raw bencoded bytes of the `info` dictionary value in the original
+/// `.torrent` data by scanning the top-level dict entries.
+///
+/// This is critical for `info_hash()` correctness: we must hash the exact bytes
+/// from the original file, not a re-encoded version (which may differ due to
+/// dict key sorting during decoding).
+fn find_raw_info_bytes(data: &[u8]) -> Result<&[u8], Error> {
+    // Data must start with 'd' (top-level dict)
+    if data.is_empty() || data[0] != b'd' {
+        return Err(Error::new(ErrorKind::MetainfoInvalidField));
+    }
+
+    let mut pos = 1; // skip 'd'
+    while pos < data.len() {
+        let remaining = &data[pos..];
+
+        // Decode a key (must be a byte string)
+        let (key, key_rest) = bencode::decode(remaining).map_err(|_| {
+            // If we can't decode the key, we've likely reached the end 'e'
+            Error::new(ErrorKind::MetainfoMissingField)
+        })?;
+        let key_consumed = remaining.len() - key_rest.len();
+        pos += key_consumed;
+
+        // Check if this is the "info" key
+        if let Bencode::Bytes(b) = &key {
+            if b.as_ref() == b"info" {
+                // Decode the value to find its exact byte range
+                let val_remaining = &data[pos..];
+                let (_, val_rest) = bencode::decode(val_remaining)?;
+                let val_consumed = val_remaining.len() - val_rest.len();
+                return Ok(&data[pos..pos + val_consumed]);
+            }
+        }
+
+        // Skip the value
+        let val_remaining = &data[pos..];
+        let (_, val_rest) = bencode::decode(val_remaining)?;
+        let val_consumed = val_remaining.len() - val_rest.len();
+        pos += val_consumed;
+    }
+
+    Err(Error::new(ErrorKind::MetainfoMissingField))
+}
+
 /// Parse a `Metainfo` from raw bencoded bytes (the contents of a `.torrent` file).
 ///
 /// Performs all required validation per BEP 3:
@@ -47,10 +92,10 @@ pub(crate) fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
     let info_val = dict_get(&val, b"info").ok_or(Error::new(ErrorKind::MetainfoMissingField))?;
 
     tracing::debug!("parsing info dict");
-    // Save the raw bytes of the info dict for info_hash calculation.
-    // We need to find the exact byte range in the original input.
-    // Re-encode it to get a canonical representation.
-    let info_bytes = Bytes::from(bencode::encode(info_val));
+    // Extract raw bytes of the info dict from the original input for correct info_hash.
+    // Re-encoding after decode may produce different bytes due to dict key sorting.
+    let raw_info_bytes = find_raw_info_bytes(data)?;
+    let info_bytes = Bytes::copy_from_slice(raw_info_bytes);
 
     let info = parse_info(info_val, info_bytes)?;
     tracing::debug!(

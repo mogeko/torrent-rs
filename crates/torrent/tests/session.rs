@@ -31,7 +31,7 @@ async fn session_config_defaults() {
     assert_eq!(cfg.listen_port, 6881);
     assert_eq!(cfg.max_connections, 50);
     assert_eq!(cfg.max_uploads, 8);
-    assert!(cfg.enable_dht);
+    assert!(cfg.bootstrap_nodes.is_some());
 }
 
 #[tokio::test]
@@ -39,7 +39,7 @@ async fn session_new_with_temp_dir() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
-        enable_dht: false,
+        bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -52,7 +52,7 @@ async fn add_torrent_bytes_and_query_status() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
-        enable_dht: false,
+        bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -80,7 +80,7 @@ async fn remove_torrent() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
-        enable_dht: false,
+        bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -104,7 +104,7 @@ async fn add_and_query_multiple_times() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
-        enable_dht: false,
+        bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -129,7 +129,7 @@ async fn add_magnet_str_minimal() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
-        enable_dht: false,
+        bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -155,7 +155,7 @@ async fn add_magnet_str_with_trackers() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
-        enable_dht: false,
+        bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -179,7 +179,7 @@ async fn add_magnet_str_invalid() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
-        enable_dht: false,
+        bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -196,7 +196,7 @@ async fn add_magnet_str_with_display_name() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
-        enable_dht: false,
+        bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
@@ -219,7 +219,7 @@ async fn magnet_via_add_torrent() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         download_dir: tmp.path().to_path_buf(),
-        enable_dht: false,
+        bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;

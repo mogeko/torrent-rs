@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Session ===");
     let config = SessionConfig {
         download_dir: PathBuf::from("/tmp/torrent-downloads"),
-        enable_dht: false, // Disable DHT for this example
+        bootstrap_nodes: None,
         ..Default::default()
     };
 

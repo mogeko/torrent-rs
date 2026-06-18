@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::net::{UdpSocket, lookup_host};
@@ -13,8 +14,8 @@ const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
 /// Per-request timeout (connect + announce).
 const TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Max retries for connect and announce phases.
-const MAX_RETRIES: u32 = 3;
+/// Max retries for connect and announce phases (BEP 15: up to 4 retries).
+const MAX_RETRIES: u32 = 4;
 
 /// Receive buffer size — enough for compact peer lists with ~200 peers.
 const RECV_BUF_SIZE: usize = 2048;
@@ -23,6 +24,10 @@ const RECV_BUF_SIZE: usize = 2048;
 #[derive(Debug, Clone)]
 pub struct UdpTracker {
     url: Url,
+    /// Cached connection ID per BEP 15 (reuse across announces until failure).
+    connection_id: Arc<Mutex<Option<u64>>>,
+    /// Cached resolved address to avoid repeated DNS lookups.
+    cached_addr: Arc<Mutex<Option<SocketAddr>>>,
 }
 
 impl UdpTracker {
@@ -37,7 +42,11 @@ impl UdpTracker {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
 
-        Ok(UdpTracker { url })
+        Ok(UdpTracker {
+            url,
+            connection_id: Arc::new(Mutex::new(None)),
+            cached_addr: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// Returns the tracker's URL.
@@ -49,13 +58,14 @@ impl UdpTracker {
     ///
     /// Resolves all addresses and tries each one in sequence (multi-homed
     /// tracker support).  Uses the BEP 15 two-phase connect+announce protocol
-    /// with retries on both phases.
+    /// with retries on both phases. Connection ID is cached across announces
+    /// per BEP 15 and re-fetched only on timeout.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
         tracing::info!("UDP announce to {}", self.url);
         let Some(host) = self.url.host_str() else {
             return Err(Error::new(ErrorKind::InvalidInput));
         };
-        let port = self.url.port().unwrap_or(80);
+        let port = self.url.port().unwrap_or(6969);
 
         let event = match req.event {
             AnnounceEvent::None => 0u32,
@@ -67,11 +77,27 @@ impl UdpTracker {
 
         let mut last_err = None;
 
-        // Resolve hostname — try every address returned by DNS.
-        for addr in lookup_host((host, port))
-            .await
-            .map_err(Error::tracker_failed)?
-        {
+        // Use cached address if available, otherwise resolve hostname.
+        let target_addrs: Vec<SocketAddr> = {
+            // Check cache without holding lock across await
+            let cached = *self.cached_addr.lock().unwrap();
+            if let Some(addr) = cached {
+                // Cache hit: drop lock before any await
+                vec![addr]
+            } else {
+                // Cache miss: drop lock, then resolve
+                let addrs: Vec<SocketAddr> = lookup_host((host, port))
+                    .await
+                    .map_err(Error::tracker_failed)?
+                    .collect();
+                if let Some(first) = addrs.first() {
+                    *self.cached_addr.lock().unwrap() = Some(*first);
+                }
+                addrs
+            }
+        };
+
+        for addr in target_addrs {
             // Bind a socket matching this address family.
             let bind_addr = SocketAddr::new(
                 if addr.is_ipv4() {
@@ -89,12 +115,19 @@ impl UdpTracker {
                 }
             };
 
-            // Phase 1: Connect
-            let connection_id = match connect(&socket, addr).await {
-                Ok(id) => id,
-                Err(e) => {
-                    last_err = Some(e);
-                    continue;
+            // Phase 1: Connect (use cached connection_id if available)
+            let connection_id = if let Some(cached) = *self.connection_id.lock().unwrap() {
+                cached
+            } else {
+                match connect(&socket, addr).await {
+                    Ok(id) => {
+                        *self.connection_id.lock().unwrap() = Some(id);
+                        id
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        continue;
+                    }
                 }
             };
 
@@ -110,8 +143,19 @@ impl UdpTracker {
 
                 let mut buf = vec![0u8; RECV_BUF_SIZE];
                 match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
-                    Ok(Ok((len, _src))) => {
-                        return parse_announce_response(&buf[..len], transaction_id);
+                    Ok(Ok((len, src))) => {
+                        if src != addr {
+                            continue;
+                        }
+                        match parse_announce_response(&buf[..len], transaction_id) {
+                            Ok(response) => return Ok(response),
+                            Err(e) => {
+                                // Connection may have expired; clear cache for next attempt
+                                *self.connection_id.lock().unwrap() = None;
+                                last_err = Some(e);
+                                break;
+                            }
+                        }
                     }
                     _ => continue,
                 }
@@ -136,7 +180,10 @@ async fn connect(socket: &UdpSocket, addr: SocketAddr) -> Result<u64, Error> {
 
         let mut buf = vec![0u8; 16];
         match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
-            Ok(Ok((len, _src))) => {
+            Ok(Ok((len, src))) => {
+                if src != addr {
+                    continue;
+                }
                 return parse_connect_response(&buf[..len], transaction_id);
             }
             _ => continue,
@@ -182,6 +229,11 @@ fn parse_connect_response(data: &[u8], expected_transaction_id: u32) -> Result<u
         return Err(Error::new(ErrorKind::TrackerProtocolError));
     }
     let action = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    if action == 3 {
+        // BEP 15 error response: [action:32][transaction_id:32][message:...]
+        let _msg = String::from_utf8_lossy(&data[8..]);
+        return Err(Error::new(ErrorKind::TrackerProtocolError));
+    }
     if action != 0 {
         return Err(Error::new(ErrorKind::TrackerProtocolError));
     }
@@ -203,6 +255,11 @@ fn parse_announce_response(
         return Err(Error::new(ErrorKind::TrackerProtocolError));
     }
     let action = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    if action == 3 {
+        // BEP 15 error response: [action:32][transaction_id:32][message:...]
+        let _msg = String::from_utf8_lossy(&data[8..]);
+        return Err(Error::new(ErrorKind::TrackerProtocolError));
+    }
     if action != 1 {
         return Err(Error::new(ErrorKind::TrackerProtocolError));
     }

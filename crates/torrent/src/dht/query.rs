@@ -71,6 +71,10 @@ pub async fn announce_peer(
 ) -> Result<(), Error> {
     tracing::debug!("DHT announce_peer to {} (port {})", addr, port);
     let data = krpc::build_announce_peer(tid, node_id, info_hash, port, token);
-    let _response = rpc.query(addr, tid, &data).await?;
+    let response = rpc.query(addr, tid, &data).await?;
+    // Check for KRPC errors — e.g., "Bad token" from DHT node
+    if matches!(&response, krpc::KrpcMessage::Error { .. }) {
+        return Err(Error::new(ErrorKind::Protocol));
+    }
     Ok(())
 }

@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use crate::dht::{DhtNode, generate_node_id};
+use crate::dht::{BootstrapNode, DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
@@ -90,8 +90,12 @@ pub struct SessionConfig {
     pub max_uploads: u32,
     /// Download directory.
     pub download_dir: PathBuf,
-    /// Enable DHT.
-    pub enable_dht: bool,
+    /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
+    /// When `Some`, the session initializes a DHT node and uses these
+    /// addresses to join the DHT network (BEP 5).
+    ///
+    /// Default: `Some(vec![...])` with well-known public bootstrap nodes.
+    pub bootstrap_nodes: Option<Vec<BootstrapNode>>,
     /// Optional DHT node ID (20 bytes). If `None`, a random one is generated
     /// each session. Set this to a persisted value to keep a stable identity
     /// across restarts (BEP 5 recommends persisting the node ID).
@@ -105,7 +109,10 @@ impl Default for SessionConfig {
             max_connections: 50,
             max_uploads: 8,
             download_dir: PathBuf::from("downloads"),
-            enable_dht: true,
+            bootstrap_nodes: Some(vec![
+                BootstrapNode::from(("router.bittorrent.com", 6881)),
+                BootstrapNode::from(("dht.transmissionbt.com", 6881)),
+            ]),
             node_id: None,
         }
     }
@@ -153,37 +160,41 @@ impl Session {
         let torrents: Arc<RwLock<HashMap<InfoHash, TorrentHandle>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
-        // Initialize DHT if enabled
-        let dht_node = if config.enable_dht {
-            let bind_addr = SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::UNSPECIFIED,
-                config.listen_port + 1,
-            ));
-            let bootstrap = &[
-                ("router.bittorrent.com", 6881),
-                ("dht.transmissionbt.com", 6881),
-            ];
-            let node_id = config.node_id.unwrap_or_else(generate_node_id);
-            let node = DhtNode::new(node_id, bind_addr, bootstrap).await?;
+        // Initialize DHT if bootstrap nodes are configured
+        let dht_node = if let Some(ref bootstrap) = config.bootstrap_nodes {
+            if bootstrap.is_empty() {
+                None
+            } else {
+                let bind_addr = SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::UNSPECIFIED,
+                    config.listen_port + 1,
+                ));
+                let bootstrap_refs: Vec<(&str, u16)> = bootstrap
+                    .iter()
+                    .map(|n| (n.host.as_str(), n.port))
+                    .collect();
+                let node_id = config.node_id.unwrap_or_else(generate_node_id);
+                let node = DhtNode::new(node_id, bind_addr, &bootstrap_refs).await?;
 
-            // Spawn background feeder: poll each torrent's info_hash every 30s
-            let (dht, t) = (node.clone(), torrents.clone());
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    let info_hashes: Vec<InfoHash> = t.read().await.keys().copied().collect();
-                    for ih in info_hashes {
-                        let peers = dht.get_peers(&ih).await;
-                        if !peers.is_empty() {
-                            if let Some(handle) = t.read().await.get(&ih) {
-                                handle.peer_mgr.write().await.add_peers(peers);
+                // Spawn background feeder: poll each torrent's info_hash every 30s
+                let (dht, t) = (node.clone(), torrents.clone());
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        let info_hashes: Vec<InfoHash> = t.read().await.keys().copied().collect();
+                        for ih in info_hashes {
+                            let peers = dht.get_peers(&ih).await;
+                            if !peers.is_empty() {
+                                if let Some(handle) = t.read().await.get(&ih) {
+                                    handle.peer_mgr.write().await.add_peers(peers);
+                                }
                             }
                         }
                     }
-                }
-            });
+                });
 
-            Some(node)
+                Some(node)
+            }
         } else {
             None
         };
@@ -298,6 +309,8 @@ impl Session {
         let handle = self.torrents.write().await.remove(info_hash);
         if let Some(mut h) = handle {
             h.cancel().await;
+            // Await the task to ensure clean shutdown
+            let _ = h.task.await;
         }
         Ok(())
     }

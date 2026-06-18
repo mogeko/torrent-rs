@@ -17,6 +17,9 @@ use crate::error::{Error, ErrorKind};
 
 use super::krpc::{KrpcMessage, TransactionId};
 
+/// Default timeout for DHT RPC calls.
+const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Callback type for handling incoming DHT queries.
 ///
 /// Receives the decoded [`KrpcMessage`] and the source address, returns
@@ -38,9 +41,6 @@ pub struct DhtRpc {
     query_handler: Mutex<Option<QueryHandler>>,
     timeout: Duration,
 }
-
-/// Default timeout for DHT RPC calls.
-const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl DhtRpc {
     /// Create a new DHT RPC client bound to a local address.
@@ -99,7 +99,10 @@ impl DhtRpc {
                 self.pending.lock().unwrap().remove(&tid);
                 Error::new(ErrorKind::Protocol)
             })?
-            .map_err(|_| Error::new(ErrorKind::Protocol))
+            .map_err(|_| {
+                self.pending.lock().unwrap().remove(&tid);
+                Error::new(ErrorKind::Protocol)
+            })
     }
 
     /// Ping a node to check if it's alive.
@@ -117,7 +120,10 @@ impl DhtRpc {
             loop {
                 let (len, src_addr) = match self.socket.recv_from(&mut buf).await {
                     Ok(r) => r,
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::warn!("DHT recv error: {e}");
+                        continue;
+                    }
                 };
 
                 let msg = match KrpcMessage::from_bytes(&buf[..len]) {
