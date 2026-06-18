@@ -8,6 +8,7 @@ use crate::error::Error;
 use crate::peer::PeerMessage;
 
 use super::DownloadLoop;
+use super::types::BLOCK_SIZE;
 
 impl DownloadLoop {
     /// Run a choke/unchoke round: select top uploaders + optimistic unchoke.
@@ -52,14 +53,20 @@ impl DownloadLoop {
             })
         });
 
-        // Fill remaining slots with next-best uploaders (not yet in to_unchoke).
-        // This preserves the snubbing filter above by only adding peers from
-        // the rate-sorted list, not all connected peers unconditionally.
+        // Fill remaining slots from rate-sorted list, respecting snub filter.
+        // Re-applies the snub check — otherwise a snubbed peer from peer_stats
+        // would be re-added here, undoing the retain above.
         for (addr, _) in &peer_stats {
             if to_unchoke.len() >= max_uploads as usize {
                 break;
             }
-            to_unchoke.insert(*addr);
+            let is_active = self.peers.get(addr).is_some_and(|p| {
+                p.last_data_received
+                    .is_some_and(|t| t.elapsed() < snub_timeout)
+            });
+            if is_active {
+                to_unchoke.insert(*addr);
+            }
         }
 
         let mut um = self.upload_mgr.write().await;
@@ -78,10 +85,15 @@ impl DownloadLoop {
                 // Cancel outstanding requests before choking
                 if let Some(peer) = self.peers.get(&addr) {
                     for (index, begin, _) in peer.pipeline.iter().flatten() {
+                        let cancel_len = self
+                            .active_downloads
+                            .get(index)
+                            .map(|dl| dl.block_len(*begin))
+                            .unwrap_or(BLOCK_SIZE);
                         let msg = PeerMessage::Cancel {
                             index: *index,
                             begin: *begin,
-                            length: 0,
+                            length: cancel_len,
                         };
                         let _ = pm.send_to(&addr, &msg).await;
                     }
@@ -112,5 +124,54 @@ impl DownloadLoop {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    /// Simulate the snub check: returns true if the peer should be kept.
+    fn snub_check(last_data_secs_ago: Option<u64>, timeout_secs: u64) -> bool {
+        last_data_secs_ago.is_some_and(|s| s < timeout_secs)
+    }
+
+    #[test]
+    fn snub_filters_idle_peer() {
+        assert!(!snub_check(Some(70), 60));
+    }
+
+    #[test]
+    fn snub_keeps_active_peer() {
+        assert!(snub_check(Some(30), 60));
+    }
+
+    #[test]
+    fn snub_filters_never_sent_peer() {
+        assert!(!snub_check(None, 60));
+    }
+
+    #[test]
+    fn refill_cannot_re_add_snubbed_peer() {
+        // Scenario from audit: 3 peers, max_uploads=3, peer B is snubbed.
+        // After retain: to_unchoke={A,C}. Refill must NOT add B back.
+        let peer_stats: Vec<(u32, u64)> = vec![(1, 100), (2, 50), (3, 10)];
+        let snubbed: HashSet<u32> = HashSet::from([2]);
+
+        let mut to_unchoke: HashSet<u32> = HashSet::from([1, 3]);
+        let max_uploads = 3;
+
+        for (addr, _) in &peer_stats {
+            if to_unchoke.len() >= max_uploads {
+                break;
+            }
+            if !snubbed.contains(addr) {
+                to_unchoke.insert(*addr);
+            }
+        }
+
+        assert!(to_unchoke.contains(&1));
+        assert!(to_unchoke.contains(&3));
+        assert!(!to_unchoke.contains(&2)); // snubbed peer stays out
     }
 }

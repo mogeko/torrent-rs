@@ -222,3 +222,36 @@ impl DownloadLoop {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::PeerInfo;
+
+    #[test]
+    fn cancel_removes_from_pipeline() {
+        let mut pi = PeerInfo::new();
+        pi.am_choked = false;
+        pi.push_request(7, 16384);
+        assert!(pi.pipeline[0].is_some());
+
+        pi.remove_request(7, 16384);
+        assert!(pi.pipeline[0].is_none());
+    }
+
+    #[test]
+    fn cancel_non_existent_is_noop() {
+        let mut pi = PeerInfo::new();
+        pi.am_choked = false;
+        pi.push_request(7, 0);
+        pi.remove_request(99, 999);
+        // Still has the original request
+        assert!(pi.pipeline[0].is_some());
+    }
+
+    #[test]
+    fn peer_starts_choked() {
+        let pi = PeerInfo::new();
+        assert!(pi.am_choked);
+        assert!(!pi.can_request());
+    }
+}

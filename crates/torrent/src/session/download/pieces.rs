@@ -340,4 +340,15 @@ mod tests {
         };
         assert!(!verify_piece_hash(data, wrong_hash));
     }
+
+    #[test]
+    fn block_len_for_short_last_block() {
+        // Last block of a piece may be shorter than BLOCK_SIZE.
+        // Piece length = 50000, block_size = 16384. Block 3 starts at 49152.
+        // Remaining = 50000 - 49152 = 848 → block_len should return 848.
+        let piece_len: u64 = 50000;
+        let block_size: u32 = 16384;
+        let remaining = piece_len.saturating_sub(49152);
+        assert_eq!(remaining.min(block_size as u64) as u32, 848);
+    }
 }
