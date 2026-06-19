@@ -95,12 +95,13 @@ impl PeerConnection {
 
         let remote_reserved = remote_handshake.reserved;
 
-        // BEP 10 LTEP handshake: negotiate extension IDs if both peers support it
-        let extension_ids = if remote_handshake.has_extension(63) {
-            tracing::debug!(
-                "remote peer {} supports extensions, performing LTEP handshake",
-                addr
-            );
+        // BEP 10 LTEP handshake: negotiate extension IDs if the remote
+        // peer signals extension protocol support.
+        // Check byte 5 bit 4 (0x10, the LTEP header byte per BEP 10) and
+        // bit 63 (used by libtorrent and many clients as a combined DHT+LTEP flag).
+        let remote_ltep = remote_reserved[5] & 0x10 != 0 || remote_handshake.has_extension(63);
+        let extension_ids = if remote_ltep {
+            tracing::debug!("attempting LTEP handshake with {}", addr);
             perform_ltep_handshake(&mut raw_stream, addr).await?
         } else {
             HashMap::new()
@@ -317,11 +318,11 @@ async fn perform_ltep_handshake(
             Ok(remote_neg.m)
         }
         PeerMessage::Extended { ext_id, .. } => {
-            tracing::warn!("LTEP from {}: expected ext_id=0, got {}", addr, ext_id);
+            tracing::debug!("LTEP from {}: expected ext_id=0, got {}", addr, ext_id);
             Ok(HashMap::new())
         }
         _ => {
-            tracing::warn!("LTEP from {}: got {:?}", addr, resp);
+            tracing::debug!("LTEP from {}: got {:?}", addr, resp);
             Ok(HashMap::new())
         }
     }
