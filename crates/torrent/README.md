@@ -19,19 +19,15 @@ management, tracker communication, and file storage — built on top of
 ## Quick Start
 
 ```rust
-use std::path::PathBuf;
 use torrent::session::{Session, SessionConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), torrent::error::Error> {
-    let config = SessionConfig {
-        download_dir: PathBuf::from("./downloads"),
-        ..Default::default()
-    };
+    let config = SessionConfig::default();
     let session = Session::new(config).await?;
 
     let data = std::fs::read("ubuntu-24.04.torrent")?;
-    let info_hash = session.add_torrent_bytes(&data).await?;
+    let info_hash = session.add_torrent_bytes(&data, "./downloads").await?;
 
     loop {
         let status = session.torrent_status(&info_hash).await?;

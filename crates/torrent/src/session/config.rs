@@ -8,7 +8,6 @@
 //! - [`TorrentState`] — lifecycle state of a torrent
 //! - [`InfoHash`] — SHA-1 identifier for a torrent
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::dht::BootstrapNode;
@@ -36,11 +35,6 @@ pub struct SessionConfig {
     ///
     /// Default: `8`.
     pub max_uploads: u32,
-    /// Download directory for completed files.
-    ///
-    /// Default: `"."` (current working directory).
-    pub download_dir: PathBuf,
-
     // ── Rate Limiting ──
     /// Global download rate limit in bytes/s. `None` = unlimited.
     ///
@@ -145,7 +139,6 @@ impl Default for SessionConfig {
             listen_port: 6881,
             max_connections: 50,
             max_uploads: 8,
-            download_dir: PathBuf::from("."),
             download_rate_limit: None,
             upload_rate_limit: None,
             max_active_torrents: 0,
@@ -227,7 +220,6 @@ mod serde_tests {
         assert_eq!(back.listen_port, config.listen_port);
         assert_eq!(back.max_connections, config.max_connections);
         assert_eq!(back.max_uploads, config.max_uploads);
-        assert_eq!(back.download_dir, config.download_dir);
         assert_eq!(back.download_rate_limit, config.download_rate_limit);
         assert_eq!(back.upload_rate_limit, config.upload_rate_limit);
         assert_eq!(back.max_active_torrents, config.max_active_torrents);
@@ -257,7 +249,6 @@ mod serde_tests {
             listen_port: 12345,
             max_connections: 200,
             max_uploads: 16,
-            download_dir: PathBuf::from("/tmp/dl"),
             download_rate_limit: Some(1_048_576),
             upload_rate_limit: Some(524_288),
             max_active_torrents: 5,
@@ -285,7 +276,6 @@ mod serde_tests {
         assert_eq!(back.listen_port, 12345);
         assert_eq!(back.max_connections, 200);
         assert_eq!(back.max_uploads, 16);
-        assert_eq!(back.download_dir, PathBuf::from("/tmp/dl"));
         assert_eq!(back.download_rate_limit, Some(1_048_576));
         assert_eq!(back.upload_rate_limit, Some(524_288));
         assert_eq!(back.max_active_torrents, 5);

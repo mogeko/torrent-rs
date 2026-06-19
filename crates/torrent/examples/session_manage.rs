@@ -15,12 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    // 1. Configure the session with a temporary download directory.
+    // 1. Create a temporary download directory.
     let download_dir = tempfile::tempdir()?;
-    let config = SessionConfig {
-        download_dir: download_dir.path().to_path_buf(),
-        ..Default::default()
-    };
+    let config = SessionConfig::default();
 
     // 2. Create the session — this is the main entry point.
     let session = Session::new(config).await?;
@@ -31,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Add a torrent from a real .torrent file (bundled at compile time).
     let data = include_bytes!("data/debian-13.5.0-amd64-netinst.iso.torrent");
-    let info_hash = session.add_torrent_bytes(data).await?;
+    let info_hash = session.add_torrent_bytes(data, download_dir.path()).await?;
     println!("\nTorrent added:");
     println!("  info_hash: {:02x?}", info_hash);
 

@@ -4,7 +4,6 @@
 //! attempt to discover metadata from peers (BEP 10).
 //! Run with: `cargo run -p torrent --example magnet_download`
 
-use std::path::PathBuf;
 use std::str::FromStr;
 
 use torrent::magnet::MagnetUri;
@@ -45,7 +44,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Create a session and add the torrent
     println!("\n=== Session ===");
     let config = SessionConfig {
-        download_dir: PathBuf::from("/tmp/torrent-downloads"),
         bootstrap_nodes: None,
         ..Default::default()
     };
@@ -53,7 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = Session::new(config).await?;
 
     // Add via magnet URI string (convenience)
-    let info_hash = session.add_magnet_str(uri_str).await?;
+    let info_hash = session
+        .add_magnet_str(uri_str, "/tmp/torrent-downloads")
+        .await?;
     println!("Added torrent: {:02x?}", info_hash);
 
     // Query status

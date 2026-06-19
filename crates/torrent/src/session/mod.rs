@@ -21,6 +21,7 @@ pub use config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::sync::Arc;
 
@@ -48,15 +49,12 @@ use self::torrent::TorrentHandle;
 /// use torrent::session::{Session, SessionConfig};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = SessionConfig {
-///     download_dir: std::path::PathBuf::from("./downloads"),
-///     ..Default::default()
-/// };
+/// let config = SessionConfig::default();
 /// let session = Session::new(config).await.unwrap();
 ///
-/// // Add a torrent from a .torrent file
+/// // Add a torrent from a .torrent file, specifying a download directory
 /// let data = std::fs::read("torrent.torrent").unwrap();
-/// let info_hash = session.add_torrent_bytes(&data).await.unwrap();
+/// let info_hash = session.add_torrent_bytes(&data, "./downloads").await.unwrap();
 ///
 /// // Check its status
 /// let status = session.torrent_status(&info_hash).await.unwrap();
@@ -133,29 +131,45 @@ impl Session {
     /// ([`MagnetUri`]). For magnet links, file download cannot start
     /// until metadata is obtained from peers.
     ///
+    /// `download_dir` specifies where to store the torrent's files.
+    /// Each torrent can have its own directory.
+    ///
     /// [`add_torrent_bytes`](Session::add_torrent_bytes) and
     /// [`add_magnet_str`](Session::add_magnet_str) are convenience
     /// wrappers.
-    pub async fn add_torrent(&self, spec: impl Into<TorrentSpec>) -> Result<InfoHash, Error> {
+    pub async fn add_torrent(
+        &self, spec: impl Into<TorrentSpec>, download_dir: impl Into<PathBuf>,
+    ) -> Result<InfoHash, Error> {
+        let download_dir = download_dir.into();
+
         match spec.into() {
-            TorrentSpec::Metainfo(meta) => self.add_metainfo(meta).await,
-            TorrentSpec::Magnet(uri) => self.add_magnet(uri).await,
+            TorrentSpec::Metainfo(meta) => self.add_metainfo(meta, &download_dir).await,
+            TorrentSpec::Magnet(uri) => self.add_magnet(uri, &download_dir).await,
         }
     }
 
     /// Add a torrent from a magnet URI string (BEP 9).
-    pub async fn add_magnet_str(&self, uri: impl AsRef<str>) -> Result<InfoHash, Error> {
+    ///
+    /// `download_dir` specifies where to store the torrent's files.
+    pub async fn add_magnet_str(
+        &self, uri: impl AsRef<str>, download_dir: impl Into<PathBuf>,
+    ) -> Result<InfoHash, Error> {
         let magnet: MagnetUri = uri.as_ref().parse()?;
-        self.add_torrent(magnet).await
+        self.add_torrent(magnet, download_dir).await
     }
 
     /// Add a torrent from raw bencoded bytes (a `.torrent` file).
-    pub async fn add_torrent_bytes(&self, data: &[u8]) -> Result<InfoHash, Error> {
-        self.add_torrent(Metainfo::try_from(data)?).await
+    ///
+    /// `download_dir` specifies where to store the torrent's files.
+    pub async fn add_torrent_bytes(
+        &self, data: &[u8], download_dir: impl Into<PathBuf>,
+    ) -> Result<InfoHash, Error> {
+        self.add_torrent(Metainfo::try_from(data)?, download_dir)
+            .await
     }
 
     /// Core: bootstrap a torrent from full metadata.
-    async fn add_metainfo(&self, meta: Metainfo) -> Result<InfoHash, Error> {
+    async fn add_metainfo(&self, meta: Metainfo, download_dir: &Path) -> Result<InfoHash, Error> {
         self.check_capacity().await?;
 
         let info_hash = meta.info_hash();
@@ -164,16 +178,16 @@ impl Session {
         };
 
         // Create FileStorage
-        let storage = Arc::new(FileStorage::new(&meta.info, &self.config.download_dir).await?);
-
+        let storage = Arc::new(FileStorage::new(&meta.info, download_dir).await?);
         let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
+
         self.torrents.write().await.insert(info_hash, handle);
 
         Ok(info_hash)
     }
 
     /// Core: bootstrap a torrent from a magnet URI.
-    async fn add_magnet(&self, uri: MagnetUri) -> Result<InfoHash, Error> {
+    async fn add_magnet(&self, uri: MagnetUri, download_dir: &Path) -> Result<InfoHash, Error> {
         self.check_capacity().await?;
 
         let info_hash = *uri.primary_info_hash();
@@ -208,7 +222,7 @@ impl Session {
             encoding: None,
         };
 
-        let storage = Arc::new(FileStorage::new(&meta.info, &self.config.download_dir).await?);
+        let storage = Arc::new(FileStorage::new(&meta.info, download_dir).await?);
         let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
 
         // Inject x.pe addresses directly into the connection pool (BEP 9).
