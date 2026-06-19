@@ -54,6 +54,11 @@ pub(crate) struct PeerInfo {
     pub(super) last_pex_sent: Option<Instant>,
     /// Last time we received a PEX message from this peer.
     pub(super) last_pex_received: Option<Instant>,
+    /// Maximum number of outstanding block requests this peer accepts.
+    /// Derived from the remote's BEP 10 `reqq` handshake field, capped
+    /// at [`PIPELINE_SIZE`]. Defaults to [`PIPELINE_SIZE`] if the remote
+    /// did not advertise a value.
+    pub(super) max_requests: usize,
 }
 
 impl PeerInfo {
@@ -74,12 +79,17 @@ impl PeerInfo {
             our_extension_ids: HashMap::new(),
             last_pex_sent: None,
             last_pex_received: None,
+            max_requests: PIPELINE_SIZE,
         }
     }
 
     /// Whether this peer can accept a new request.
     pub(super) fn can_request(&self) -> bool {
-        !self.am_choked && self.pipeline.iter().any(Option::is_none)
+        if self.am_choked {
+            return false;
+        }
+        let active = self.pipeline.iter().filter(|s| s.is_some()).count();
+        active < self.max_requests
     }
 
     /// Record a new outstanding request.

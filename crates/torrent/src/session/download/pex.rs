@@ -6,6 +6,7 @@ use crate::error::{Error, ErrorKind};
 use crate::peer::{ExtensionNegotiation, PeerMessage, PexMessage};
 
 use super::DownloadLoop;
+use super::types::PIPELINE_SIZE;
 
 impl DownloadLoop {
     /// Handle the remote peer's BEP 10 LTEP extension negotiation handshake.
@@ -33,6 +34,12 @@ impl DownloadLoop {
         // ID=0 entries are already filtered by from_bencode (BEP 10).
         peer.remote_extension_ids = neg.m;
 
+        // Respect the remote's request queue limit (BEP 10 reqq).
+        if let Some(reqq) = neg.reqq {
+            let limit = usize::try_from(reqq).unwrap_or(PIPELINE_SIZE);
+            peer.max_requests = limit.min(PIPELINE_SIZE);
+        }
+
         tracing::debug!(
             "LTEP handshake from {}: {:?}",
             addr,
@@ -41,7 +48,7 @@ impl DownloadLoop {
 
         // Now that we know the remote's extension IDs, send an initial PEX.
         if self.pex_enabled {
-            if let Err(e) = self.send_pex_message(addr).await {
+            if let Err(e) = self.send_pex_message(addr, &[]).await {
                 tracing::debug!("failed to send initial PEX to {}: {}", addr, e);
             }
         }
@@ -101,7 +108,9 @@ impl DownloadLoop {
     }
 
     /// Send a PEX message to a specific peer with our currently known peers.
-    pub(super) async fn send_pex_message(&mut self, addr: SocketAddr) -> Result<(), Error> {
+    pub(super) async fn send_pex_message(
+        &mut self, addr: SocketAddr, dropped: &[SocketAddr],
+    ) -> Result<(), Error> {
         let peer = match self.peers.get(&addr) {
             Some(p) => p,
             None => return Ok(()),
@@ -113,21 +122,18 @@ impl DownloadLoop {
             None => return Ok(()), // Peer doesn't support PEX
         };
 
-        // Gather currently connected peers (excluding this peer itself)
+        // Gather currently connected peers (excluding this peer itself).
+        // BEP 11: limit to 50 added peers per message.
         let connected = self.peer_mgr.read().await.connection_addrs();
-        let added: Vec<SocketAddr> = connected.into_iter().filter(|a| *a != addr).collect();
-
-        // Drain recently dropped peers for the dropped field
-        let dropped: Vec<SocketAddr> = self
-            .recently_dropped
-            .drain(..)
+        let added: Vec<SocketAddr> = connected
+            .into_iter()
             .filter(|a| *a != addr)
+            .take(50)
             .collect();
 
-        // Build PEX message
         let pex_msg = PexMessage {
             added,
-            dropped,
+            dropped: dropped.to_vec(),
             added6: Vec::new(),
             dropped6: Vec::new(),
         };
@@ -154,9 +160,12 @@ impl DownloadLoop {
 
     /// Broadcast PEX messages to all connected peers.
     pub(super) async fn broadcast_pex(&mut self) -> Result<(), Error> {
+        let dropped_snapshot: Vec<SocketAddr> = self.recently_dropped.drain(..).collect();
         let addresses: Vec<SocketAddr> = self.peers.keys().copied().collect();
         for addr in addresses {
-            if let Err(e) = self.send_pex_message(addr).await {
+            let dropped = dropped_snapshot.iter().filter(|a| **a != addr).copied();
+            let dropped: Vec<SocketAddr> = dropped.collect();
+            if let Err(e) = self.send_pex_message(addr, &dropped).await {
                 tracing::debug!("failed to send PEX to {}: {}", addr, e);
             }
         }
