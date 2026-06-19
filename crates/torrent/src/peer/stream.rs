@@ -299,36 +299,30 @@ async fn perform_ltep_handshake(
 
     match resp {
         PeerMessage::Extended { ext_id: 0, data } => {
-            let (val, _) = bencode::decode(&data).map_err(|e| {
-                tracing::warn!(
-                    "failed to decode LTEP handshake bencode from {} ({} bytes): {}",
-                    addr,
-                    data.len(),
-                    e,
-                );
-                Error::new(ErrorKind::PeerInvalidExtendedMessage)
-            })?;
-            let remote_neg = ExtensionNegotiation::from_bencode(&val).inspect_err(|e| {
-                tracing::warn!("malformed LTEP handshake dict from {}: {}", addr, e,);
-            })?;
+            let (val, _) = match bencode::decode(&data) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("invalid LTEP bencode from {}: {}", addr, e);
+                    return Ok(HashMap::new());
+                }
+            };
+            let remote_neg = match ExtensionNegotiation::from_bencode(&val) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!("invalid LTEP dict from {}: {}", addr, e);
+                    return Ok(HashMap::new());
+                }
+            };
             tracing::debug!("LTEP handshake complete with {}: {:?}", addr, remote_neg.m);
             Ok(remote_neg.m)
         }
         PeerMessage::Extended { ext_id, .. } => {
-            tracing::warn!(
-                "unexpected ext_id={} during LTEP handshake with {} (expected 0)",
-                ext_id,
-                addr,
-            );
-            Err(Error::new(ErrorKind::PeerInvalidExtendedMessage))
+            tracing::warn!("LTEP from {}: expected ext_id=0, got {}", addr, ext_id);
+            Ok(HashMap::new())
         }
         _ => {
-            tracing::warn!(
-                "expected Extended message during LTEP handshake with {}, got: {:?}",
-                addr,
-                resp,
-            );
-            Err(Error::new(ErrorKind::PeerInvalidExtendedMessage))
+            tracing::warn!("LTEP from {}: got {:?}", addr, resp);
+            Ok(HashMap::new())
         }
     }
 }
