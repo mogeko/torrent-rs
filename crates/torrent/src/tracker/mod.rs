@@ -13,7 +13,7 @@
 //!
 //! - [`Tracker::single`] — create from a single URL
 //! - [`Tracker::multi`] — create from multiple URLs
-//! - [`Tracker::from_metainfo`] — create from parsed torrent metadata
+//! - [`Tracker::from_torrent`] — create from a [`TorrentSpec`] (metainfo or magnet)
 //!
 //! # Tracker Management
 //!
@@ -51,7 +51,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use crate::error::{Error, ErrorKind};
-use crate::metainfo::Metainfo;
+use crate::spec::TorrentSpec;
 
 /// Default per-request timeout for tracker announces (15 s).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -93,10 +93,15 @@ impl Tracker {
     ///
     /// Returns `None` if the URL is invalid or uses an unsupported scheme.
     pub fn single(url: impl IntoUrl) -> Option<Self> {
-        let inner = Inner::from_url(url.into_url().ok()?, DEFAULT_TIMEOUT).ok()?;
+        Self::single_with_timeout(url, DEFAULT_TIMEOUT)
+    }
+
+    /// Create a single `Tracker` from a URL with a custom timeout.
+    pub fn single_with_timeout(url: impl IntoUrl, timeout: Duration) -> Option<Self> {
+        let inner = Inner::from_url(url.into_url().ok()?, timeout).ok()?;
         Some(Tracker {
             trackers: vec![inner],
-            default_timeout: DEFAULT_TIMEOUT,
+            default_timeout: timeout,
         })
     }
 
@@ -110,50 +115,20 @@ impl Tracker {
     where
         I::Item: IntoUrl,
     {
+        Self::multi_with_timeout(urls, DEFAULT_TIMEOUT)
+    }
+
+    /// Create a `Tracker` from multiple tracker URLs with a custom timeout.
+    pub fn multi_with_timeout<I: IntoIterator>(urls: I, timeout: Duration) -> Option<Self>
+    where
+        I::Item: IntoUrl,
+    {
         let mut seen: HashSet<String> = HashSet::new();
         let mut trackers: Vec<Inner> = Vec::new();
 
         for url in urls {
-            if let Ok(url) = url.into_url() {
-                if seen.insert(url.as_str().into())
-                    && let Ok(inner) = Inner::from_url(url, DEFAULT_TIMEOUT)
-                {
-                    trackers.push(inner);
-                }
-            }
-        }
-
-        if trackers.is_empty() {
-            None
-        } else {
-            Some(Tracker {
-                trackers,
-                default_timeout: DEFAULT_TIMEOUT,
-            })
-        }
-    }
-
-    /// Create a `Tracker` from a parsed [`Metainfo`].
-    ///
-    /// Collects all tracker URLs from `announce` and `announce_list` (BEP 12),
-    /// deduplicates them (duplicates across announce and announce_list are
-    /// deduplicated), and returns a single-tracker or multi-tracker as
-    /// appropriate. Invalid or unsupported URLs are silently skipped.
-    ///
-    /// Returns `None` if no valid tracker URLs were found.
-    pub fn from_metainfo(meta: &Metainfo) -> Option<Self> {
-        Self::multi(std::iter::once(&meta.announce).chain(meta.announce_list.iter().flatten()))
-    }
-
-    /// Create a `Tracker` from a parsed [`Metainfo`] with a custom timeout.
-    pub fn from_metainfo_with_timeout(meta: &Metainfo, timeout: Duration) -> Option<Self> {
-        let urls = std::iter::once(&meta.announce).chain(meta.announce_list.iter().flatten());
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut trackers: Vec<Inner> = Vec::new();
-
-        for url_str in urls {
-            if seen.insert(url_str.into())
-                && let Ok(url) = Url::parse(url_str)
+            if let Ok(url) = url.into_url()
+                && seen.insert(url.as_str().into())
                 && let Ok(inner) = Inner::from_url(url, timeout)
             {
                 trackers.push(inner);
@@ -168,6 +143,28 @@ impl Tracker {
                 default_timeout: timeout,
             })
         }
+    }
+
+    /// Create a `Tracker` from anything that converts into a [`TorrentSpec`].
+    ///
+    /// Accepts [`Metainfo`](crate::metainfo::Metainfo),
+    /// [`MagnetUri`](crate::magnet::MagnetUri), or [`TorrentSpec`] directly.
+    /// Collects all tracker URLs from the spec (both `Metainfo` and `Magnet`
+    /// variants), deduplicates them, and returns a single-tracker or
+    /// multi-tracker as appropriate. Invalid or unsupported URLs are silently
+    /// skipped.
+    ///
+    /// Returns `None` if no valid tracker URLs were found.
+    pub fn from_torrent(spec: impl Into<TorrentSpec>) -> Option<Self> {
+        Self::from_torrent_with_timeout(spec, DEFAULT_TIMEOUT)
+    }
+
+    /// Create a `Tracker` from anything that converts into a [`TorrentSpec`]
+    /// with a custom timeout.
+    pub fn from_torrent_with_timeout(
+        spec: impl Into<TorrentSpec>, timeout: Duration,
+    ) -> Option<Self> {
+        Self::multi_with_timeout(spec.into().trackers(), timeout)
     }
 
     /// Returns the number of trackers.
@@ -329,7 +326,6 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metainfo::{Bytes, Info, Metainfo, Mode, RawInfo};
     use crate::peer::PeerId;
 
     #[test]
@@ -427,7 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tracker_from_metainfo() {
+    fn test_tracker_from_torrent() {
+        use crate::metainfo::{Bytes, Info, Metainfo, Mode, RawInfo};
+
         let info = Info {
             piece_length: 262144,
             pieces: vec![[0u8; 20]],
@@ -447,12 +445,14 @@ mod tests {
             encoding: None,
         };
 
-        let t = Tracker::from_metainfo(&meta).unwrap();
+        let t = Tracker::from_torrent(meta).unwrap();
         assert_eq!(t.trackers.len(), 2);
     }
 
     #[test]
-    fn test_tracker_from_metainfo_skip_invalid() {
+    fn test_tracker_from_torrent_skip_invalid() {
+        use crate::metainfo::{Bytes, Info, Metainfo, Mode, RawInfo};
+
         let info = Info {
             piece_length: 262144,
             pieces: vec![[0u8; 20]],
@@ -473,7 +473,7 @@ mod tests {
             encoding: None,
         };
 
-        let t = Tracker::from_metainfo(&meta).unwrap();
+        let t = Tracker::from_torrent(meta).unwrap();
         assert_eq!(t.trackers.len(), 1);
         assert_eq!(t.urls(), &["http://tracker.b.com/announce"]);
     }
@@ -540,7 +540,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tracker_from_metainfo_dedup_across_tiers() {
+    fn test_tracker_from_torrent_dedup_across_tiers() {
+        use crate::metainfo::{Bytes, Info, Metainfo, Mode, RawInfo};
+
         let info = Info {
             piece_length: 262144,
             pieces: vec![[0u8; 20]],
@@ -564,7 +566,7 @@ mod tests {
             encoding: None,
         };
 
-        let t = Tracker::from_metainfo(&meta).unwrap();
+        let t = Tracker::from_torrent(meta).unwrap();
         assert_eq!(t.trackers.len(), 2);
         // announce (top-level) is kept first; duplicate from announce_list is skipped
         assert_eq!(
@@ -639,7 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tracker_from_metainfo_preserves_order() {
+    fn test_tracker_from_torrent_preserves_order() {
+        use crate::metainfo::{Bytes, Info, Metainfo, Mode, RawInfo};
+
         let info = Info {
             piece_length: 262144,
             pieces: vec![[0u8; 20]],
@@ -663,7 +667,7 @@ mod tests {
             encoding: None,
         };
 
-        let t = Tracker::from_metainfo(&meta).unwrap();
+        let t = Tracker::from_torrent(meta).unwrap();
         assert_eq!(t.trackers.len(), 3);
         assert_eq!(
             t.urls(),

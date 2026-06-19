@@ -28,12 +28,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut req = AnnounceRequest::new(info_hash, PeerId::random(), 6881);
     req.event = AnnounceEvent::Started;
 
-    // --- Tracker from Metainfo (collects announce + announce_list URLs) ---
-    let Some(tracker) = Tracker::from_metainfo(&meta) else {
-        eprintln!("no valid trackers found in metainfo");
+    // --- Tracker from TorrentSpec (collects announce + announce_list URLs) ---
+    let Some(tracker) = Tracker::from_torrent(meta) else {
+        eprintln!("no valid trackers found in torrent spec");
         return Ok(());
     };
-    println!("\n=== Built-in Trackers (Tracker::from_metainfo) ===");
+    println!("\n=== Built-in Trackers (Tracker::from_torrent) ===");
     match tracker.announce(&req).await {
         Ok(resp) => print_response(&resp),
         Err(e) => eprintln!("Tracker failed: {}", e),

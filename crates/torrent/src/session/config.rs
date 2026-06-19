@@ -8,10 +8,11 @@
 //! - [`TorrentState`] — lifecycle state of a torrent
 //! - [`InfoHash`] — SHA-1 identifier for a torrent
 
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::dht::BootstrapNode;
+use crate::storage::{FileStorageFactory, StorageFactory};
 
 /// Unique identifier for a torrent (SHA-1 info hash).
 ///
@@ -36,11 +37,6 @@ pub struct SessionConfig {
     ///
     /// Default: `8`.
     pub max_uploads: u32,
-    /// Download directory for completed files.
-    ///
-    /// Default: `"."` (current working directory).
-    pub download_dir: PathBuf,
-
     // ── Rate Limiting ──
     /// Global download rate limit in bytes/s. `None` = unlimited.
     ///
@@ -124,6 +120,22 @@ pub struct SessionConfig {
     /// Default: `256`.
     pub peer_msg_buffer_size: usize,
 
+    // ── Storage ──
+    /// Factory for creating storage backends.
+    ///
+    /// Override this to inject a custom [`Storage`] implementation
+    /// (e.g. in-memory, remote, or processing-pipeline backends).
+    /// The default is [`FileStorageFactory`], which creates
+    /// file-backed storage.
+    ///
+    /// For magnet-link torrents (BEP 9), the factory receives a stub
+    /// `Info` with zero `piece_length` and no pieces. Custom factories
+    /// should handle this gracefully.
+    ///
+    /// [`Storage`]: crate::storage::Storage
+    #[cfg_attr(feature = "serde", serde(skip, default = "default_storage_factory"))]
+    pub storage_factory: Arc<dyn StorageFactory>,
+
     // ── DHT ──
     /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
     /// When `Some`, the session initializes a DHT node and uses these
@@ -145,7 +157,6 @@ impl Default for SessionConfig {
             listen_port: 6881,
             max_connections: 50,
             max_uploads: 8,
-            download_dir: PathBuf::from("."),
             download_rate_limit: None,
             upload_rate_limit: None,
             max_active_torrents: 0,
@@ -168,8 +179,15 @@ impl Default for SessionConfig {
                 BootstrapNode::from(("dht.transmissionbt.com", 6881)),
             ]),
             node_id: None,
+            storage_factory: Arc::new(FileStorageFactory),
         }
     }
+}
+
+/// Default [`StorageFactory`] for serde deserialization.
+#[cfg(feature = "serde")]
+fn default_storage_factory() -> Arc<dyn StorageFactory> {
+    Arc::new(FileStorageFactory)
 }
 
 /// Status of a torrent, exposed via the public API.
@@ -227,7 +245,6 @@ mod serde_tests {
         assert_eq!(back.listen_port, config.listen_port);
         assert_eq!(back.max_connections, config.max_connections);
         assert_eq!(back.max_uploads, config.max_uploads);
-        assert_eq!(back.download_dir, config.download_dir);
         assert_eq!(back.download_rate_limit, config.download_rate_limit);
         assert_eq!(back.upload_rate_limit, config.upload_rate_limit);
         assert_eq!(back.max_active_torrents, config.max_active_torrents);
@@ -257,7 +274,6 @@ mod serde_tests {
             listen_port: 12345,
             max_connections: 200,
             max_uploads: 16,
-            download_dir: PathBuf::from("/tmp/dl"),
             download_rate_limit: Some(1_048_576),
             upload_rate_limit: Some(524_288),
             max_active_torrents: 5,
@@ -277,6 +293,7 @@ mod serde_tests {
             node_id: Some([0xAB; 20]),
             dht_poll_interval: Duration::from_secs(60),
             peer_msg_buffer_size: 512,
+            storage_factory: Arc::new(FileStorageFactory),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -285,7 +302,6 @@ mod serde_tests {
         assert_eq!(back.listen_port, 12345);
         assert_eq!(back.max_connections, 200);
         assert_eq!(back.max_uploads, 16);
-        assert_eq!(back.download_dir, PathBuf::from("/tmp/dl"));
         assert_eq!(back.download_rate_limit, Some(1_048_576));
         assert_eq!(back.upload_rate_limit, Some(524_288));
         assert_eq!(back.max_active_torrents, 5);

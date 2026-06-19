@@ -2,27 +2,99 @@
 //!
 //! This module provides the sync primitives for storage:
 //! - [`Storage`] trait — abstraction for reading/writing pieces to disk
+//! - [`StorageFactory`] trait — creates [`Storage`] instances from metainfo
 //!
 //! The async `FileStorage` implementation lives in the `torrent` crate.
 
+use std::fmt::Debug;
 use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::error::Error;
+use crate::metainfo::Info;
+
+/// Factory trait for creating [`Storage`] backends.
+///
+/// This allows users to inject custom storage implementations
+/// (in-memory, remote, processing pipeline, etc.) without
+/// modifying the library.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use torrent_core::storage::{Storage, StorageFactory};
+/// use torrent_core::metainfo::Info;
+/// use torrent_core::error::Error;
+///
+/// #[derive(Debug)]
+/// struct MyFactory;
+///
+/// impl StorageFactory for MyFactory {
+///     fn create<'a>(
+///         &'a self, _info: &'a Info, _dir: &'a std::path::Path,
+///     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<dyn Storage>, Error>> + Send + 'a>> {
+///         Box::pin(async move {
+///             // Create a custom storage backend here
+///             todo!()
+///         })
+///     }
+/// }
+/// ```
+#[allow(clippy::type_complexity)]
+pub trait StorageFactory: Debug + Send + Sync {
+    /// Create a new [`Storage`] backend for a torrent.
+    ///
+    /// `info` contains the torrent's file layout metadata.
+    /// `download_dir` is the user-specified download directory;
+    /// implementations may use or ignore it as appropriate.
+    ///
+    /// For magnet-link torrents (BEP 9), `info` is a stub with
+    /// `piece_length = 0` and no pieces. Implementations should
+    /// handle this gracefully, e.g. by deferring allocation until
+    /// metadata arrives from peers.
+    fn create<'a>(
+        &'a self, info: &'a Info, download_dir: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Storage>, Error>> + Send + 'a>>;
+}
 
 /// Storage abstraction for torrent data.
 ///
-/// This trait encapsulates piece-level read/write operations
-/// without exposing filesystem details.
+/// This trait encapsulates piece-level and block-level read/write
+/// operations without exposing filesystem details.
+///
+/// # Implementation Notes
+///
+/// Implementations must be `Send + Sync` so they can be shared
+/// across tokio tasks via `Arc<dyn Storage>`. Methods return
+/// `Pin<Box<dyn Future>>` instead of `impl Future` so the trait
+/// remains dyn-compatible.
+#[allow(clippy::type_complexity)]
 pub trait Storage: Send + Sync {
     /// Read an entire piece into `buf`. The buffer must be exactly the piece length.
-    fn read_piece(
-        &self, index: u32, buf: &mut [u8],
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn read_piece<'a>(
+        &'a self, index: u32, buf: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
 
     /// Write a block (a portion of a piece) to storage.
-    fn write_block(
-        &self, piece: u32, offset: u32, data: &[u8],
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    ///
+    /// Implements BEP 0003: The BitTorrent Protocol Specification.
+    fn write_block<'a>(
+        &'a self, piece: u32, offset: u32, data: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
+
+    /// Read a block (partial piece) without reading the entire piece.
+    ///
+    /// Used for serving upload requests. Significantly reduces I/O
+    /// compared to [`read_piece`](Storage::read_piece) when only a
+    /// single 16 KB block is needed rather than the full piece
+    /// (which can be 4 MB or more).
+    fn read_block<'a>(
+        &'a self, piece: u32, offset: u32, buf: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
 
     /// Total number of pieces.
     fn num_pieces(&self) -> usize;

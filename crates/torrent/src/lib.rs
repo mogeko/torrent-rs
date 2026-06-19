@@ -12,18 +12,14 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use std::path::PathBuf;
 //! use torrent::session::{Session, SessionConfig};
 //!
 //! # async fn example() {
-//! let config = SessionConfig {
-//!     download_dir: PathBuf::from("./downloads"),
-//!     ..Default::default()
-//! };
+//! let config = SessionConfig::default();
 //! let session = Session::new(config).await.unwrap();
 //!
 //! let data = std::fs::read("torrent.torrent").unwrap();
-//! let info_hash = session.add_torrent_bytes(&data).await.unwrap();
+//! let info_hash = session.add_torrent_bytes(&data, "./downloads").await.unwrap();
 //! # }
 //! ```
 

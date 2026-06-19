@@ -8,7 +8,7 @@ use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Metainfo, Mode};
 use crate::peer::PeerId;
 use crate::piece::{PieceManager, RarestFirst};
-use crate::storage::FileStorage;
+use crate::storage::Storage;
 use crate::tracker::Tracker;
 
 use super::download::{DownloadLoop, PeerEvent};
@@ -28,7 +28,7 @@ pub(crate) enum TorrentCommand {
 pub(crate) struct TorrentHandle {
     pub info_hash: [u8; 20],
     pub metainfo: Metainfo,
-    pub storage: Arc<FileStorage>,
+    pub storage: Arc<dyn Storage>,
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
@@ -41,7 +41,7 @@ pub(crate) struct TorrentHandle {
 impl TorrentHandle {
     /// Create a new TorrentHandle and spawn its download loop.
     pub fn new(
-        metainfo: Metainfo, info_hash: [u8; 20], storage: Arc<FileStorage>, config: &SessionConfig,
+        metainfo: Metainfo, info_hash: [u8; 20], storage: Arc<dyn Storage>, config: &SessionConfig,
     ) -> Self {
         let num_pieces = metainfo.info.num_pieces();
         let name = match &metainfo.info.mode {
@@ -52,7 +52,7 @@ impl TorrentHandle {
 
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
         let peer_id = PeerId::random();
-        let tracker = Tracker::from_metainfo_with_timeout(&metainfo, config.tracker_timeout);
+        let tracker = Tracker::from_torrent_with_timeout(&metainfo, config.tracker_timeout);
         let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
         let peer_mgr = Arc::new(RwLock::new(PeerManager::new(
             info_hash,

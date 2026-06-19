@@ -31,15 +31,12 @@ async fn session_config_defaults() {
     assert_eq!(cfg.listen_port, 6881);
     assert_eq!(cfg.max_connections, 50);
     assert_eq!(cfg.max_uploads, 8);
-    assert_eq!(cfg.download_dir, std::path::PathBuf::from("."));
     assert!(cfg.bootstrap_nodes.is_some());
 }
 
 #[tokio::test]
 async fn session_new_with_temp_dir() -> Result<(), Error> {
-    let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
-        download_dir: tmp.path().to_path_buf(),
         bootstrap_nodes: None,
         ..Default::default()
     };
@@ -52,14 +49,13 @@ async fn session_new_with_temp_dir() -> Result<(), Error> {
 async fn add_torrent_bytes_and_query_status() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
-        download_dir: tmp.path().to_path_buf(),
         bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
 
     let data = make_single_file_torrent();
-    let info_hash = session.add_torrent_bytes(&data).await?;
+    let info_hash = session.add_torrent_bytes(&data, tmp.path()).await?;
 
     // Verify the torrent appears in active list
     let active = session.active_torrents().await;
@@ -80,14 +76,13 @@ async fn add_torrent_bytes_and_query_status() -> Result<(), Error> {
 async fn remove_torrent() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
-        download_dir: tmp.path().to_path_buf(),
         bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
 
     let data = make_single_file_torrent();
-    let info_hash = session.add_torrent_bytes(&data).await?;
+    let info_hash = session.add_torrent_bytes(&data, tmp.path()).await?;
     assert_eq!(session.active_torrents().await.len(), 1);
 
     session.remove_torrent(&info_hash).await?;
@@ -104,14 +99,13 @@ async fn remove_torrent() -> Result<(), Error> {
 async fn add_and_query_multiple_times() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
-        download_dir: tmp.path().to_path_buf(),
         bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
 
     let data = make_single_file_torrent();
-    let info_hash = session.add_torrent_bytes(&data).await?;
+    let info_hash = session.add_torrent_bytes(&data, tmp.path()).await?;
 
     // Query status multiple times — should be consistent
     for _ in 0..3 {
@@ -129,14 +123,16 @@ async fn add_and_query_multiple_times() -> Result<(), Error> {
 async fn add_magnet_str_minimal() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
-        download_dir: tmp.path().to_path_buf(),
         bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
 
     let info_hash = session
-        .add_magnet_str("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567")
+        .add_magnet_str(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            tmp.path(),
+        )
         .await?;
 
     let active = session.active_torrents().await;
@@ -155,7 +151,6 @@ async fn add_magnet_str_minimal() -> Result<(), Error> {
 async fn add_magnet_str_with_trackers() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
-        download_dir: tmp.path().to_path_buf(),
         bootstrap_nodes: None,
         ..Default::default()
     };
@@ -165,6 +160,7 @@ async fn add_magnet_str_with_trackers() -> Result<(), Error> {
         .add_magnet_str(
             "magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\
              &tr=http://t1.com/ann&tr=http://t2.com/ann",
+            tmp.path(),
         )
         .await?;
 
@@ -179,14 +175,15 @@ async fn add_magnet_str_with_trackers() -> Result<(), Error> {
 async fn add_magnet_str_invalid() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
-        download_dir: tmp.path().to_path_buf(),
         bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
 
     // No xt parameter — should fail
-    let result = session.add_magnet_str("magnet:?dn=no_hash").await;
+    let result = session
+        .add_magnet_str("magnet:?dn=no_hash", tmp.path())
+        .await;
     assert!(result.is_err());
 
     Ok(())
@@ -196,14 +193,16 @@ async fn add_magnet_str_invalid() -> Result<(), Error> {
 async fn add_magnet_str_with_display_name() -> Result<(), Error> {
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
-        download_dir: tmp.path().to_path_buf(),
         bootstrap_nodes: None,
         ..Default::default()
     };
     let session = Session::new(config).await?;
 
     let info_hash = session
-        .add_magnet_str("magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc&dn=Test+File")
+        .add_magnet_str(
+            "magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc&dn=Test+File",
+            tmp.path(),
+        )
         .await?;
 
     let status = session.torrent_status(&info_hash).await?;
@@ -219,7 +218,6 @@ async fn magnet_via_add_torrent() -> Result<(), Error> {
 
     let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
-        download_dir: tmp.path().to_path_buf(),
         bootstrap_nodes: None,
         ..Default::default()
     };
@@ -231,7 +229,7 @@ async fn magnet_via_add_torrent() -> Result<(), Error> {
     .unwrap();
     let info_hash = *magnet.primary_info_hash();
 
-    session.add_torrent(magnet).await?;
+    session.add_torrent(magnet, tmp.path()).await?;
 
     let status = session.torrent_status(&info_hash).await?;
     assert_eq!(status.name, "Direct");
