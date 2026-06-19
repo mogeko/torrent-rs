@@ -147,7 +147,8 @@ impl Tracker {
 
     /// Create a `Tracker` from anything that converts into a [`TorrentSpec`].
     ///
-    /// Accepts [`Metainfo`], [`MagnetUri`], or [`TorrentSpec`] directly.
+    /// Accepts [`Metainfo`](crate::metainfo::Metainfo),
+    /// [`MagnetUri`](crate::magnet::MagnetUri), or [`TorrentSpec`] directly.
     /// Collects all tracker URLs from the spec (both `Metainfo` and `Magnet`
     /// variants), deduplicates them, and returns a single-tracker or
     /// multi-tracker as appropriate. Invalid or unsupported URLs are silently
