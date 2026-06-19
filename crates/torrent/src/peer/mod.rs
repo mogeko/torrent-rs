@@ -5,11 +5,13 @@
 //!
 //! # Key Types
 //!
-//! - [`PeerId`], [`Handshake`], [`PeerMessage`], [`PeerState`] — re-exported from `torrent_core`
+//! - [`PeerId`], [`Handshake`], [`PeerMessage`], [`PeerState`], [`ExtensionNegotiation`] — re-exported from `torrent_core`
 //! - [`PeerConnection`] — async TCP connection with buffered I/O
 
 mod stream;
 
-pub use torrent_core::peer::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
+pub use torrent_core::peer::{
+    ExtensionNegotiation, Handshake, PeerId, PeerMessage, PeerState, decode, encode,
+};
 
 pub use self::stream::PeerConnection;

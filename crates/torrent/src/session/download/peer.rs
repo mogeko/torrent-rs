@@ -172,11 +172,12 @@ impl DownloadLoop {
                 }
             }
             PeerMessage::Port(_) => {}
-            PeerMessage::Extended { .. } => {
-                // Extended messages (BEP 10) are dispatched to
-                // handle_extended_message once the LTEP handshake
-                // is negotiated. Ignored for now.
-                todo!()
+            PeerMessage::Extended { ext_id, .. } => {
+                tracing::debug!(
+                    "received extended message (ext_id={}) from {}",
+                    ext_id,
+                    addr
+                );
             }
         }
 

@@ -203,8 +203,13 @@ impl DownloadLoop {
                 pm.connection(addr)
             };
             if let Some(conn_arc) = conn_arc {
+                // Copy negotiated extension IDs from the connection
+                let ext_ids = conn_arc.extension_ids().clone();
                 self.spawn_peer_reader(*addr, conn_arc);
                 self.peers.insert(*addr, PeerInfo::new());
+                if let Some(pi) = self.peers.get_mut(addr) {
+                    pi.extension_ids = ext_ids;
+                }
                 self.send_bitfield(*addr).await?;
             }
         }

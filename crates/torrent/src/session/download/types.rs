@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -43,6 +44,8 @@ pub(crate) struct PeerInfo {
     pub(super) corrupt_blocks: u32,
     /// Last time we received a Piece message from this peer.
     pub(super) last_data_received: Option<Instant>,
+    /// Extension name → message ID mapping (BEP 10 LTEP).
+    pub(super) extension_ids: HashMap<String, u8>,
 }
 
 impl PeerInfo {
@@ -59,6 +62,7 @@ impl PeerInfo {
             downloaded_this_round: 0,
             corrupt_blocks: 0,
             last_data_received: None,
+            extension_ids: HashMap::new(),
         }
     }
 
