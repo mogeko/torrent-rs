@@ -6,7 +6,7 @@ use crate::error::{Error, ErrorKind};
 use crate::peer::{ExtensionNegotiation, PeerMessage, PexMessage};
 
 use super::DownloadLoop;
-use super::types::PIPELINE_SIZE;
+use super::types::{PIPELINE_SIZE, UT_PEX};
 
 impl DownloadLoop {
     /// Handle the remote peer's BEP 10 LTEP extension negotiation handshake.
@@ -33,6 +33,10 @@ impl DownloadLoop {
 
         // ID=0 entries are already filtered by from_bencode (BEP 10).
         peer.remote_extension_ids = neg.m;
+
+        // Persist remote metadata for diagnostics / future BEP 9 support.
+        peer.client_version = neg.v;
+        peer.metadata_size = neg.metadata_size;
 
         // Respect the remote's request queue limit (BEP 10 reqq).
         if let Some(reqq) = neg.reqq {
@@ -68,7 +72,7 @@ impl DownloadLoop {
         // Check if this ext_id maps to ut_pex in our offered mapping.
         // The remote peer sends extended messages using the IDs we
         // advertised in our LTEP handshake (BEP 10).
-        let is_pex = peer.our_extension_ids.get("ut_pex") == Some(&ext_id);
+        let is_pex = peer.our_extension_ids.get(UT_PEX) == Some(&ext_id);
 
         if is_pex {
             let (val, _) =
@@ -117,7 +121,7 @@ impl DownloadLoop {
         };
 
         // Find the ut_pex extension ID
-        let pex_id = match peer.remote_extension_ids.get("ut_pex") {
+        let pex_id = match peer.remote_extension_ids.get(UT_PEX) {
             Some(&id) => id,
             None => return Ok(()), // Peer doesn't support PEX
         };

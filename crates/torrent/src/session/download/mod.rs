@@ -27,6 +27,8 @@ use super::torrent::TorrentCommand;
 use super::upload::UploadManager;
 use super::{TorrentState, TorrentStatus};
 
+use self::types::{UT_PEX, UT_PEX_ID};
+
 /// The core download engine for a single torrent.
 pub(crate) struct DownloadLoop {
     pub info_hash: [u8; 20],
@@ -228,7 +230,7 @@ impl DownloadLoop {
                     let remote_ltep = conn_arc.remote_reserved()[5] & 0x10 != 0
                         || conn_arc.remote_has_extension(63);
                     if remote_ltep {
-                        pi.our_extension_ids.insert("ut_pex".to_string(), 1);
+                        pi.our_extension_ids.insert(UT_PEX.to_string(), UT_PEX_ID);
                         self.send_extended_handshake(*addr, &pi.our_extension_ids)
                             .await;
                     }
@@ -253,6 +255,7 @@ impl DownloadLoop {
         for (name, &id) in our_ids {
             neg.add_extension(name, id);
         }
+        neg.v = Some(crate::CLIENT_VERSION.to_string());
         let payload = bencode_encode(&neg.to_bencode());
         let peer_mgr = self.peer_mgr.read().await;
 

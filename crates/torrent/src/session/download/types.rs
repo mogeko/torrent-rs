@@ -10,6 +10,12 @@ pub(super) const PIPELINE_SIZE: usize = 5;
 /// Default block size (BEP 3: 2^14 = 16 KB).
 pub(super) const BLOCK_SIZE: u32 = 16 * 1024;
 
+/// BEP 10 extension name: Peer Exchange (BEP 11).  µTorrent prefix.
+pub(super) const UT_PEX: &str = "ut_pex";
+/// Our assigned extension message ID for `ut_pex` in outgoing LTEP
+/// handshakes.
+pub(super) const UT_PEX_ID: u8 = 1;
+
 /// Event from a peer reader task.
 pub(crate) enum PeerEvent {
     /// A valid protocol message.
@@ -59,6 +65,11 @@ pub(crate) struct PeerInfo {
     /// at [`PIPELINE_SIZE`]. Defaults to [`PIPELINE_SIZE`] if the remote
     /// did not advertise a value.
     pub(super) max_requests: usize,
+    /// Client name and version from remote's LTEP handshake (BEP 10 `v`).
+    pub(super) client_version: Option<String>,
+    /// Metadata size from remote's LTEP handshake (BEP 10 `metadata_size`,
+    /// for BEP 9 metadata exchange).
+    pub(super) metadata_size: Option<i64>,
 }
 
 impl PeerInfo {
@@ -80,6 +91,8 @@ impl PeerInfo {
             last_pex_sent: None,
             last_pex_received: None,
             max_requests: PIPELINE_SIZE,
+            client_version: None,
+            metadata_size: None,
         }
     }
 
