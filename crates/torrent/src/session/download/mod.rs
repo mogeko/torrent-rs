@@ -135,7 +135,7 @@ impl DownloadLoop {
                     self.update_status().await;
                     self.announce_if_needed().await;
                     if let Err(e) = self.connect_pending().await {
-                        tracing::warn!("connect_pending failed: {}", e);
+                        tracing::debug!("connect_pending: {}", e);
                     }
                 }
                 _ = choke_tick.tick() => {
