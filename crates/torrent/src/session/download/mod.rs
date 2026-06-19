@@ -86,6 +86,8 @@ pub(crate) struct DownloadLoop {
     /// Cached completed pieces for upload serving (avoid repeated disk reads).
     /// Ordered by insertion time — oldest first for LRU eviction.
     pub(crate) piece_cache: Vec<(u32, Arc<Vec<u8>>)>,
+    /// Recently disconnected peers to announce in PEX dropped field.
+    pub(crate) recently_dropped: Vec<SocketAddr>,
     /// Enable Peer Exchange (BEP 11).
     pub(crate) pex_enabled: bool,
     /// PEX broadcast interval.

@@ -299,15 +299,24 @@ async fn perform_ltep_handshake(
 
     match resp {
         PeerMessage::Extended { ext_id: 0, data } => {
-            let (val, _) = bencode::decode(&data)
-                .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
-            let remote_neg = ExtensionNegotiation::from_bencode(&val)?;
+            let (val, _) = bencode::decode(&data).map_err(|e| {
+                tracing::warn!(
+                    "failed to decode LTEP handshake bencode from {} ({} bytes): {}",
+                    addr,
+                    data.len(),
+                    e,
+                );
+                Error::new(ErrorKind::PeerInvalidExtendedMessage)
+            })?;
+            let remote_neg = ExtensionNegotiation::from_bencode(&val).inspect_err(|e| {
+                tracing::warn!("malformed LTEP handshake dict from {}: {}", addr, e,);
+            })?;
             tracing::debug!("LTEP handshake complete with {}: {:?}", addr, remote_neg.m);
             Ok(remote_neg.m)
         }
         PeerMessage::Extended { ext_id, .. } => {
             tracing::warn!(
-                "unexpected extended message (ext_id={}) during LTEP handshake with {}",
+                "unexpected ext_id={} during LTEP handshake with {} (expected 0)",
                 ext_id,
                 addr,
             );
@@ -315,7 +324,7 @@ async fn perform_ltep_handshake(
         }
         _ => {
             tracing::warn!(
-                "expected extended message during LTEP handshake with {}, got {:?}",
+                "expected Extended message during LTEP handshake with {}, got: {:?}",
                 addr,
                 resp,
             );

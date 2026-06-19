@@ -32,9 +32,13 @@ impl DownloadLoop {
             let added6_count = pex_msg.added6.len();
             let dropped6_count = pex_msg.dropped6.len();
 
-            // Add newly discovered peers
+            // Add newly discovered peers (IPv4 and IPv6)
+            let mut pm = self.peer_mgr.write().await;
             if !pex_msg.added.is_empty() {
-                self.peer_mgr.write().await.add_peers(pex_msg.added);
+                pm.add_peers(pex_msg.added);
+            }
+            if !pex_msg.added6.is_empty() {
+                pm.add_peers(pex_msg.added6);
             }
 
             // Update peer state
@@ -68,14 +72,21 @@ impl DownloadLoop {
             None => return Ok(()), // Peer doesn't support PEX
         };
 
-        // Gather all currently connected peers (excluding this peer itself)
+        // Gather currently connected peers (excluding this peer itself)
         let connected = self.peer_mgr.read().await.connection_addrs();
         let added: Vec<SocketAddr> = connected.into_iter().filter(|a| *a != addr).collect();
+
+        // Drain recently dropped peers for the dropped field
+        let dropped: Vec<SocketAddr> = self
+            .recently_dropped
+            .drain(..)
+            .filter(|a| *a != addr)
+            .collect();
 
         // Build PEX message
         let pex_msg = PexMessage {
             added,
-            dropped: Vec::new(),
+            dropped,
             added6: Vec::new(),
             dropped6: Vec::new(),
         };

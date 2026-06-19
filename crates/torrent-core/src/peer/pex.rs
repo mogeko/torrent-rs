@@ -123,19 +123,37 @@ impl PexMessage {
         }
 
         let added = dict_get_bytes(val, b"added")
-            .and_then(|b| parse_compact_peers_ipv4(b).ok())
+            .and_then(|b| {
+                parse_compact_peers_ipv4(b)
+                    .inspect_err(|e| tracing::debug!("ignoring malformed PEX added field: {}", e))
+                    .ok()
+            })
             .unwrap_or_default();
 
         let dropped = dict_get_bytes(val, b"dropped")
-            .and_then(|b| parse_compact_peers_ipv4(b).ok())
+            .and_then(|b| {
+                parse_compact_peers_ipv4(b)
+                    .inspect_err(|e| tracing::debug!("ignoring malformed PEX dropped field: {}", e))
+                    .ok()
+            })
             .unwrap_or_default();
 
         let added6 = dict_get_bytes(val, b"added6")
-            .and_then(|b| parse_compact_peers_ipv6(b).ok())
+            .and_then(|b| {
+                parse_compact_peers_ipv6(b)
+                    .inspect_err(|e| tracing::debug!("ignoring malformed PEX added6 field: {}", e))
+                    .ok()
+            })
             .unwrap_or_default();
 
         let dropped6 = dict_get_bytes(val, b"dropped6")
-            .and_then(|b| parse_compact_peers_ipv6(b).ok())
+            .and_then(|b| {
+                parse_compact_peers_ipv6(b)
+                    .inspect_err(|e| {
+                        tracing::debug!("ignoring malformed PEX dropped6 field: {}", e)
+                    })
+                    .ok()
+            })
             .unwrap_or_default();
 
         Ok(PexMessage {
