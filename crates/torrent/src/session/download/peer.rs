@@ -174,6 +174,10 @@ impl DownloadLoop {
                 }
             }
             PeerMessage::Port(_) => {}
+            PeerMessage::Extended { ext_id: 0, data } => {
+                // BEP 10: LTEP extension negotiation handshake
+                self.handle_ltep_handshake(addr, &data).await?;
+            }
             PeerMessage::Extended { ext_id, data } => {
                 self.handle_extended_message(addr, ext_id, data).await?;
             }

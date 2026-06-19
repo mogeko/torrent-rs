@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -7,10 +6,9 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 
-use crate::bencode;
 use crate::error::{Error, ErrorKind};
 
-use super::{ExtensionNegotiation, Handshake, PeerId, PeerMessage, PeerState, decode, encode};
+use super::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
 
 /// Timeout for TCP connect + handshake exchange.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,9 +37,6 @@ pub struct PeerConnection {
     /// Remote peer's reserved bytes from the BEP 3 handshake
     /// (for extension negotiation, BEP 10).
     remote_reserved: [u8; 8],
-    /// Extension name → message ID mapping negotiated via LTEP (BEP 10).
-    /// Empty if the remote peer does not support extensions.
-    extension_ids: HashMap<String, u8>,
 }
 
 impl PeerConnection {
@@ -95,18 +90,6 @@ impl PeerConnection {
 
         let remote_reserved = remote_handshake.reserved;
 
-        // BEP 10 LTEP handshake: negotiate extension IDs if the remote
-        // peer signals extension protocol support.
-        // Check byte 5 bit 4 (0x10, the LTEP header byte per BEP 10) and
-        // bit 63 (used by libtorrent and many clients as a combined DHT+LTEP flag).
-        let remote_ltep = remote_reserved[5] & 0x10 != 0 || remote_handshake.has_extension(63);
-        let extension_ids = if remote_ltep {
-            tracing::debug!("attempting LTEP handshake with {}", addr);
-            perform_ltep_handshake(&mut raw_stream, addr).await?
-        } else {
-            HashMap::new()
-        };
-
         // Now split into independent read/write halves so that recv and
         // send can proceed concurrently without lock contention.
         // BufReader/BufWriter are applied AFTER the split so no handshake
@@ -121,22 +104,7 @@ impl PeerConnection {
             state: PeerState::Init,
             remote_peer_id: Some(PeerId(remote_handshake.peer_id)),
             remote_reserved,
-            extension_ids,
         })
-    }
-
-    /// Send an extended message by extension name (BEP 10).
-    ///
-    /// Looks up the extension's message ID from the negotiated
-    /// `extension_ids` map. Returns an error if the extension
-    /// was not negotiated with this peer.
-    pub async fn send_extended(&self, ext_name: &str, data: Vec<u8>) -> Result<(), Error> {
-        let ext_id = self
-            .extension_ids
-            .get(ext_name)
-            .copied()
-            .ok_or_else(|| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
-        self.send(&PeerMessage::Extended { ext_id, data }).await
     }
 
     /// Send a message to the peer.
@@ -231,99 +199,5 @@ impl PeerConnection {
     /// Return the remote peer's reserved bytes from the BEP 3 handshake.
     pub fn remote_reserved(&self) -> &[u8; 8] {
         &self.remote_reserved
-    }
-
-    /// Look up the message ID for a named extension (BEP 10).
-    ///
-    /// Returns `None` if the extension was not negotiated with this peer.
-    pub fn extension_id(&self, name: &str) -> Option<u8> {
-        self.extension_ids.get(name).copied()
-    }
-
-    /// Return a reference to the full extension ID map.
-    pub fn extension_ids(&self) -> &HashMap<String, u8> {
-        &self.extension_ids
-    }
-}
-
-/// Perform the BEP 10 LTEP extension negotiation handshake on a raw TCP stream.
-///
-/// Sends our supported extensions (`ut_pex`) then reads and parses the
-/// remote peer's extension handshake response. Returns the remote peer's
-/// extension name → message ID mapping.
-///
-/// This must be called BEFORE [`TcpStream::into_split`] so that no
-/// buffered I/O steals bytes from subsequent wire messages.
-async fn perform_ltep_handshake(
-    raw_stream: &mut TcpStream, addr: SocketAddr,
-) -> Result<HashMap<String, u8>, Error> {
-    // Build our LTEP handshake offering ut_pex
-    let mut neg = ExtensionNegotiation::new();
-    neg.add_extension("ut_pex", 1);
-    let payload = bencode::encode(&neg.to_bencode());
-
-    // Send as extended message (ext_id = 0 = handshake)
-    let ext_msg = PeerMessage::Extended {
-        ext_id: 0,
-        data: payload,
-    };
-    let wire = encode(&ext_msg);
-
-    if let Err(e) = tokio::time::timeout(HANDSHAKE_TIMEOUT, raw_stream.write_all(&wire)).await {
-        return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
-    }
-    if let Err(e) = tokio::time::timeout(HANDSHAKE_TIMEOUT, raw_stream.flush()).await {
-        return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
-    }
-
-    // Read remote's LTEP handshake response (should be Extended { ext_id: 0 })
-    let mut len_buf = [0u8; 4];
-    if let Err(e) =
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, raw_stream.read_exact(&mut len_buf)).await
-    {
-        return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
-    }
-    let msg_len = u32::from_be_bytes(len_buf);
-    if msg_len > MAX_MESSAGE_SIZE {
-        return Err(Error::new(ErrorKind::PeerConnectionClosed));
-    }
-    let mut msg_buf = vec![0u8; msg_len as usize];
-    if let Err(e) =
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, raw_stream.read_exact(&mut msg_buf)).await
-    {
-        return Err(Error::with_source(ErrorKind::PeerConnectionClosed, e));
-    }
-
-    let mut full_msg = len_buf.to_vec();
-    full_msg.extend_from_slice(&msg_buf);
-    let resp = decode(&full_msg)?;
-
-    match resp {
-        PeerMessage::Extended { ext_id: 0, data } => {
-            let (val, _) = match bencode::decode(&data) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("invalid LTEP bencode from {}: {}", addr, e);
-                    return Ok(HashMap::new());
-                }
-            };
-            let remote_neg = match ExtensionNegotiation::from_bencode(&val) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!("invalid LTEP dict from {}: {}", addr, e);
-                    return Ok(HashMap::new());
-                }
-            };
-            tracing::debug!("LTEP handshake complete with {}: {:?}", addr, remote_neg.m);
-            Ok(remote_neg.m)
-        }
-        PeerMessage::Extended { ext_id, .. } => {
-            tracing::debug!("LTEP from {}: expected ext_id=0, got {}", addr, ext_id);
-            Ok(HashMap::new())
-        }
-        _ => {
-            tracing::debug!("LTEP from {}: got {:?}", addr, resp);
-            Ok(HashMap::new())
-        }
     }
 }

@@ -67,9 +67,13 @@ impl ExtensionNegotiation {
 
     /// Register an extension with the given message ID.
     ///
-    /// Extension ID 0 is reserved for the LTEP handshake itself;
-    /// extension-specific messages should use IDs ≥ 1.
+    /// Extension ID 0 means disabled per BEP 10; use IDs ≥ 1 for enabled
+    /// extensions.
     pub fn add_extension(&mut self, name: impl Into<String>, id: u8) {
+        debug_assert!(
+            id != 0,
+            "extension ID 0 means disabled per BEP 10; use IDs >= 1 for enabled extensions"
+        );
         self.m.insert(name.into(), id);
     }
 
@@ -142,6 +146,10 @@ impl ExtensionNegotiation {
                             .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?,
                         _ => return Err(Error::new(ErrorKind::PeerInvalidExtendedMessage)),
                     };
+                    // BEP 10: ID 0 means the extension is disabled/not supported
+                    if id == 0 {
+                        continue;
+                    }
                     map.insert(name, id);
                 }
                 map

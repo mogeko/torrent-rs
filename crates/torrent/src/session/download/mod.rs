@@ -14,9 +14,10 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{RwLock, mpsc};
 
+use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
 use crate::metainfo::Metainfo;
-use crate::peer::PeerId;
+use crate::peer::{ExtensionNegotiation, PeerId, PeerMessage};
 use crate::piece::{PieceManager, PieceSelector};
 use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
@@ -218,22 +219,54 @@ impl DownloadLoop {
                 pm.connection(addr)
             };
             if let Some(conn_arc) = conn_arc {
-                // Copy negotiated extension IDs from the connection
-                let ext_ids = conn_arc.extension_ids().clone();
-                self.spawn_peer_reader(*addr, conn_arc);
-                self.peers.insert(*addr, PeerInfo::new());
-                if let Some(pi) = self.peers.get_mut(addr) {
-                    pi.extension_ids = ext_ids;
-                }
-                self.send_bitfield(*addr).await?;
-                // Send initial PEX message with our known peers
+                let mut pi = PeerInfo::new();
+
+                // BEP 10: if the remote peer signals extension support,
+                // and we have extensions to offer, record our offering
+                // and send the LTEP handshake.
                 if self.pex_enabled {
-                    if let Err(e) = self.send_pex_message(*addr).await {
-                        tracing::debug!("failed to send initial PEX to {}: {}", addr, e);
+                    let remote_ltep = conn_arc.remote_reserved()[5] & 0x10 != 0
+                        || conn_arc.remote_has_extension(63);
+                    if remote_ltep {
+                        pi.our_extension_ids.insert("ut_pex".to_string(), 1);
+                        self.send_extended_handshake(*addr, &pi.our_extension_ids)
+                            .await;
                     }
                 }
+
+                self.spawn_peer_reader(*addr, conn_arc);
+                self.peers.insert(*addr, pi);
+                self.send_bitfield(*addr).await?;
+
+                // PEX is deferred: remote_extension_ids are not known yet.
+                // They will be populated when the remote's LTEP handshake
+                // arrives via handle_ltep_handshake, which then sends the
+                // initial PEX message.
             }
         }
         Ok(())
+    }
+
+    /// Send our BEP 10 LTEP extension negotiation handshake.
+    async fn send_extended_handshake(&self, addr: SocketAddr, our_ids: &HashMap<String, u8>) {
+        let mut neg = ExtensionNegotiation::new();
+        for (name, &id) in our_ids {
+            neg.add_extension(name, id);
+        }
+        let payload = bencode_encode(&neg.to_bencode());
+        let peer_mgr = self.peer_mgr.read().await;
+
+        if let Err(e) = peer_mgr
+            .send_to(
+                &addr,
+                &PeerMessage::Extended {
+                    ext_id: 0,
+                    data: payload,
+                },
+            )
+            .await
+        {
+            tracing::warn!("failed to send LTEP handshake to {}: {}", addr, e);
+        }
     }
 }

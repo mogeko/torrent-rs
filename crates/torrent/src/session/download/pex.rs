@@ -1,12 +1,54 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
+use crate::bencode::{decode as bencode_decode, encode as bencode_encode};
 use crate::error::{Error, ErrorKind};
-use crate::peer::{PeerMessage, PexMessage};
+use crate::peer::{ExtensionNegotiation, PeerMessage, PexMessage};
 
 use super::DownloadLoop;
 
 impl DownloadLoop {
+    /// Handle the remote peer's BEP 10 LTEP extension negotiation handshake.
+    ///
+    /// Parses the remote's [`ExtensionNegotiation`] dictionary, stores the
+    /// extension name → message ID mapping, and sends an initial PEX message
+    /// now that we know the remote's extension IDs.
+    pub(super) async fn handle_ltep_handshake(
+        &mut self, addr: SocketAddr, data: &[u8],
+    ) -> Result<(), Error> {
+        let peer = match self.peers.get_mut(&addr) {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        let (val, _) = bencode_decode(data).map_err(|e| {
+            tracing::warn!("invalid LTEP bencode from {}: {}", addr, e);
+            Error::new(ErrorKind::PeerInvalidExtendedMessage)
+        })?;
+        let neg = ExtensionNegotiation::from_bencode(&val).map_err(|e| {
+            tracing::warn!("invalid LTEP dict from {}: {}", addr, e);
+            Error::new(ErrorKind::PeerInvalidExtendedMessage)
+        })?;
+
+        // ID=0 entries are already filtered by from_bencode (BEP 10).
+        peer.remote_extension_ids = neg.m;
+
+        tracing::debug!(
+            "LTEP handshake from {}: {:?}",
+            addr,
+            peer.remote_extension_ids
+        );
+
+        // Now that we know the remote's extension IDs, send an initial PEX.
+        if self.pex_enabled {
+            if let Err(e) = self.send_pex_message(addr).await {
+                tracing::debug!("failed to send initial PEX to {}: {}", addr, e);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Dispatch an incoming extended message (BEP 10) to the appropriate handler.
     pub(super) async fn handle_extended_message(
         &mut self, addr: SocketAddr, ext_id: u8, data: Vec<u8>,
@@ -16,15 +58,14 @@ impl DownloadLoop {
             None => return Ok(()),
         };
 
-        // Check if this ext_id maps to ut_pex
-        let is_pex = peer
-            .extension_ids
-            .iter()
-            .any(|(name, &id)| name == "ut_pex" && id == ext_id);
+        // Check if this ext_id maps to ut_pex in our offered mapping.
+        // The remote peer sends extended messages using the IDs we
+        // advertised in our LTEP handshake (BEP 10).
+        let is_pex = peer.our_extension_ids.get("ut_pex") == Some(&ext_id);
 
         if is_pex {
-            let (val, _) = crate::bencode::decode(&data)
-                .map_err(|_| Error::new(ErrorKind::PeerInvalidPexMessage))?;
+            let (val, _) =
+                bencode_decode(&data).map_err(|_| Error::new(ErrorKind::PeerInvalidPexMessage))?;
             let pex_msg = PexMessage::from_bencode(&val)?;
 
             let added_count = pex_msg.added.len();
@@ -67,7 +108,7 @@ impl DownloadLoop {
         };
 
         // Find the ut_pex extension ID
-        let pex_id = match peer.extension_ids.get("ut_pex") {
+        let pex_id = match peer.remote_extension_ids.get("ut_pex") {
             Some(&id) => id,
             None => return Ok(()), // Peer doesn't support PEX
         };
@@ -91,7 +132,7 @@ impl DownloadLoop {
             dropped6: Vec::new(),
         };
 
-        let payload = crate::bencode::encode(&pex_msg.to_bencode());
+        let payload = bencode_encode(&pex_msg.to_bencode());
         self.peer_mgr
             .read()
             .await
