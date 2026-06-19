@@ -120,18 +120,22 @@ torrent.rs/                  ← workspace root
 ```
 torrent-core (sync)              torrent (async)
 ─────────────────────            ─────────────────
-bencode ─── metainfo             session ───────────────
+bencode ─── metainfo             session
     │           │                    │
     │           ├── magnet           ├── tracker (http, udp)
     │           │                    │
     └── error   ├── peer/types       ├── peer/stream
                 │                    │
-                ├── dht/types        ├── dht/rpc
+                ├── peer/extension   ├── dht/rpc
+                │   (BEP 10 LTEP)    │
+                │                    ├── storage/file_backend
+                ├── peer/pex         │
+                │   (BEP 11 PEX)     ├── piece (manager + selector)
                 │                    │
-                └── storage/trait    └── storage/file_backend
-                ┌── piece (manager + selector)
+                ├── dht/types        └── session/download/pex
+                │                        (PEX handler)
+                └── storage/trait
 
-      tracker/data
 ```
 
 - `torrent-core`: All sync — no tokio dependency. Contains data types, parsing, encoding, traits.
@@ -142,7 +146,9 @@ bencode ─── metainfo             session ───────────
 - **Bencode**: Recursive-descent parser with strict validation. Dict keys sorted lexicographically during both decode and encode for idempotent round-trips. Uses `Vec<(Bytes, Bencode)>` for dicts.
 - **Metainfo**: `info_hash()` computes SHA-1 of the raw bencoded `info` dict. Supports single-file, multi-file (BEP 52), and announce-list (BEP 12).
 - **Magnet**: Parses `magnet:?xt=urn:btih:<hex\|base32>`. Hex and base32 decoding implemented manually.
-- **Peer**: 11 message types (`KeepAlive`–`Port`). 68-byte handshake with reserved extension bits. Types in `torrent-core`, async `PeerConnection` in `torrent`.
+- **Peer**: 12 message types (`KeepAlive`–`Port` + `Extended`). 68-byte handshake with reserved extension bits. Types in `torrent-core`, async `PeerConnection` in `torrent`.
+- **LTEP (BEP 10)**: `ExtensionNegotiation` in `torrent-core` for handshake dict encode/decode. Async LTEP negotiation during `PeerConnection::connect()` in `torrent`.
+- **PEX (BEP 11)**: `PexMessage` in `torrent-core` for peer list encode/decode. `DownloadLoop` handler in `torrent` dispatches incoming PEX, broadcasts periodically with `pex_interval`.
 - **Tracker**: `HttpTracker` uses manual HTTP/1.1 (no `reqwest`). `UdpTracker` implements BEP 15 connection protocol + announce + retry. Both in `torrent`.
   - `HttpTracker` supports both `http://` (plain TCP) and `https://` (TLS via `tokio-rustls`).
 - **Piece**: `PieceManager` (bitfield, progress tracking) + 4 selection strategies (`RarestFirst`, `RandomFirst`, `Sequential`, `EndGame`) in `torrent-core`.
@@ -152,12 +158,12 @@ bencode ─── metainfo             session ───────────
 
 ### Project Status
 
-All 5 implementation phases are complete (202 tests, 0 failures):
+All 5 implementation phases plus BEP 10/11 are complete:
 
-| Phase | Modules              | Status                                      |
-| ----- | -------------------- | ------------------------------------------- |
-| 1     | `bencode`, `error`   | ✅ Bencode AST + recursive-descent parser   |
-| 2     | `metainfo`, `magnet` | ✅ .torrent parsing, Magnet URI (BEP 9)     |
-| 3     | `peer`, `tracker`    | ✅ Wire protocol, HTTP/UDP tracker          |
-| 4     | `storage`, `dht`     | ✅ File I/O, Kademlia DHT (BEP 5)           |
-| 5     | `session`            | ✅ High-level API orchestrating all modules |
+| Phase | Modules              | Status                                                     |
+| ----- | -------------------- | ---------------------------------------------------------- |
+| 1     | `bencode`, `error`   | ✅ Bencode AST + recursive-descent parser                  |
+| 2     | `metainfo`, `magnet` | ✅ .torrent parsing, Magnet URI (BEP 9)                    |
+| 3     | `peer`, `tracker`    | ✅ Wire protocol (incl. BEP 10 Extended), HTTP/UDP tracker |
+| 4     | `storage`, `dht`     | ✅ File I/O, Kademlia DHT (BEP 5)                          |
+| 5     | `session`            | ✅ High-level API, LTEP handshake (BEP 10), PEX (BEP 11)   |

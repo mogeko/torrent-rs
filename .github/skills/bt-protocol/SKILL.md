@@ -22,6 +22,8 @@ argument-hint: "[BEP number or protocol feature to implement]"
 | BEP 3  | The BitTorrent Protocol Specification    | `bencode`, `metainfo`, `peer`, `tracker`, `storage`, `session` |
 | BEP 5  | DHT Protocol                             | `dht` (krpc, routing table, rpc, query)                        |
 | BEP 9  | Extension for Peers to Send Metadata     | `magnet`                                                       |
+| BEP 10 | Extension Protocol (LTEP)                | `peer::extension`, `peer::message` (Extended), `peer::stream`  |
+| BEP 11 | Peer Exchange (PEX)                      | `peer::pex`, `session::download::pex`                          |
 | BEP 12 | Multitracker Metadata Extension          | `metainfo` (announce-list)                                     |
 | BEP 15 | UDP Tracker Protocol                     | `tracker::udp`                                                 |
 | BEP 19 | WebSeed — HTTP/FTP Seeding               | `magnet` (ws parameter parsing only; download not implemented) |
@@ -37,7 +39,9 @@ bencode (BEP 3 wire format)       tracker::http (BEP 3/23)
 metainfo (BEP 3/12/52 parsing)    tracker::udp (BEP 15)
 magnet (BEP 9 URI parsing)        peer::stream (BEP 3 TCP)
 peer::handshake (68-byte)         dht::rpc (BEP 5 UDP)
-peer::message (11 types)          session (orchestration)
+peer::message (12 types)          session (orchestration)
+peer::extension (BEP 10 LTEP)
+peer::pex (BEP 11 PEX)
 dht::krpc (BEP 5 message format)
 dht::RoutingTable (Kademlia)
 storage (BEP 3 piece mgmt)
@@ -176,16 +180,14 @@ Defined in [`crates/torrent-core/src/bencode/`](../../../crates/torrent-core/src
 
 These BEPs are reserved or partially referenced in the codebase but not yet fully implemented:
 
-| BEP | Title                           | Notes                                                                 |
-| --- | ------------------------------- | --------------------------------------------------------------------- |
-| 6   | Fast Extension                  | Reserved bit 44 in handshake; Have All/None, Suggest, Allowed Fast    |
-| 7   | IPv6 Tracker Extension          | Required for modern dual-stack network support                        |
-| 10  | Extension Protocol (LTEP)       | Reserved bit 63 in handshake; prerequisite for metadata exchange, PEX |
-| 11  | Peer Exchange (PEX)             | Complements DHT for peer discovery                                    |
-| 14  | Local Service Discovery (LSD)   | LAN peer discovery via multicast                                      |
-| 27  | Private Torrents                | Single `private` flag in metainfo                                     |
-| 29  | uTP (Micro Transport Protocol)  | UDP-based congestion-controlled transport; required by most clients   |
-| 41  | UDP Tracker Protocol Extensions | Extended UDP tracker features                                         |
+| BEP | Title                           | Notes                                                               |
+| --- | ------------------------------- | ------------------------------------------------------------------- |
+| 6   | Fast Extension                  | Reserved bit 44 in handshake; Have All/None, Suggest, Allowed Fast  |
+| 7   | IPv6 Tracker Extension          | Required for modern dual-stack network support                      |
+| 14  | Local Service Discovery (LSD)   | LAN peer discovery via multicast                                    |
+| 27  | Private Torrents                | Single `private` flag in metainfo                                   |
+| 29  | uTP (Micro Transport Protocol)  | UDP-based congestion-controlled transport; required by most clients |
+| 41  | UDP Tracker Protocol Extensions | Extended UDP tracker features                                       |
 
 ## Testing Protocol Features
 
