@@ -1,11 +1,48 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 
 use tokio::fs;
 
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Info, Mode};
 
-use super::Storage;
+use super::{Storage, StorageFactory};
+
+/// Default [`StorageFactory`] that creates file-backed storage.
+///
+/// This is the default storage backend used by
+/// [`Session`](crate::session::Session).
+/// Each call to [`create`](StorageFactory::create) pre-allocates
+/// files on disk based on the torrent's metadata.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use torrent::storage::{FileStorageFactory, StorageFactory};
+/// use torrent::metainfo::Info;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let factory = FileStorageFactory;
+/// // Use with SessionConfig::storage_factory
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct FileStorageFactory;
+
+impl StorageFactory for FileStorageFactory {
+    fn create<'a>(
+        &'a self, info: &'a Info, download_dir: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Storage>, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            let fs = FileStorage::new(info, download_dir).await?;
+            Ok(Arc::new(fs) as Arc<dyn Storage>)
+        })
+    }
+}
 
 /// File-based storage backend.
 pub struct FileStorage {
@@ -97,22 +134,45 @@ impl FileStorage {
 }
 
 impl Storage for FileStorage {
-    async fn read_piece(&self, index: u32, buf: &mut [u8]) -> Result<(), Error> {
-        tracing::trace!("reading piece {}", index);
-        let offset = self.piece_offset(index);
-        let read_len = self.piece_len_for_index(index);
-        self.read_range(offset, read_len as usize, buf).await
+    fn read_piece<'a>(
+        &'a self, index: u32, buf: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(async move {
+            tracing::trace!("reading piece {}", index);
+            let offset = self.piece_offset(index);
+            let read_len = self.piece_len_for_index(index);
+            self.read_range(offset, read_len as usize, buf).await
+        })
     }
 
-    async fn write_block(&self, piece: u32, offset: u32, data: &[u8]) -> Result<(), Error> {
-        tracing::trace!(
-            "writing block: piece {} offset {} ({} bytes)",
-            piece,
-            offset,
-            data.len()
-        );
-        let global_offset = self.piece_offset(piece) + offset as u64;
-        self.write_range(global_offset, data).await
+    fn write_block<'a>(
+        &'a self, piece: u32, offset: u32, data: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(async move {
+            tracing::trace!(
+                "writing block: piece {} offset {} ({} bytes)",
+                piece,
+                offset,
+                data.len()
+            );
+            let global_offset = self.piece_offset(piece) + offset as u64;
+            self.write_range(global_offset, data).await
+        })
+    }
+
+    fn read_block<'a>(
+        &'a self, piece: u32, offset: u32, buf: &'a mut [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(async move {
+            tracing::trace!(
+                "reading block: piece {} offset {} ({} bytes)",
+                piece,
+                offset,
+                buf.len()
+            );
+            let global_offset = self.piece_offset(piece) + offset as u64;
+            self.read_range(global_offset, buf.len(), buf).await
+        })
     }
 
     fn num_pieces(&self) -> usize {
@@ -137,23 +197,6 @@ impl FileStorage {
         } else {
             self.piece_length
         }
-    }
-
-    /// Read a block (partial piece) without reading the entire piece.
-    ///
-    /// Significantly reduces I/O for upload serving: reads only the
-    /// requested 16 KB block instead of the entire piece (up to 4 MB+).
-    pub(crate) async fn read_block(
-        &self, piece: u32, offset: u32, buf: &mut [u8],
-    ) -> Result<(), Error> {
-        tracing::trace!(
-            "reading block: piece {} offset {} ({} bytes)",
-            piece,
-            offset,
-            buf.len()
-        );
-        let global_offset = self.piece_offset(piece) + offset as u64;
-        self.read_range(global_offset, buf.len(), buf).await
     }
 
     /// Read a byte range from the file(s).

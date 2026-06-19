@@ -17,7 +17,7 @@ use crate::error::Error;
 use crate::metainfo::Metainfo;
 use crate::peer::PeerId;
 use crate::piece::{PieceManager, PieceSelector};
-use crate::storage::FileStorage;
+use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
 use super::peer_manager::PeerManager;
@@ -29,7 +29,7 @@ use super::{TorrentState, TorrentStatus};
 pub(crate) struct DownloadLoop {
     pub info_hash: [u8; 20],
     pub metainfo: Metainfo,
-    pub storage: Arc<FileStorage>,
+    pub storage: Arc<dyn Storage>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,

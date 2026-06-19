@@ -8,9 +8,11 @@
 //! - [`TorrentState`] — lifecycle state of a torrent
 //! - [`InfoHash`] — SHA-1 identifier for a torrent
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::dht::BootstrapNode;
+use crate::storage::{FileStorageFactory, StorageFactory};
 
 /// Unique identifier for a torrent (SHA-1 info hash).
 ///
@@ -118,6 +120,22 @@ pub struct SessionConfig {
     /// Default: `256`.
     pub peer_msg_buffer_size: usize,
 
+    // ── Storage ──
+    /// Factory for creating storage backends.
+    ///
+    /// Override this to inject a custom [`Storage`] implementation
+    /// (e.g. in-memory, remote, or processing-pipeline backends).
+    /// The default is [`FileStorageFactory`], which creates
+    /// file-backed storage.
+    ///
+    /// For magnet-link torrents (BEP 9), the factory receives a stub
+    /// `Info` with zero `piece_length` and no pieces. Custom factories
+    /// should handle this gracefully.
+    ///
+    /// [`Storage`]: crate::storage::Storage
+    #[cfg_attr(feature = "serde", serde(skip, default = "default_storage_factory"))]
+    pub storage_factory: Arc<dyn StorageFactory>,
+
     // ── DHT ──
     /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
     /// When `Some`, the session initializes a DHT node and uses these
@@ -161,8 +179,15 @@ impl Default for SessionConfig {
                 BootstrapNode::from(("dht.transmissionbt.com", 6881)),
             ]),
             node_id: None,
+            storage_factory: Arc::new(FileStorageFactory),
         }
     }
+}
+
+/// Default [`StorageFactory`] for serde deserialization.
+#[cfg(feature = "serde")]
+fn default_storage_factory() -> Arc<dyn StorageFactory> {
+    Arc::new(FileStorageFactory)
 }
 
 /// Status of a torrent, exposed via the public API.
@@ -268,6 +293,7 @@ mod serde_tests {
             node_id: Some([0xAB; 20]),
             dht_poll_interval: Duration::from_secs(60),
             peer_msg_buffer_size: 512,
+            storage_factory: Arc::new(FileStorageFactory),
         };
 
         let json = serde_json::to_string(&config).unwrap();

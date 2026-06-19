@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerMessage};
-use crate::storage::Storage;
 
 use super::DownloadLoop;
 use super::types::{PeerEvent, parse_bitfield};

@@ -32,7 +32,6 @@ use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
 use crate::spec::TorrentSpec;
-use crate::storage::FileStorage;
 
 use self::torrent::TorrentHandle;
 
@@ -177,8 +176,8 @@ impl Session {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
         };
 
-        // Create FileStorage
-        let storage = Arc::new(FileStorage::new(&meta.info, download_dir).await?);
+        let storage_factory = &self.config.storage_factory;
+        let storage = storage_factory.create(&meta.info, download_dir).await?;
         let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
 
         self.torrents.write().await.insert(info_hash, handle);
@@ -222,7 +221,8 @@ impl Session {
             encoding: None,
         };
 
-        let storage = Arc::new(FileStorage::new(&meta.info, download_dir).await?);
+        let storage_factory = &self.config.storage_factory;
+        let storage = storage_factory.create(&meta.info, download_dir).await?;
         let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
 
         // Inject x.pe addresses directly into the connection pool (BEP 9).

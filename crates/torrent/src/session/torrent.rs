@@ -8,7 +8,7 @@ use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Metainfo, Mode};
 use crate::peer::PeerId;
 use crate::piece::{PieceManager, RarestFirst};
-use crate::storage::FileStorage;
+use crate::storage::Storage;
 use crate::tracker::Tracker;
 
 use super::download::{DownloadLoop, PeerEvent};
@@ -28,7 +28,7 @@ pub(crate) enum TorrentCommand {
 pub(crate) struct TorrentHandle {
     pub info_hash: [u8; 20],
     pub metainfo: Metainfo,
-    pub storage: Arc<FileStorage>,
+    pub storage: Arc<dyn Storage>,
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
@@ -41,7 +41,7 @@ pub(crate) struct TorrentHandle {
 impl TorrentHandle {
     /// Create a new TorrentHandle and spawn its download loop.
     pub fn new(
-        metainfo: Metainfo, info_hash: [u8; 20], storage: Arc<FileStorage>, config: &SessionConfig,
+        metainfo: Metainfo, info_hash: [u8; 20], storage: Arc<dyn Storage>, config: &SessionConfig,
     ) -> Self {
         let num_pieces = metainfo.info.num_pieces();
         let name = match &metainfo.info.mode {
