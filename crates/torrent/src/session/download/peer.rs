@@ -172,12 +172,8 @@ impl DownloadLoop {
                 }
             }
             PeerMessage::Port(_) => {}
-            PeerMessage::Extended { ext_id, .. } => {
-                tracing::debug!(
-                    "received extended message (ext_id={}) from {}",
-                    ext_id,
-                    addr
-                );
+            PeerMessage::Extended { ext_id, data } => {
+                self.handle_extended_message(addr, ext_id, data).await?;
             }
         }
 

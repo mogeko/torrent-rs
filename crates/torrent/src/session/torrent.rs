@@ -96,6 +96,8 @@ impl TorrentHandle {
             snub_timeout: config.snub_timeout,
             corrupt_ban_threshold: config.corrupt_ban_threshold,
             announce_fallback_interval: config.announce_fallback_interval,
+            pex_enabled: config.pex_enabled,
+            pex_interval: config.pex_interval,
             tracker,
             next_announce: None,
             has_announced: false,

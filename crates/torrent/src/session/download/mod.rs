@@ -1,6 +1,7 @@
 mod announce;
 mod choke;
 mod peer;
+mod pex;
 mod pieces;
 pub(super) mod types;
 
@@ -85,6 +86,10 @@ pub(crate) struct DownloadLoop {
     /// Cached completed pieces for upload serving (avoid repeated disk reads).
     /// Ordered by insertion time — oldest first for LRU eviction.
     pub(crate) piece_cache: Vec<(u32, Arc<Vec<u8>>)>,
+    /// Enable Peer Exchange (BEP 11).
+    pub(crate) pex_enabled: bool,
+    /// PEX broadcast interval.
+    pub(crate) pex_interval: Duration,
 }
 
 impl DownloadLoop {
@@ -98,6 +103,7 @@ impl DownloadLoop {
         let mut status_tick = tokio::time::interval(Duration::from_secs(1));
         let mut choke_tick = tokio::time::interval(self.choke_interval);
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
+        let mut pex_tick = tokio::time::interval(self.pex_interval);
 
         loop {
             tokio::select! {
@@ -137,6 +143,13 @@ impl DownloadLoop {
                 }
                 _ = stale_tick.tick() => {
                     self.expire_stale_requests().await;
+                }
+                _ = pex_tick.tick() => {
+                    if self.pex_enabled {
+                        if let Err(e) = self.broadcast_pex().await {
+                            tracing::warn!("PEX broadcast failed: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -211,6 +224,12 @@ impl DownloadLoop {
                     pi.extension_ids = ext_ids;
                 }
                 self.send_bitfield(*addr).await?;
+                // Send initial PEX message with our known peers
+                if self.pex_enabled {
+                    if let Err(e) = self.send_pex_message(*addr).await {
+                        tracing::debug!("failed to send initial PEX to {}: {}", addr, e);
+                    }
+                }
             }
         }
         Ok(())
