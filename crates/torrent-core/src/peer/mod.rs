@@ -3,15 +3,18 @@
 //! This module provides sync primitives for peer communication:
 //! - [`PeerId`]: 20-byte client identifier
 //! - [`Handshake`]: 68-byte protocol handshake
-//! - [`PeerMessage`]: 11 wire protocol message types
+//! - [`PeerMessage`]: 12 wire protocol message types (including BEP 10 extended)
+//! - [`ExtensionNegotiation`]: LTEP extension negotiation (BEP 10)
 //! - [`PeerState`]: connection state machine
 //!
 //! All types are purely data with no I/O, usable in both sync and async
 //! contexts. The async `PeerConnection` type lives in the `torrent` crate.
 
+mod extension;
 mod handshake;
 mod message;
 
+pub use self::extension::ExtensionNegotiation;
 pub use self::handshake::Handshake;
 pub use self::message::{PeerMessage, decode, encode};
 

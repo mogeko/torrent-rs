@@ -172,6 +172,12 @@ impl DownloadLoop {
                 }
             }
             PeerMessage::Port(_) => {}
+            PeerMessage::Extended { .. } => {
+                // Extended messages (BEP 10) are dispatched to
+                // handle_extended_message once the LTEP handshake
+                // is negotiated. Ignored for now.
+                todo!()
+            }
         }
 
         Ok(())

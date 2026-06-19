@@ -93,6 +93,19 @@ pub enum PeerMessage {
     },
     /// Port: `<len=0003><id=9><listen-port>` (BEP 5, DHT).
     Port(u16),
+    /// Extended message (BEP 10): `<len=0002+X><id=20><ext_id><payload>`.
+    ///
+    /// Extended messages carry a single-byte extension ID negotiated via the
+    /// LTEP handshake, followed by a bencoded dictionary payload. Extension
+    /// ID 0 is reserved for the LTEP handshake itself.
+    ///
+    /// Implements BEP 10: Extension Protocol.
+    Extended {
+        /// Extension message ID (negotiated via LTEP handshake).
+        ext_id: u8,
+        /// Bencoded dictionary payload.
+        data: Vec<u8>,
+    },
 }
 
 /// Encode a `PeerMessage` to its wire format bytes.
@@ -156,6 +169,15 @@ pub fn encode(msg: &PeerMessage) -> Vec<u8> {
         PeerMessage::Port(port) => {
             let mut buf = vec![0, 0, 0, 3, 9];
             buf.extend_from_slice(&port.to_be_bytes());
+            buf
+        }
+        PeerMessage::Extended { ext_id, data } => {
+            let len = 2u32 + u32::try_from(data.len()).unwrap_or(u32::MAX);
+            let mut buf = Vec::with_capacity(4 + len as usize);
+            buf.extend_from_slice(&len.to_be_bytes());
+            buf.push(20);
+            buf.push(*ext_id);
+            buf.extend_from_slice(data);
             buf
         }
     }
@@ -265,6 +287,14 @@ pub fn decode(data: &[u8]) -> Result<PeerMessage, Error> {
             }
             let port = u16::from_be_bytes([payload[0], payload[1]]);
             Ok(PeerMessage::Port(port))
+        }
+        20 => {
+            if payload.is_empty() {
+                return Err(Error::new(ErrorKind::PeerInvalidExtendedMessage));
+            }
+            let ext_id = payload[0];
+            let data = payload[1..].to_vec();
+            Ok(PeerMessage::Extended { ext_id, data })
         }
         _ => Err(Error::new(ErrorKind::PeerInvalidMessage)),
     }
@@ -389,6 +419,10 @@ mod tests {
                 length: 8192,
             },
             PeerMessage::Port(6881),
+            PeerMessage::Extended {
+                ext_id: 0,
+                data: b"d1:md2:ute".to_vec(),
+            },
         ];
 
         for msg in &messages {
@@ -426,5 +460,67 @@ mod tests {
         // length=1, id=255 (invalid)
         let data = [0, 0, 0, 1, 255];
         assert!(decode(&data).is_err());
+    }
+
+    #[test]
+    fn encode_extended() {
+        let msg = PeerMessage::Extended {
+            ext_id: 1,
+            data: vec![0xAB, 0xCD, 0xEF],
+        };
+        let encoded = encode(&msg);
+        // 4 len + 1 id(20) + 1 ext_id + 3 data = 9 bytes
+        assert_eq!(encoded.len(), 9);
+        // len = 2 + 3 = 5
+        assert_eq!(&encoded[0..4], &[0, 0, 0, 5]);
+        assert_eq!(encoded[4], 20); // msg_id
+        assert_eq!(encoded[5], 1); // ext_id
+        assert_eq!(&encoded[6..], &[0xAB, 0xCD, 0xEF]);
+    }
+
+    #[test]
+    fn decode_extended() {
+        // len=5, id=20, ext_id=1, data=[0xAB, 0xCD, 0xEF]
+        let data = [0, 0, 0, 5, 20, 1, 0xAB, 0xCD, 0xEF];
+        let decoded = decode(&data).unwrap();
+        assert_eq!(
+            decoded,
+            PeerMessage::Extended {
+                ext_id: 1,
+                data: vec![0xAB, 0xCD, 0xEF],
+            }
+        );
+    }
+
+    #[test]
+    fn decode_extended_empty_payload() {
+        // len=2 (only ext_id, no data), id=20, ext_id=0 — valid, empty data
+        let data = [0, 0, 0, 2, 20, 0];
+        let decoded = decode(&data).unwrap();
+        assert_eq!(
+            decoded,
+            PeerMessage::Extended {
+                ext_id: 0,
+                data: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn decode_extended_missing_ext_id() {
+        // len=1, id=20 — payload is empty, should fail
+        let data = [0, 0, 0, 1, 20];
+        assert!(decode(&data).is_err());
+    }
+
+    #[test]
+    fn roundtrip_extended() {
+        let msg = PeerMessage::Extended {
+            ext_id: 7,
+            data: b"d5:added12:\x00\x00\x00\x00\x00\x00e".to_vec(),
+        };
+        let encoded = encode(&msg);
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(msg, decoded);
     }
 }

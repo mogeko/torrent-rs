@@ -236,3 +236,67 @@ pub fn parse_compact_peers_ipv4(data: &[u8]) -> Result<Vec<SocketAddr>, Error> {
         })
         .collect()
 }
+
+/// Encode IPv4 socket addresses into compact peer format (BEP 23).
+///
+/// Each peer is encoded as exactly 6 bytes: 4 bytes IP + 2 bytes port
+/// (big-endian). IPv6 addresses are silently skipped.
+///
+/// This is the inverse of [`parse_compact_peers_ipv4`].
+///
+/// # Examples
+///
+/// ```
+/// use std::net::{Ipv4Addr, SocketAddr};
+/// use torrent_core::tracker::encode_compact_peers_ipv4;
+///
+/// let addrs = vec![SocketAddr::new(
+///     std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+///     6881,
+/// )];
+/// let encoded = encode_compact_peers_ipv4(&addrs);
+/// assert_eq!(encoded, vec![127, 0, 0, 1, 0x1A, 0xE1]);
+/// ```
+pub fn encode_compact_peers_ipv4(addrs: &[SocketAddr]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(addrs.len() * 6);
+    for addr in addrs {
+        if let IpAddr::V4(ip) = addr.ip() {
+            buf.extend_from_slice(&ip.octets());
+            buf.extend_from_slice(&addr.port().to_be_bytes());
+        }
+    }
+    buf
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn encode_compact_peers_ipv4_roundtrip() {
+        let addrs: Vec<SocketAddr> = vec![
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6881),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 6889),
+        ];
+        let encoded = encode_compact_peers_ipv4(&addrs);
+        let decoded = parse_compact_peers_ipv4(&encoded).unwrap();
+        assert_eq!(addrs, decoded);
+    }
+
+    #[test]
+    fn encode_compact_peers_ipv4_empty() {
+        let encoded = encode_compact_peers_ipv4(&[]);
+        assert!(encoded.is_empty());
+    }
+
+    #[test]
+    fn encode_compact_peers_ipv4_skips_ipv6() {
+        use std::net::Ipv6Addr;
+        let ipv4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 6881);
+        let ipv6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 6881);
+        let encoded = encode_compact_peers_ipv4(&[ipv4, ipv6]);
+        // Only the IPv4 address should be encoded (6 bytes)
+        assert_eq!(encoded.len(), 6);
+    }
+}
