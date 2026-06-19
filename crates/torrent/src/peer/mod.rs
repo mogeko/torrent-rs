@@ -11,7 +11,7 @@
 mod stream;
 
 pub use torrent_core::peer::{
-    ExtensionNegotiation, Handshake, PeerId, PeerMessage, PeerState, decode, encode,
+    ExtensionNegotiation, Handshake, PeerId, PeerMessage, PeerState, PexMessage, decode, encode,
 };
 
 pub use self::stream::PeerConnection;

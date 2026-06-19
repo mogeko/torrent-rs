@@ -268,6 +268,46 @@ pub fn encode_compact_peers_ipv4(addrs: &[SocketAddr]) -> Vec<u8> {
     buf
 }
 
+/// Parse compact IPv6 peer list (18 bytes per peer: 16 IPv6 + 2 port).
+///
+/// Implements BEP 7: IPv6 Tracker Extension. Each peer entry is exactly
+/// 18 bytes in network byte order.
+///
+/// # Errors
+///
+/// Returns an error if the data length is not a multiple of 18.
+pub fn parse_compact_peers_ipv6(data: &[u8]) -> Result<Vec<SocketAddr>, Error> {
+    if !data.len().is_multiple_of(18) {
+        return Err(Error::new(ErrorKind::TrackerInvalidResponse));
+    }
+    data.chunks_exact(18)
+        .map(|chunk| {
+            let mut ip_bytes = [0u8; 16];
+            ip_bytes.copy_from_slice(&chunk[..16]);
+            let ip = Ipv6Addr::from(ip_bytes);
+            let port = u16::from_be_bytes([chunk[16], chunk[17]]);
+            Ok(SocketAddr::new(IpAddr::V6(ip), port))
+        })
+        .collect()
+}
+
+/// Encode IPv6 socket addresses into compact peer format (BEP 7).
+///
+/// Each peer is encoded as exactly 18 bytes: 16 bytes IP + 2 bytes port
+/// (big-endian). IPv4 addresses are silently skipped.
+///
+/// This is the inverse of [`parse_compact_peers_ipv6`].
+pub fn encode_compact_peers_ipv6(addrs: &[SocketAddr]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(addrs.len() * 18);
+    for addr in addrs {
+        if let IpAddr::V6(ip) = addr.ip() {
+            buf.extend_from_slice(&ip.octets());
+            buf.extend_from_slice(&addr.port().to_be_bytes());
+        }
+    }
+    buf
+}
+
 #[cfg(test)]
 mod compact_tests {
     use super::*;
@@ -298,5 +338,35 @@ mod compact_tests {
         let encoded = encode_compact_peers_ipv4(&[ipv4, ipv6]);
         // Only the IPv4 address should be encoded (6 bytes)
         assert_eq!(encoded.len(), 6);
+    }
+
+    #[test]
+    fn encode_compact_peers_ipv6_roundtrip() {
+        use std::net::Ipv6Addr;
+        let addrs: Vec<SocketAddr> = vec![
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 6881),
+            SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                6889,
+            ),
+        ];
+        let encoded = encode_compact_peers_ipv6(&addrs);
+        let decoded = parse_compact_peers_ipv6(&encoded).unwrap();
+        assert_eq!(addrs, decoded);
+    }
+
+    #[test]
+    fn encode_compact_peers_ipv6_empty() {
+        let encoded = encode_compact_peers_ipv6(&[]);
+        assert!(encoded.is_empty());
+    }
+
+    #[test]
+    fn encode_compact_peers_ipv6_skips_ipv4() {
+        let ipv4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 6881);
+        let ipv6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 6881);
+        let encoded = encode_compact_peers_ipv6(&[ipv4, ipv6]);
+        // Only the IPv6 address should be encoded (18 bytes)
+        assert_eq!(encoded.len(), 18);
     }
 }

@@ -5,6 +5,7 @@
 //! - [`Handshake`]: 68-byte protocol handshake
 //! - [`PeerMessage`]: 12 wire protocol message types (including BEP 10 extended)
 //! - [`ExtensionNegotiation`]: LTEP extension negotiation (BEP 10)
+//! - [`PexMessage`]: Peer Exchange message (BEP 11)
 //! - [`PeerState`]: connection state machine
 //!
 //! All types are purely data with no I/O, usable in both sync and async
@@ -13,10 +14,12 @@
 mod extension;
 mod handshake;
 mod message;
+mod pex;
 
 pub use self::extension::ExtensionNegotiation;
 pub use self::handshake::Handshake;
 pub use self::message::{PeerMessage, decode, encode};
+pub use self::pex::PexMessage;
 
 use std::fmt;
 
