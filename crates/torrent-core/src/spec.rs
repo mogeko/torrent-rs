@@ -84,6 +84,28 @@ impl From<MagnetUri> for TorrentSpec {
     }
 }
 
+/// Convert a borrowed [`Metainfo`] into a [`TorrentSpec`] by cloning.
+///
+/// This enables `Tracker::from_torrent(&meta)` without the caller
+/// manually cloning. Prefer the owned [`From<Metainfo>`] impl when
+/// the value is no longer needed.
+impl From<&Metainfo> for TorrentSpec {
+    fn from(meta: &Metainfo) -> Self {
+        TorrentSpec::Metainfo(meta.clone())
+    }
+}
+
+/// Convert a borrowed [`MagnetUri`] into a [`TorrentSpec`] by cloning.
+///
+/// This enables `Tracker::from_torrent(&uri)` without the caller
+/// manually cloning. Prefer the owned [`From<MagnetUri>`] impl when
+/// the value is no longer needed.
+impl From<&MagnetUri> for TorrentSpec {
+    fn from(uri: &MagnetUri) -> Self {
+        TorrentSpec::Magnet(uri.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

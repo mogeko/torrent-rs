@@ -52,7 +52,7 @@ impl TorrentHandle {
 
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
         let peer_id = PeerId::random();
-        let tracker = Tracker::from_metainfo_with_timeout(&metainfo, config.tracker_timeout);
+        let tracker = Tracker::from_torrent_with_timeout(&metainfo, config.tracker_timeout);
         let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
         let peer_mgr = Arc::new(RwLock::new(PeerManager::new(
             info_hash,
