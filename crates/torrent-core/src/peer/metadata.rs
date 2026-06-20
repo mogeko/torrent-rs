@@ -6,7 +6,7 @@
 //! extension:
 //!
 //! - [`MetadataRequest`] — request a 16 KB piece of the info dictionary
-//! - [`MetadataData`] — deliver a metadata piece (or reject)
+//! - [`Metadata`] — deliver a metadata piece (or reject)
 //!
 //! # Wire format
 //!
