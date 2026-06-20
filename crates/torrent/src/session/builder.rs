@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tokio::task::JoinSet;
+
 use crate::bencode::{decode as bencode_decode, encode as bencode_encode};
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::Metainfo;
@@ -18,6 +20,9 @@ use crate::peer::{ExtensionNegotiation, PeerConnection, PeerId, PeerMessage};
 use crate::storage::{FileStorageFactory, StorageFactory};
 
 use super::{InfoHash, Session};
+
+/// Maximum number of peer connection attempts for metadata download.
+const MAX_METADATA_PEERS: usize = 8;
 
 /// Builder for configuring and activating a torrent.
 ///
@@ -193,21 +198,29 @@ impl<'s> TorrentBuilder<'s> {
     }
 }
 
-/// Maximum number of peer connection attempts for metadata download.
-const MAX_METADATA_PEERS: usize = 8;
-
 /// Download full metainfo bytes from a magnet link peer (BEP 9/10).
 ///
-/// Tries each peer address in order. On success, returns the raw
-/// bencoded bytes of the info dictionary.
+/// Spawns parallel connection attempts via [`JoinSet`] and returns
+/// the first successful result. Remaining attempts are cancelled.
 async fn download_metadata_from_peers(
     info_hash: [u8; 20], addrs: &[SocketAddr], our_peer_id: PeerId,
 ) -> Result<Vec<u8>, Error> {
-    for &addr in &addrs[..addrs.len().min(MAX_METADATA_PEERS)] {
-        match download_metadata_from_peer(addr, info_hash, our_peer_id).await {
-            Ok(bytes) => return Ok(bytes),
-            Err(e) => {
-                tracing::debug!("metadata download from {} failed: {}", addr, e);
+    let limit = addrs.len().min(MAX_METADATA_PEERS);
+    let mut set = JoinSet::new();
+
+    for &addr in &addrs[..limit] {
+        set.spawn(download_metadata_from_peer(addr, info_hash, our_peer_id));
+    }
+
+    while let Some(result) = set.join_next().await {
+        match result {
+            Ok(Ok(bytes)) => return Ok(bytes),
+            Ok(Err(e)) => {
+                tracing::debug!("peer metadata download attempt failed: {}", e);
+                continue;
+            }
+            Err(join_err) => {
+                tracing::warn!("metadata download task panicked: {}", join_err);
                 continue;
             }
         }
