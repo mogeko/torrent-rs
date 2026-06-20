@@ -185,7 +185,8 @@ impl Session {
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
         let storage = storage_factory.create(&meta.info).await?;
         storage.prepare().await?;
-        let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
+        let mut handle = TorrentHandle::register(meta, info_hash, &self.config);
+        handle.activate(storage, &self.config);
 
         self.torrents.write().await.insert(info_hash, handle);
 
@@ -235,7 +236,8 @@ impl Session {
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
         let storage = storage_factory.create(&meta.info).await?;
         storage.prepare().await?;
-        let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
+        let mut handle = TorrentHandle::register(meta, info_hash, &self.config);
+        handle.activate(storage, &self.config);
 
         // Inject x.pe addresses directly into the connection pool (BEP 9).
         if !uri.peers.is_empty() {
@@ -260,8 +262,7 @@ impl Session {
         let handle = self.torrents.write().await.remove(info_hash);
         if let Some(mut h) = handle {
             h.cancel().await;
-            // Await the task to ensure clean shutdown
-            let _ = h.task.await;
+            // Await the task to ensure clean shutdown (cancel() already awaits)
         }
         Ok(())
     }

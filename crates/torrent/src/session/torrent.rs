@@ -28,32 +28,31 @@ pub(crate) enum TorrentCommand {
 pub(crate) struct TorrentHandle {
     pub info_hash: [u8; 20],
     pub metainfo: Metainfo,
-    pub storage: Arc<dyn Storage>,
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
-    pub control_tx: mpsc::Sender<TorrentCommand>,
-    /// Download task join handle.
-    pub task: tokio::task::JoinHandle<()>,
+    /// Set by [`activate`](TorrentHandle::activate).
+    pub storage: Option<Arc<dyn Storage>>,
+    /// Set by [`activate`](TorrentHandle::activate).
+    pub control_tx: Option<mpsc::Sender<TorrentCommand>>,
+    /// Set by [`activate`](TorrentHandle::activate).
+    pub task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[allow(dead_code)]
 impl TorrentHandle {
-    /// Create a new TorrentHandle and spawn its download loop.
-    pub fn new(
-        metainfo: Metainfo, info_hash: [u8; 20], storage: Arc<dyn Storage>, config: &SessionConfig,
+    /// Register a torrent without storage or download loop.
+    /// State = [`TorrentState::Registered`].
+    pub(crate) fn register(
+        metainfo: Metainfo, info_hash: [u8; 20], config: &SessionConfig,
     ) -> Self {
         let num_pieces = metainfo.info.num_pieces();
         let name = match &metainfo.info.mode {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
         };
 
-        tracing::info!("torrent added: {} ({} pieces)", name, num_pieces);
-
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
         let peer_id = PeerId::random();
-        let tracker = Tracker::from_torrent_with_timeout(&metainfo, config.tracker_timeout);
-        let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
         let peer_mgr = Arc::new(RwLock::new(PeerManager::new(
             info_hash,
             peer_id,
@@ -65,7 +64,7 @@ impl TorrentHandle {
 
         let status = Arc::new(RwLock::new(TorrentStatus {
             info_hash,
-            name: name.clone(),
+            name,
             progress: 0.0,
             download_rate: 0.0,
             upload_rate: 0.0,
@@ -74,17 +73,45 @@ impl TorrentHandle {
             state: TorrentState::Registered,
         }));
 
+        TorrentHandle {
+            info_hash,
+            metainfo,
+            peer_mgr,
+            piece_mgr,
+            status,
+            storage: None,
+            control_tx: None,
+            task: None,
+        }
+    }
+
+    /// Attach storage and spawn the download loop.
+    /// Transitions from [`TorrentState::Registered`] to downloading.
+    pub(crate) fn activate(&mut self, storage: Arc<dyn Storage>, config: &SessionConfig) {
+        let name = match &self.metainfo.info.mode {
+            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+        };
+        tracing::info!(
+            "torrent activated: {} ({} pieces)",
+            name,
+            self.metainfo.info.num_pieces()
+        );
+
+        let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
         let (peer_msg_tx, peer_msg_rx) =
             mpsc::channel::<(SocketAddr, PeerEvent)>(config.peer_msg_buffer_size);
-        let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
+
+        let peer_id = PeerId::random();
+        let tracker = Tracker::from_torrent_with_timeout(&self.metainfo, config.tracker_timeout);
+        let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
 
         let mut download_loop = DownloadLoop {
-            info_hash,
-            metainfo: metainfo.clone(),
+            info_hash: self.info_hash,
+            metainfo: self.metainfo.clone(),
             storage: storage.clone(),
-            piece_mgr: piece_mgr.clone(),
-            peer_mgr: peer_mgr.clone(),
-            status: status.clone(),
+            piece_mgr: self.piece_mgr.clone(),
+            peer_mgr: self.peer_mgr.clone(),
+            status: self.status.clone(),
             control_rx,
             peer_id,
             listen_port: config.listen_port,
@@ -109,7 +136,7 @@ impl TorrentHandle {
             selector: Box::new(RarestFirst),
             peer_msg_rx,
             peer_msg_tx,
-            upload_mgr: upload_mgr.clone(),
+            upload_mgr,
             total_downloaded: 0,
             total_uploaded: 0,
             last_downloaded: 0,
@@ -118,41 +145,43 @@ impl TorrentHandle {
             recently_dropped: Vec::new(),
         };
 
-        let task = tokio::spawn(async move {
-            download_loop.run().await;
-        });
+        let task = tokio::spawn(async move { download_loop.run().await });
 
-        TorrentHandle {
-            info_hash,
-            metainfo,
-            storage,
-            peer_mgr,
-            piece_mgr,
-            status,
-            control_tx,
-            task,
+        self.storage = Some(storage);
+        self.control_tx = Some(control_tx);
+        self.task = Some(task);
+    }
+
+    /// Pause this torrent. No-op if not yet activated.
+    pub async fn pause(&self) -> Result<(), Error> {
+        if let Some(tx) = &self.control_tx {
+            tx.send(TorrentCommand::Pause)
+                .await
+                .map_err(|_| Error::new(ErrorKind::Protocol))
+        } else {
+            Ok(())
         }
     }
 
-    /// Pause this torrent.
-    pub async fn pause(&self) -> Result<(), Error> {
-        self.control_tx
-            .send(TorrentCommand::Pause)
-            .await
-            .map_err(|_| Error::new(ErrorKind::Protocol))
-    }
-
-    /// Resume this torrent.
+    /// Resume this torrent. No-op if not yet activated.
     pub async fn resume(&self) -> Result<(), Error> {
-        self.control_tx
-            .send(TorrentCommand::Resume)
-            .await
-            .map_err(|_| Error::new(ErrorKind::Protocol))
+        if let Some(tx) = &self.control_tx {
+            tx.send(TorrentCommand::Resume)
+                .await
+                .map_err(|_| Error::new(ErrorKind::Protocol))
+        } else {
+            Ok(())
+        }
     }
 
     /// Cancel this torrent (shuts down the download loop).
     pub async fn cancel(&mut self) {
-        let _ = self.control_tx.send(TorrentCommand::Cancel).await;
+        if let Some(tx) = &self.control_tx {
+            let _ = tx.send(TorrentCommand::Cancel).await;
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
     }
 
     /// Get the current status.
