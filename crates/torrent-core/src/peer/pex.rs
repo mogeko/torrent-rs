@@ -39,6 +39,11 @@ use crate::tracker::{
 ///     std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
 ///     6881,
 /// ));
+/// // IPv6 peers use the added6 / dropped6 fields (BEP 7 compact format).
+/// msg.added6.push(SocketAddr::new(
+///     std::net::IpAddr::V6(std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
+///     6881,
+/// ));
 /// let ben = msg.to_bencode();
 /// let parsed = PexMessage::from_bencode(&ben).unwrap();
 /// assert_eq!(msg, parsed);

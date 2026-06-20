@@ -114,6 +114,13 @@ pub enum PeerMessage {
 /// Format: <4-byte big-endian length prefix> <1-byte message id> <payload>
 /// Keep-alive: <4-byte 0>
 /// ```
+///
+/// # Panics
+///
+/// Panics if the payload of a [`PeerMessage::Bitfield`], [`PeerMessage::Piece`],
+/// or [`PeerMessage::Extended`] exceeds `u32::MAX` minus the fixed header
+/// overhead. This is unreachable in normal protocol use — the `torrent`
+/// crate enforces a 2 MiB message size limit on incoming data.
 pub fn encode(msg: &PeerMessage) -> Vec<u8> {
     tracing::trace!("encoding peer message: {:?}", msg);
     match msg {
@@ -128,7 +135,10 @@ pub fn encode(msg: &PeerMessage) -> Vec<u8> {
             buf
         }
         PeerMessage::Bitfield(bitfield) => {
-            let len = 1u32 + u32::try_from(bitfield.len()).unwrap_or(u32::MAX);
+            // SAFETY: MAX_MESSAGE_SIZE (2 MiB) ensures bitfield.len() never
+            // exceeds u32::MAX - 1, so the length prefix always fits in a u32.
+            let len = 1u32
+                + u32::try_from(bitfield.len()).expect("bitfield payload exceeds u32::MAX - 1");
             let mut buf = Vec::with_capacity(4 + len as usize);
             buf.extend_from_slice(&len.to_be_bytes());
             buf.push(5);
@@ -157,7 +167,9 @@ pub fn encode(msg: &PeerMessage) -> Vec<u8> {
             buf
         }
         PeerMessage::Piece { index, begin, data } => {
-            let len = 9u32 + u32::try_from(data.len()).unwrap_or(u32::MAX);
+            // SAFETY: MAX_MESSAGE_SIZE (2 MiB) ensures data.len() never exceeds
+            // u32::MAX - 9, so the length prefix always fits in a u32.
+            let len = 9u32 + u32::try_from(data.len()).expect("piece payload exceeds u32::MAX - 9");
             let mut buf = Vec::with_capacity(4 + len as usize);
             buf.extend_from_slice(&len.to_be_bytes());
             buf.push(7);
@@ -172,7 +184,10 @@ pub fn encode(msg: &PeerMessage) -> Vec<u8> {
             buf
         }
         PeerMessage::Extended { ext_id, data } => {
-            let len = 2u32 + u32::try_from(data.len()).unwrap_or(u32::MAX);
+            // SAFETY: MAX_MESSAGE_SIZE (2 MiB) ensures data.len() never exceeds
+            // u32::MAX - 2, so the length prefix always fits in a u32.
+            let len = 2u32
+                + u32::try_from(data.len()).expect("extended message payload exceeds u32::MAX - 2");
             let mut buf = Vec::with_capacity(4 + len as usize);
             buf.extend_from_slice(&len.to_be_bytes());
             buf.push(20);

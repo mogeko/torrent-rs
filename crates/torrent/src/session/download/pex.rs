@@ -64,7 +64,8 @@ impl DownloadLoop {
     pub(super) async fn handle_extended_message(
         &mut self, addr: SocketAddr, ext_id: u8, data: Vec<u8>,
     ) -> Result<(), Error> {
-        let peer = match self.peers.get(&addr) {
+        // Single mutable lookup — avoids fragile get()/get_mut() split.
+        let peer = match self.peers.get_mut(&addr) {
             Some(p) => p,
             None => return Ok(()),
         };
@@ -93,10 +94,8 @@ impl DownloadLoop {
                 pm.add_peers(pex_msg.added6);
             }
 
-            // Update peer state
-            if let Some(peer) = self.peers.get_mut(&addr) {
-                peer.last_pex_received = Some(Instant::now());
-            }
+            // Update peer state on the same mutable reference.
+            peer.last_pex_received = Some(Instant::now());
 
             tracing::debug!(
                 "received PEX from {}: +{}/-{} (IPv4), +{}/-{} (IPv6)",
