@@ -97,7 +97,7 @@ impl HttpTracker {
     }
 
     /// Announce to the HTTP tracker, following redirects (301, 302) up to
-    /// [`MAX_REDIRECTS`] times.
+    /// `MAX_REDIRECTS` times.
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
         tracing::info!("HTTP announce to {} (event: {:?})", self.url, req.event);
 

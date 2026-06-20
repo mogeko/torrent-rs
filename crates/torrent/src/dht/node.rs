@@ -17,7 +17,7 @@ use crate::error::Error;
 
 use super::krpc::{self, KrpcMessage};
 use super::rpc::{DhtRpc, QueryHandler};
-use super::{Node, RoutingTable, find_node, generate_node_id, get_peers};
+use super::{DualRoutingTable, Node, find_node, generate_node_id, get_peers};
 
 /// Interval between periodic bootstrap refreshes.
 const BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(300);
@@ -33,7 +33,7 @@ pub(crate) struct DhtNode {
     /// Our stable node ID (20-byte SHA-1).
     pub node_id: [u8; 20],
     /// The Kademlia routing table.
-    routing_table: Arc<Mutex<RoutingTable>>,
+    routing_table: Arc<Mutex<DualRoutingTable>>,
     /// Async UDP RPC client.
     rpc: Arc<DhtRpc>,
     /// Well-known bootstrap addresses (resolved at construction time).
@@ -53,7 +53,7 @@ impl DhtNode {
     ) -> Result<Arc<Self>, Error> {
         let rpc = DhtRpc::new(bind_addr).await?;
         let secret = generate_node_id(); // reuse SHA-1 generator for secret too
-        let routing_table = Arc::new(Mutex::new(RoutingTable::with_id(node_id)));
+        let routing_table = Arc::new(Mutex::new(DualRoutingTable::with_id(node_id)));
 
         // Resolve bootstrap hostnames once
         let mut bootstrap_nodes = Vec::new();
