@@ -49,6 +49,16 @@ pub struct AnnounceRequest {
     pub key: Option<u32>,
     /// Tracker ID from a previous announce.
     pub trackerid: Option<String>,
+    /// Explicit IPv4 address to announce (BEP 7).
+    ///
+    /// When `None`, the tracker auto-detects the address from the
+    /// connection. Set this when behind NAT with a known external address.
+    pub ip: Option<Ipv4Addr>,
+    /// Explicit IPv6 address to announce (BEP 7).
+    ///
+    /// When `None`, the tracker auto-detects the address from the
+    /// connection. Set this when you have a known public IPv6 address.
+    pub ipv6: Option<Ipv6Addr>,
 }
 
 /// Response from a tracker announce.
@@ -89,6 +99,8 @@ impl AnnounceRequest {
             numwant: Some(50),
             key: None,
             trackerid: None,
+            ip: None,
+            ipv6: None,
         }
     }
 }

@@ -88,6 +88,8 @@ impl TorrentHandle {
             control_rx,
             peer_id,
             listen_port: config.listen_port,
+            announce_ip: config.announce_ip,
+            announce_ipv6: config.announce_ipv6,
             request_timeout: config.request_timeout,
             max_concurrent_pieces: config.max_concurrent_pieces,
             piece_cache_size: config.piece_cache_size,

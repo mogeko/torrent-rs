@@ -248,6 +248,12 @@ fn build_query_string(req: &AnnounceRequest) -> String {
         q.push_str("&trackerid=");
         q.push_str(trackerid);
     }
+    if let Some(ip) = req.ip {
+        q.push_str(&format!("&ip={ip}"));
+    }
+    if let Some(ipv6) = req.ipv6 {
+        q.push_str(&format!("&ipv6={ipv6}"));
+    }
 
     q
 }

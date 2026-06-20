@@ -56,6 +56,8 @@ impl DownloadLoop {
         req.uploaded = self.total_uploaded;
         req.left = left;
         req.event = event;
+        req.ip = self.announce_ip;
+        req.ipv6 = self.announce_ipv6;
 
         match tracker.announce(&req).await {
             Ok(resp) => {
