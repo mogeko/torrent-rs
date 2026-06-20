@@ -351,3 +351,52 @@ fn split_bep9_data(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
     let dict_len = data.len() - rest.len();
     Ok((data[..dict_len].to_vec(), rest.to_vec()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_dict_with_data() {
+        // Use real MetadataData to produce valid bencoded dict
+        let piece = MetadataData {
+            piece: 0,
+            total_size: 42,
+            data: b"hello".to_vec(),
+        };
+        let ben = piece.to_bencode_with_data();
+        let mut data = bencode_encode(&ben);
+        data.extend_from_slice(&piece.data);
+
+        let (parsed_dict, parsed_raw) = split_bep9_data(&data).unwrap();
+        assert_eq!(parsed_dict, bencode_encode(&ben));
+        assert_eq!(parsed_raw, piece.data);
+    }
+
+    #[test]
+    fn split_empty_raw_data() {
+        let piece = MetadataData {
+            piece: 0,
+            total_size: 0,
+            data: vec![],
+        };
+        let ben = piece.to_bencode_with_data();
+        let data = bencode_encode(&ben);
+
+        let (parsed_dict, parsed_raw) = split_bep9_data(&data).unwrap();
+        assert_eq!(parsed_dict, data);
+        assert!(parsed_raw.is_empty());
+    }
+
+    #[test]
+    fn split_truncated_dict_errors() {
+        // Unterminated bencoded dict
+        let data = b"d8:msg_typei1e5:piecei0e"; // missing closing 'e'
+        assert!(split_bep9_data(data).is_err());
+    }
+
+    #[test]
+    fn split_plain_bytes_errors() {
+        assert!(split_bep9_data(b"not a dict").is_err());
+    }
+}
