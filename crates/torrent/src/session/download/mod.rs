@@ -8,7 +8,7 @@ pub(super) mod types;
 pub(crate) use types::{ActiveDownload, PeerEvent, PeerInfo};
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,10 @@ pub(crate) struct DownloadLoop {
     pub(crate) peer_id: PeerId,
     /// TCP listen port.
     pub(crate) listen_port: u16,
+    /// Explicit IPv4 address to announce (BEP 7).
+    pub(crate) announce_ip: Option<Ipv4Addr>,
+    /// Explicit IPv6 address to announce (BEP 7).
+    pub(crate) announce_ipv6: Option<Ipv6Addr>,
     /// Timeout for a single block request.
     pub(crate) request_timeout: Duration,
     /// Maximum concurrent piece downloads.

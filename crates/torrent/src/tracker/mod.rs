@@ -37,6 +37,7 @@ mod udp;
 
 pub use torrent_core::tracker::{
     AnnounceEvent, AnnounceRequest, AnnounceResponse, parse_compact_peers_ipv4,
+    parse_compact_peers_ipv6,
 };
 pub use url::Url;
 

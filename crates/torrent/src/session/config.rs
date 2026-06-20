@@ -8,6 +8,7 @@
 //! - [`TorrentState`] — lifecycle state of a torrent
 //! - [`InfoHash`] — SHA-1 identifier for a torrent
 
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +30,19 @@ pub struct SessionConfig {
     ///
     /// Default: `6881`.
     pub listen_port: u16,
+    /// Explicit IPv4 address to announce to trackers (BEP 7).
+    ///
+    /// When `None`, the tracker auto-detects the address from the
+    /// connection. Set this when behind NAT with a known external address.
+    ///
+    /// Default: `None`.
+    pub announce_ip: Option<Ipv4Addr>,
+    /// Explicit IPv6 address to announce to trackers (BEP 7).
+    ///
+    /// When `None`, the tracker auto-detects from the connection.
+    ///
+    /// Default: `None`.
+    pub announce_ipv6: Option<Ipv6Addr>,
     /// Maximum number of peer connections per torrent.
     ///
     /// Default: `50`.
@@ -152,6 +166,12 @@ pub struct SessionConfig {
     ///
     /// Default: `Some(vec![router.bittorrent.com:6881, dht.transmissionbt.com:6881])`.
     pub bootstrap_nodes: Option<Vec<BootstrapNode>>,
+    /// IPv6 DHT bootstrap nodes (BEP 32). Set to `None` to disable
+    /// the IPv6 DHT. When `Some` with at least one node, the session
+    /// initializes a second DHT node for IPv6.
+    ///
+    /// Default: `None`.
+    pub bootstrap_nodes_v6: Option<Vec<BootstrapNode>>,
     /// Optional DHT node ID (20 bytes). If `None`, a random one is generated
     /// each session. Set this to a persisted value to keep a stable identity
     /// across restarts (BEP 5 recommends persisting the node ID).
@@ -164,6 +184,8 @@ impl Default for SessionConfig {
     fn default() -> Self {
         SessionConfig {
             listen_port: 6881,
+            announce_ip: None,
+            announce_ipv6: None,
             max_connections: 50,
             max_uploads: 8,
             download_rate_limit: None,
@@ -189,6 +211,7 @@ impl Default for SessionConfig {
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
                 BootstrapNode::from(("dht.transmissionbt.com", 6881)),
             ]),
+            bootstrap_nodes_v6: None,
             node_id: None,
             storage_factory: Arc::new(FileStorageFactory),
         }
@@ -254,7 +277,8 @@ mod serde_tests {
         let back: SessionConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(back.listen_port, config.listen_port);
-        assert_eq!(back.max_connections, config.max_connections);
+        assert_eq!(back.announce_ip, config.announce_ip);
+        assert_eq!(back.announce_ipv6, config.announce_ipv6);
         assert_eq!(back.max_uploads, config.max_uploads);
         assert_eq!(back.download_rate_limit, config.download_rate_limit);
         assert_eq!(back.upload_rate_limit, config.upload_rate_limit);
@@ -285,6 +309,8 @@ mod serde_tests {
     fn session_config_roundtrip_custom() {
         let config = SessionConfig {
             listen_port: 12345,
+            announce_ip: Some(Ipv4Addr::new(1, 2, 3, 4)),
+            announce_ipv6: Some(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
             max_connections: 200,
             max_uploads: 16,
             download_rate_limit: Some(1_048_576),
@@ -303,6 +329,7 @@ mod serde_tests {
             announce_fallback_interval: Duration::from_secs(60),
             tracker_timeout: Duration::from_secs(30),
             bootstrap_nodes: None,
+            bootstrap_nodes_v6: None,
             node_id: Some([0xAB; 20]),
             dht_poll_interval: Duration::from_secs(60),
             pex_enabled: false,
@@ -315,6 +342,11 @@ mod serde_tests {
         let back: SessionConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(back.listen_port, 12345);
+        assert_eq!(back.announce_ip, Some(Ipv4Addr::new(1, 2, 3, 4)));
+        assert_eq!(
+            back.announce_ipv6,
+            Some(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
+        );
         assert_eq!(back.max_connections, 200);
         assert_eq!(back.max_uploads, 16);
         assert_eq!(back.download_rate_limit, Some(1_048_576));
@@ -333,6 +365,7 @@ mod serde_tests {
         assert_eq!(back.announce_fallback_interval, Duration::from_secs(60));
         assert_eq!(back.tracker_timeout, Duration::from_secs(30));
         assert!(back.bootstrap_nodes.is_none());
+        assert!(back.bootstrap_nodes_v6.is_none());
         assert_eq!(back.node_id, Some([0xAB; 20]));
         assert_eq!(back.dht_poll_interval, Duration::from_secs(60));
         assert_eq!(back.pex_enabled, false);

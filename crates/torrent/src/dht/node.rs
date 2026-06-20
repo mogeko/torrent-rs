@@ -28,7 +28,7 @@ const ALPHA: usize = 8;
 /// Concurrency for parallel DHT queries during lookup.
 const LOOKUP_CONCURRENCY: usize = 3;
 
-/// Shared DHT node — one per session.
+/// Shared DHT node — one per session per address family.
 pub(crate) struct DhtNode {
     /// Our stable node ID (20-byte SHA-1).
     pub node_id: [u8; 20],
@@ -38,6 +38,8 @@ pub(crate) struct DhtNode {
     rpc: Arc<DhtRpc>,
     /// Well-known bootstrap addresses (resolved at construction time).
     bootstrap_nodes: Vec<SocketAddr>,
+    /// Whether this node operates on IPv6 (affects `want` param and response keys).
+    is_ipv6: bool,
     /// Secret for token generation (BEP 5 announce_peer validation).
     secret: [u8; 20],
 }
@@ -70,6 +72,7 @@ impl DhtNode {
             routing_table,
             rpc,
             bootstrap_nodes,
+            is_ipv6: bind_addr.is_ipv6(),
             secret,
         });
 
@@ -88,11 +91,16 @@ impl DhtNode {
     /// Sends `find_node` queries with a random target to each bootstrap
     /// node. Any returned nodes are inserted into the routing table.
     async fn bootstrap(&self) -> () {
+        let want: Option<&[&str]> = if self.is_ipv6 {
+            Some(&["n6"])
+        } else {
+            Some(&["n4"])
+        };
         for &addr in &self.bootstrap_nodes {
             let tid: krpc::TransactionId = rand::rng().random();
             let target = generate_node_id();
 
-            if let Ok(nodes) = find_node(&self.rpc, addr, tid, &self.node_id, &target).await {
+            if let Ok(nodes) = find_node(&self.rpc, addr, tid, &self.node_id, &target, want).await {
                 let mut rt = self.routing_table.lock().await;
                 for node in nodes {
                     rt.insert(node);
@@ -121,6 +129,12 @@ impl DhtNode {
             return vec![];
         }
 
+        let want: Option<&[&str]> = if self.is_ipv6 {
+            Some(&["n6"])
+        } else {
+            Some(&["n4"])
+        };
+
         loop {
             // Take next batch of unqueried nodes
             let batch: Vec<Node> = pending
@@ -143,7 +157,7 @@ impl DhtNode {
                 let tid: krpc::TransactionId = rand::rng().random();
 
                 handles.push(tokio::spawn(async move {
-                    get_peers(&rpc, addr, tid, &node_id, &target).await
+                    get_peers(&rpc, addr, tid, &node_id, &target, want).await
                 }));
             }
 

@@ -5,10 +5,12 @@
 //!
 //! Routing table unit tests live in crates/torrent-core/src/dht/mod.rs.
 
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
+use std::time::Duration;
 
-use torrent::dht::krpc::{KrpcMessage, TransactionId};
-use torrent::dht::{DhtRpc, Node, generate_node_id, krpc};
+use torrent::dht::krpc::{self, KrpcMessage, TransactionId};
+use torrent::dht::{DhtRpc, Node, find_node, generate_node_id};
 
 #[test]
 fn krpc_ping_message_builds() {
@@ -25,7 +27,7 @@ fn krpc_find_node_message_builds() {
     let tid: krpc::TransactionId = [0x01, 0x02];
     let node_id = [0xAA; 20];
     let target = [0xBB; 20];
-    let data = krpc::build_find_node(tid, &node_id, &target);
+    let data = krpc::build_find_node(tid, &node_id, &target, None);
     assert_eq!(data[0], b'd');
 }
 
@@ -34,7 +36,7 @@ fn krpc_get_peers_message_builds() {
     let tid: krpc::TransactionId = [0x01, 0x02];
     let node_id = [0xAA; 20];
     let info_hash = [0xBB; 20];
-    let data = krpc::build_get_peers(tid, &node_id, &info_hash);
+    let data = krpc::build_get_peers(tid, &node_id, &info_hash, None);
     assert_eq!(data[0], b'd');
 }
 
@@ -76,7 +78,7 @@ fn parse_compact_nodes() {
     data.extend_from_slice(&[127, 0, 0, 1]);
     data.extend_from_slice(&0x1AE1u16.to_be_bytes());
 
-    let nodes = krpc::parse_compact_nodes(&data);
+    let nodes = krpc::parse_compact_nodes4(&data);
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].id, [1u8; 20]);
     assert_eq!(nodes[0].addr, "127.0.0.1:6881".parse().unwrap());
@@ -84,7 +86,7 @@ fn parse_compact_nodes() {
 
 #[test]
 fn parse_compact_nodes_empty() {
-    let nodes = krpc::parse_compact_nodes(&[]);
+    let nodes = krpc::parse_compact_nodes4(&[]);
     assert!(nodes.is_empty());
 }
 
@@ -168,7 +170,7 @@ async fn handle_find_node_via_loopback() {
         .query(
             server_addr,
             tid,
-            &krpc::build_find_node(tid, &node_for_query, &target),
+            &krpc::build_find_node(tid, &node_for_query, &target, None),
         )
         .await
         .unwrap();
@@ -222,8 +224,6 @@ async fn dht_rpc_concurrent_queries() {
 
 #[tokio::test]
 async fn dht_rpc_query_timeout() {
-    use std::time::Duration;
-
     let timeout = Duration::from_secs(1); // 1s
     let client = DhtRpc::with_timeout("127.0.0.1:0".parse().unwrap(), timeout)
         .await
@@ -235,4 +235,72 @@ async fn dht_rpc_query_timeout() {
 
     let result = client.ping(unreachable, tid, &node_id).await;
     assert!(result.is_err());
+}
+
+// ── IPv6 integration tests (BEP 32) ───────────────────────────
+
+#[tokio::test]
+async fn dht_rpc_binds_ipv6_loopback() {
+    // Verify DhtRpc can bind to an IPv6 loopback address.
+    let rpc = DhtRpc::new("[::1]:0".parse().unwrap()).await;
+    assert!(rpc.is_ok());
+}
+
+#[tokio::test]
+async fn find_node_parses_nodes6_from_response() {
+    // Set up a mock server on IPv6 loopback that responds with nodes6.
+    let server = tokio::net::UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(
+        Ipv6Addr::LOCALHOST,
+        0,
+        0,
+        0,
+    )))
+    .await
+    .unwrap();
+    let server_addr = server.local_addr().unwrap();
+
+    let node_id = [0xAAu8; 20];
+    let target = [0xBBu8; 20];
+
+    // Spawn server that responds to find_node with a nodes6 response
+    let server_node_id = [0xCCu8; 20];
+    let server_task = tokio::spawn({
+        let server_node_id = server_node_id;
+        async move {
+            let mut buf = [0u8; 2048];
+            let (len, src) = server.recv_from(&mut buf).await.unwrap();
+            let msg = krpc::KrpcMessage::from_bytes(&buf[..len]).unwrap();
+            // Build response with both nodes and nodes6
+            let response = match msg {
+                krpc::KrpcMessage::Query { transaction_id, .. } => {
+                    // Create a test node with an IPv6 address for nodes6
+                    let v6_node = Node {
+                        id: [0xDDu8; 20],
+                        addr: SocketAddr::V6(SocketAddrV6::new(
+                            Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1),
+                            6881,
+                            0,
+                            0,
+                        )),
+                    };
+                    krpc::build_find_node_response(transaction_id, &server_node_id, &[v6_node])
+                }
+                _ => return,
+            };
+            server.send_to(&response, src).await.unwrap();
+        }
+    });
+
+    // Client queries the mock server via find_node
+    let client = DhtRpc::new("[::1]:0".parse().unwrap()).await.unwrap();
+    let tid = rand::random();
+    let nodes = find_node(&client, server_addr, tid, &node_id, &target, None)
+        .await
+        .unwrap();
+
+    // Should have parsed the IPv6 node from nodes6 key
+    assert!(!nodes.is_empty());
+    assert!(nodes.iter().any(|n| n.addr.is_ipv6()));
+
+    server_task.abort();
 }

@@ -3,10 +3,12 @@
 //! Provides the [`KrpcMessage`] enum, builder helpers for queries
 //! and responses, response parsers, and compact node I/O.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::bencode::{self, Bencode, Bytes};
 use crate::error::{Error, ErrorKind};
+
+use super::Node;
 
 /// Transaction ID type (2-byte random value).
 pub type TransactionId = [u8; 2];
@@ -176,38 +178,59 @@ pub fn build_ping(tid: TransactionId, node_id: &[u8; 20]) -> Vec<u8> {
     .to_bytes()
 }
 
-/// Build a find_node query (BEP 5).
+/// Build a find_node query (BEP 5 / BEP 32).
 ///
 /// Creates a KRPC `find_node` query for discovering nodes close to
-/// a target ID. Used during the DHT bootstrap and recursive lookup process.
-pub fn build_find_node(tid: TransactionId, node_id: &[u8; 20], target: &[u8; 20]) -> Vec<u8> {
+/// a target ID. When `want` is `Some`, includes a `want` parameter
+/// to request specific address families (`"n4"`, `"n6"`).
+pub fn build_find_node(
+    tid: TransactionId, node_id: &[u8; 20], target: &[u8; 20], want: Option<&[&str]>,
+) -> Vec<u8> {
+    let mut entries = vec![
+        (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+        (target_key(), Bencode::Bytes(Bytes::copy_from_slice(target))),
+    ];
+    if let Some(w) = want {
+        let want_list: Vec<Bencode> = w
+            .iter()
+            .map(|s| Bencode::Bytes(Bytes::copy_from_slice(s.as_bytes())))
+            .collect();
+        entries.push((Bytes::from("want"), Bencode::List(want_list)));
+    }
     KrpcMessage::Query {
         transaction_id: tid,
         method: "find_node".into(),
-        args: Bencode::Dict(vec![
-            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
-            (target_key(), Bencode::Bytes(Bytes::copy_from_slice(target))),
-        ]),
+        args: Bencode::Dict(entries),
     }
     .to_bytes()
 }
 
-/// Build a get_peers query (BEP 5).
+/// Build a get_peers query (BEP 5 / BEP 32).
 ///
 /// Creates a KRPC `get_peers` query to discover peers sharing a torrent
-/// identified by `info_hash`. The response may contain peer addresses
-/// or closer DHT nodes.
-pub fn build_get_peers(tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 20]) -> Vec<u8> {
+/// identified by `info_hash`. When `want` is `Some`, includes a `want`
+/// parameter to request specific address families (`"n4"`, `"n6"`).
+pub fn build_get_peers(
+    tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 20], want: Option<&[&str]>,
+) -> Vec<u8> {
+    let mut entries = vec![
+        (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+        (
+            info_hash_key(),
+            Bencode::Bytes(Bytes::copy_from_slice(info_hash)),
+        ),
+    ];
+    if let Some(w) = want {
+        let want_list: Vec<Bencode> = w
+            .iter()
+            .map(|s| Bencode::Bytes(Bytes::copy_from_slice(s.as_bytes())))
+            .collect();
+        entries.push((Bytes::from("want"), Bencode::List(want_list)));
+    }
     KrpcMessage::Query {
         transaction_id: tid,
         method: "get_peers".into(),
-        args: Bencode::Dict(vec![
-            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
-            (
-                info_hash_key(),
-                Bencode::Bytes(Bytes::copy_from_slice(info_hash)),
-            ),
-        ]),
+        args: Bencode::Dict(entries),
     }
     .to_bytes()
 }
@@ -273,7 +296,7 @@ pub enum GetPeersResult {
         peers: Vec<SocketAddr>,
     },
     /// Closer nodes in compact format.
-    Nodes(Vec<super::Node>),
+    Nodes(Vec<Node>),
 }
 
 /// Parse a get_peers response (BEP 5).
@@ -297,21 +320,35 @@ pub fn parse_get_peers_response(msg: &KrpcMessage) -> Result<GetPeersResult, Err
             if let Some(Bencode::List(values)) = dict_get(result, b"values") {
                 let mut peers = Vec::new();
                 for v in values {
-                    if let Bencode::Bytes(b) = v
-                        && b.len() == 6
-                    {
-                        let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
-                        let port = u16::from_be_bytes([b[4], b[5]]);
-                        peers.push(SocketAddr::new(IpAddr::V4(ip), port));
+                    if let Bencode::Bytes(b) = v {
+                        if b.len() == 6 {
+                            let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
+                            let port = u16::from_be_bytes([b[4], b[5]]);
+                            peers.push(SocketAddr::new(IpAddr::V4(ip), port));
+                        } else if b.len() == 18 {
+                            let mut ip_bytes = [0u8; 16];
+                            ip_bytes.copy_from_slice(&b[..16]);
+                            let ip = Ipv6Addr::from(ip_bytes);
+                            let port = u16::from_be_bytes([b[16], b[17]]);
+                            peers.push(SocketAddr::new(IpAddr::V6(ip), port));
+                        }
                     }
                 }
                 return Ok(GetPeersResult::Values { token, peers });
             }
 
-            // Check for "nodes" field (compact node info)
             if let Some(nodes_bytes) = dict_get_bytes(result, b"nodes") {
-                let nodes = parse_compact_nodes(nodes_bytes);
-                return Ok(GetPeersResult::Nodes(nodes));
+                let nodes = parse_compact_nodes4(nodes_bytes);
+                if !nodes.is_empty() {
+                    return Ok(GetPeersResult::Nodes(nodes));
+                }
+            }
+
+            if let Some(nodes6_bytes) = dict_get_bytes(result, b"nodes6") {
+                let nodes = parse_compact_nodes6(nodes6_bytes);
+                if !nodes.is_empty() {
+                    return Ok(GetPeersResult::Nodes(nodes));
+                }
             }
 
             Err(Error::new(ErrorKind::Protocol))
@@ -320,18 +357,18 @@ pub fn parse_get_peers_response(msg: &KrpcMessage) -> Result<GetPeersResult, Err
     }
 }
 
-/// Parse compact node info (BEP 5).
+/// Parse compact IPv4 node info (BEP 5).
 ///
 /// Each node is 26 bytes: 20-byte node ID + 4-byte IPv4 address + 2-byte port.
 /// Incomplete trailing bytes are silently ignored.
-pub fn parse_compact_nodes(data: &[u8]) -> Vec<super::Node> {
+pub fn parse_compact_nodes4(data: &[u8]) -> Vec<Node> {
     data.chunks_exact(26)
         .map(|chunk| {
             let mut id = [0u8; 20];
             id.copy_from_slice(&chunk[..20]);
             let ip = Ipv4Addr::new(chunk[20], chunk[21], chunk[22], chunk[23]);
             let port = u16::from_be_bytes([chunk[24], chunk[25]]);
-            super::Node {
+            Node {
                 id,
                 addr: SocketAddr::new(IpAddr::V4(ip), port),
             }
@@ -339,18 +376,69 @@ pub fn parse_compact_nodes(data: &[u8]) -> Vec<super::Node> {
         .collect()
 }
 
-/// Encode nodes into compact format (BEP 5).
+/// Backward-compatible alias for [`parse_compact_nodes4`].
+#[deprecated(since = "0.1.6", note = "use `parse_compact_nodes4` instead")]
+pub fn parse_compact_nodes(data: &[u8]) -> Vec<Node> {
+    parse_compact_nodes4(data)
+}
+
+/// Encode IPv4 nodes into compact format (BEP 5).
 ///
 /// Each node is 26 bytes: 20-byte node ID + 4-byte IPv4 address + 2-byte port.
-/// Returns the concatenated bytes for all nodes.
-pub fn encode_compact_nodes(nodes: &[super::Node]) -> Vec<u8> {
+/// IPv6 nodes are silently skipped.
+pub fn encode_compact_nodes4(nodes: &[Node]) -> Vec<u8> {
     let mut data = Vec::with_capacity(nodes.len() * 26);
     for node in nodes {
-        data.extend_from_slice(&node.id);
         let ip = match node.addr.ip() {
             IpAddr::V4(v4) => v4.octets(),
-            _ => continue, // skip IPv6 for now
+            _ => continue,
         };
+        data.extend_from_slice(&node.id);
+        data.extend_from_slice(&ip);
+        data.extend_from_slice(&node.addr.port().to_be_bytes());
+    }
+    data
+}
+
+/// Backward-compatible alias for [`encode_compact_nodes4`].
+#[deprecated(since = "0.1.6", note = "use `encode_compact_nodes4` instead")]
+pub fn encode_compact_nodes(nodes: &[Node]) -> Vec<u8> {
+    encode_compact_nodes4(nodes)
+}
+
+/// Parse compact IPv6 node info (BEP 32).
+///
+/// Each node is 38 bytes: 20-byte node ID + 16-byte IPv6 address + 2-byte port.
+/// Incomplete trailing bytes are silently ignored.
+pub fn parse_compact_nodes6(data: &[u8]) -> Vec<Node> {
+    data.chunks_exact(38)
+        .map(|chunk| {
+            let mut id = [0u8; 20];
+            id.copy_from_slice(&chunk[..20]);
+            let mut ip_bytes = [0u8; 16];
+            ip_bytes.copy_from_slice(&chunk[20..36]);
+            let ip = Ipv6Addr::from(ip_bytes);
+            let port = u16::from_be_bytes([chunk[36], chunk[37]]);
+            Node {
+                id,
+                addr: SocketAddr::new(IpAddr::V6(ip), port),
+            }
+        })
+        .collect()
+}
+
+/// Encode IPv6 nodes into compact format (BEP 32).
+///
+/// Each node is 38 bytes: 20-byte node ID + 16-byte IPv6 address + 2-byte port.
+/// IPv4 nodes are silently skipped.
+pub fn encode_compact_nodes6(nodes: &[Node]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(nodes.len() * 38);
+    for node in nodes {
+        let ip = match node.addr.ip() {
+            IpAddr::V6(v6) => v6.octets(),
+            _ => continue,
+        };
+        data.extend_from_slice(&node.id);
         data.extend_from_slice(&ip);
         data.extend_from_slice(&node.addr.port().to_be_bytes());
     }
@@ -371,17 +459,22 @@ pub fn build_ping_response(tid: TransactionId, node_id: &[u8; 20]) -> Vec<u8> {
     .to_bytes()
 }
 
-/// Build a `find_node` response (BEP 5).
-pub fn build_find_node_response(
-    tid: TransactionId, node_id: &[u8; 20], nodes: &[super::Node],
-) -> Vec<u8> {
-    let compact = encode_compact_nodes(nodes);
+/// Build a `find_node` response (BEP 5 / BEP 32).
+///
+/// Includes both `nodes` (IPv4) and `nodes6` (IPv6) keys per BEP 32.
+pub fn build_find_node_response(tid: TransactionId, node_id: &[u8; 20], nodes: &[Node]) -> Vec<u8> {
+    let compact4 = encode_compact_nodes4(nodes);
+    let compact6 = encode_compact_nodes6(nodes);
+    let mut entries = vec![
+        (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+        (Bytes::from("nodes"), Bencode::Bytes(Bytes::from(compact4))),
+    ];
+    if !compact6.is_empty() {
+        entries.push((Bytes::from("nodes6"), Bencode::Bytes(Bytes::from(compact6))));
+    }
     KrpcMessage::Response {
         transaction_id: tid,
-        result: Bencode::Dict(vec![
-            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
-            (Bytes::from("nodes"), Bencode::Bytes(Bytes::from(compact))),
-        ]),
+        result: Bencode::Dict(entries),
     }
     .to_bytes()
 }
@@ -392,14 +485,18 @@ pub fn build_get_peers_response_values(
 ) -> Vec<u8> {
     let peer_list: Vec<Bencode> = peers
         .iter()
-        .filter_map(|addr| match addr.ip() {
-            IpAddr::V4(v4) => {
-                let mut data = Vec::new();
-                data.extend_from_slice(&v4.octets());
-                data.extend_from_slice(&addr.port().to_be_bytes());
-                Some(Bencode::Bytes(Bytes::from(data)))
+        .map(|addr| {
+            let mut data = Vec::new();
+            match addr.ip() {
+                IpAddr::V4(v4) => {
+                    data.extend_from_slice(&v4.octets());
+                }
+                IpAddr::V6(v6) => {
+                    data.extend_from_slice(&v6.octets());
+                }
             }
-            _ => None,
+            data.extend_from_slice(&addr.port().to_be_bytes());
+            Bencode::Bytes(Bytes::from(data))
         })
         .collect();
     KrpcMessage::Response {
@@ -416,21 +513,28 @@ pub fn build_get_peers_response_values(
     .to_bytes()
 }
 
-/// Build a `get_peers` response with closer nodes (BEP 5).
+/// Build a `get_peers` response with closer nodes (BEP 5 / BEP 32).
+///
+/// Includes both `nodes` (IPv4) and `nodes6` (IPv6) keys per BEP 32.
 pub fn build_get_peers_response_nodes(
-    tid: TransactionId, node_id: &[u8; 20], token: &[u8], nodes: &[super::Node],
+    tid: TransactionId, node_id: &[u8; 20], token: &[u8], nodes: &[Node],
 ) -> Vec<u8> {
-    let compact = encode_compact_nodes(nodes);
+    let compact4 = encode_compact_nodes4(nodes);
+    let compact6 = encode_compact_nodes6(nodes);
+    let mut entries = vec![
+        (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+        (
+            Bytes::from("token"),
+            Bencode::Bytes(Bytes::copy_from_slice(token)),
+        ),
+        (Bytes::from("nodes"), Bencode::Bytes(Bytes::from(compact4))),
+    ];
+    if !compact6.is_empty() {
+        entries.push((Bytes::from("nodes6"), Bencode::Bytes(Bytes::from(compact6))));
+    }
     KrpcMessage::Response {
         transaction_id: tid,
-        result: Bencode::Dict(vec![
-            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
-            (
-                Bytes::from("token"),
-                Bencode::Bytes(Bytes::copy_from_slice(token)),
-            ),
-            (Bytes::from("nodes"), Bencode::Bytes(Bytes::from(compact))),
-        ]),
+        result: Bencode::Dict(entries),
     }
     .to_bytes()
 }
@@ -527,7 +631,7 @@ mod tests {
         let tid = [0x12, 0x34];
         let node_id = [0x11u8; 20];
         let target = [0x22u8; 20];
-        let bytes = build_find_node(tid, &node_id, &target);
+        let bytes = build_find_node(tid, &node_id, &target, None);
 
         let msg = KrpcMessage::from_bytes(&bytes).unwrap();
         match &msg {
@@ -593,7 +697,7 @@ mod tests {
         data.extend_from_slice(&[192, 168, 1, 1]);
         data.extend_from_slice(&51413u16.to_be_bytes());
 
-        let nodes = parse_compact_nodes(&data);
+        let nodes = parse_compact_nodes4(&data);
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].id, [0x01u8; 20]);
         assert_eq!(nodes[0].addr.to_string(), "127.0.0.1:6881");
@@ -733,5 +837,111 @@ mod tests {
             (Bytes::from("e"), Bencode::Integer(203)), // not a list
         ]);
         assert!(KrpcMessage::from_bencode(&dict).is_err());
+    }
+
+    // ── BEP 32 IPv6 tests ──────────────────────────────────────
+
+    #[test]
+    fn parse_compact_nodes4_roundtrip() {
+        let node = Node {
+            id: [0x01u8; 20],
+            addr: "127.0.0.1:6881".parse().unwrap(),
+        };
+        let encoded = encode_compact_nodes4(&[node.clone()]);
+        assert_eq!(encoded.len(), 26);
+        let decoded = parse_compact_nodes4(&encoded);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], node);
+    }
+
+    #[test]
+    fn parse_compact_nodes6_roundtrip() {
+        let node = Node {
+            id: [0x02u8; 20],
+            addr: "[::1]:6881".parse().unwrap(),
+        };
+        let encoded = encode_compact_nodes6(&[node.clone()]);
+        assert_eq!(encoded.len(), 38);
+        let decoded = parse_compact_nodes6(&encoded);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], node);
+    }
+
+    #[test]
+    fn encode_compact_nodes4_skips_ipv6() {
+        let v4 = Node {
+            id: [0x01u8; 20],
+            addr: "10.0.0.1:6881".parse().unwrap(),
+        };
+        let v6 = Node {
+            id: [0x02u8; 20],
+            addr: "[::1]:6881".parse().unwrap(),
+        };
+        let encoded = encode_compact_nodes4(&[v4, v6]);
+        assert_eq!(encoded.len(), 26);
+    }
+
+    #[test]
+    fn encode_compact_nodes6_skips_ipv4() {
+        let v4 = Node {
+            id: [0x01u8; 20],
+            addr: "10.0.0.1:6881".parse().unwrap(),
+        };
+        let v6 = Node {
+            id: [0x02u8; 20],
+            addr: "[::1]:6881".parse().unwrap(),
+        };
+        let encoded = encode_compact_nodes6(&[v4, v6]);
+        assert_eq!(encoded.len(), 38);
+    }
+
+    #[test]
+    fn parse_get_peers_response_nodes6() {
+        let mut compact6 = Vec::new();
+        compact6.extend_from_slice(&[0x03u8; 20]);
+        compact6.extend_from_slice(&[0u8; 16]);
+        compact6[35] = 1;
+        compact6.extend_from_slice(&6881u16.to_be_bytes());
+
+        let msg = KrpcMessage::Response {
+            transaction_id: [0; 2],
+            result: Bencode::Dict(vec![
+                (Bytes::from("token"), Bencode::Bytes(Bytes::from("tok"))),
+                (Bytes::from("nodes6"), Bencode::Bytes(Bytes::from(compact6))),
+            ]),
+        };
+        match parse_get_peers_response(&msg).unwrap() {
+            GetPeersResult::Nodes(nodes) => {
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0].addr.to_string(), "[::1]:6881");
+            }
+            _ => panic!("expected Nodes"),
+        }
+    }
+
+    #[test]
+    fn parse_get_peers_values_ipv6() {
+        let mut peer6 = Vec::new();
+        peer6.extend_from_slice(&[0u8; 16]);
+        peer6[15] = 1;
+        peer6.extend_from_slice(&6881u16.to_be_bytes());
+
+        let msg = KrpcMessage::Response {
+            transaction_id: [0; 2],
+            result: Bencode::Dict(vec![
+                (Bytes::from("token"), Bencode::Bytes(Bytes::from("tok"))),
+                (
+                    Bytes::from("values"),
+                    Bencode::List(vec![Bencode::Bytes(Bytes::from(peer6))]),
+                ),
+            ]),
+        };
+        match parse_get_peers_response(&msg).unwrap() {
+            GetPeersResult::Values { peers, .. } => {
+                assert_eq!(peers.len(), 1);
+                assert_eq!(peers[0].to_string(), "[::1]:6881");
+            }
+            _ => panic!("expected Values"),
+        }
     }
 }

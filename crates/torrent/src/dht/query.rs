@@ -18,18 +18,27 @@ use super::{Node, krpc, rpc::DhtRpc};
 ///
 /// Returns an error if the RPC call fails or the response is malformed.
 pub async fn find_node(
-    rpc: &DhtRpc, addr: SocketAddr, tid: krpc::TransactionId, node_id: &[u8; 20], target: &[u8; 20],
+    rpc: &DhtRpc, addr: SocketAddr, tid: krpc::TransactionId, node_id: &[u8; 20],
+    target: &[u8; 20], want: Option<&[&str]>,
 ) -> Result<Vec<Node>, Error> {
     tracing::debug!("DHT find_node to {}", addr);
-    let data = krpc::build_find_node(tid, node_id, target);
+    let data = krpc::build_find_node(tid, node_id, target, want);
     let response = rpc.query(addr, tid, &data).await?;
 
     match &response {
         krpc::KrpcMessage::Response { result, .. } => {
+            // Check nodes (IPv4 compact, BEP 5) and nodes6 (IPv6 compact, BEP 32).
+            let mut nodes = Vec::new();
             if let Some(nodes_bytes) = krpc::dict_get_bytes(result, b"nodes") {
-                Ok(krpc::parse_compact_nodes(nodes_bytes))
-            } else {
+                nodes.extend(krpc::parse_compact_nodes4(nodes_bytes));
+            }
+            if let Some(nodes6_bytes) = krpc::dict_get_bytes(result, b"nodes6") {
+                nodes.extend(krpc::parse_compact_nodes6(nodes6_bytes));
+            }
+            if nodes.is_empty() {
                 Err(Error::new(ErrorKind::Protocol))
+            } else {
+                Ok(nodes)
             }
         }
         _ => Err(Error::new(ErrorKind::Protocol)),
@@ -47,10 +56,10 @@ pub async fn find_node(
 /// Returns an error if the RPC call fails or the response is malformed.
 pub async fn get_peers(
     rpc: &DhtRpc, addr: SocketAddr, tid: krpc::TransactionId, node_id: &[u8; 20],
-    info_hash: &[u8; 20],
+    info_hash: &[u8; 20], want: Option<&[&str]>,
 ) -> Result<krpc::GetPeersResult, Error> {
     tracing::debug!("DHT get_peers to {}", addr);
-    let data = krpc::build_get_peers(tid, node_id, info_hash);
+    let data = krpc::build_get_peers(tid, node_id, info_hash, want);
     let response = rpc.query(addr, tid, &data).await?;
 
     krpc::parse_get_peers_response(&response)
