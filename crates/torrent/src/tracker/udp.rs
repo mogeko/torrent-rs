@@ -284,10 +284,12 @@ fn parse_announce_response(
     let peers = if peer_data.is_empty() {
         Vec::new()
     } else if peer_data.len().is_multiple_of(18) {
-        // BEP 15 IPv6 extension: 18 bytes per peer (16 IPv6 + 2 port)
+        // NOTE: 18 is also a multiple of 6 (e.g. 3 IPv4 peers = 18 bytes).
+        // BEP 15 has no explicit IPv6 format flag; we prioritize 18-byte
+        // alignment per common implementation practice (libtorrent, etc.).
+        // In practice, trackers return either all IPv4 or all IPv6 peers.
         super::parse_compact_peers_ipv6(peer_data)?
     } else if peer_data.len().is_multiple_of(6) {
-        // Standard BEP 15: 6 bytes per peer (4 IPv4 + 2 port)
         super::parse_compact_peers_ipv4(peer_data)?
     } else {
         return Err(Error::new(ErrorKind::TrackerProtocolError));

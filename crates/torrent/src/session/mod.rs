@@ -108,21 +108,26 @@ impl Session {
         let dht_node_v6 = if let Some(ref bootstrap_v6) = config.bootstrap_nodes_v6
             && !bootstrap_v6.is_empty()
         {
-            Some(
-                init_dht(
-                    bootstrap_v6,
-                    SocketAddr::V6(SocketAddrV6::new(
-                        Ipv6Addr::UNSPECIFIED,
-                        config.listen_port + 2,
-                        0,
-                        0,
-                    )),
-                    node_id,
-                    &torrents,
-                    config.dht_poll_interval,
-                )
-                .await?,
+            match init_dht(
+                bootstrap_v6,
+                SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::UNSPECIFIED,
+                    config.listen_port + 2,
+                    0,
+                    0,
+                )),
+                node_id,
+                &torrents,
+                config.dht_poll_interval,
             )
+            .await
+            {
+                Ok(node) => Some(node),
+                Err(e) => {
+                    tracing::warn!("IPv6 DHT init failed (continuing with IPv4 only): {e}");
+                    None
+                }
+            }
         } else {
             None
         };

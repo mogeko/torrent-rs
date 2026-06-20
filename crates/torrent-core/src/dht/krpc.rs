@@ -339,12 +339,16 @@ pub fn parse_get_peers_response(msg: &KrpcMessage) -> Result<GetPeersResult, Err
 
             if let Some(nodes_bytes) = dict_get_bytes(result, b"nodes") {
                 let nodes = parse_compact_nodes4(nodes_bytes);
-                return Ok(GetPeersResult::Nodes(nodes));
+                if !nodes.is_empty() {
+                    return Ok(GetPeersResult::Nodes(nodes));
+                }
             }
 
             if let Some(nodes6_bytes) = dict_get_bytes(result, b"nodes6") {
                 let nodes = parse_compact_nodes6(nodes6_bytes);
-                return Ok(GetPeersResult::Nodes(nodes));
+                if !nodes.is_empty() {
+                    return Ok(GetPeersResult::Nodes(nodes));
+                }
             }
 
             Err(Error::new(ErrorKind::Protocol))
@@ -455,7 +459,9 @@ pub fn build_ping_response(tid: TransactionId, node_id: &[u8; 20]) -> Vec<u8> {
     .to_bytes()
 }
 
-/// Build a `find_node` response (BEP 5).
+/// Build a `find_node` response (BEP 5 / BEP 32).
+///
+/// Includes both `nodes` (IPv4) and `nodes6` (IPv6) keys per BEP 32.
 pub fn build_find_node_response(tid: TransactionId, node_id: &[u8; 20], nodes: &[Node]) -> Vec<u8> {
     let compact4 = encode_compact_nodes4(nodes);
     let compact6 = encode_compact_nodes6(nodes);
@@ -507,7 +513,9 @@ pub fn build_get_peers_response_values(
     .to_bytes()
 }
 
-/// Build a `get_peers` response with closer nodes (BEP 5).
+/// Build a `get_peers` response with closer nodes (BEP 5 / BEP 32).
+///
+/// Includes both `nodes` (IPv4) and `nodes6` (IPv6) keys per BEP 32.
 pub fn build_get_peers_response_nodes(
     tid: TransactionId, node_id: &[u8; 20], token: &[u8], nodes: &[Node],
 ) -> Vec<u8> {
