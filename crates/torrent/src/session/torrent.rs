@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use tokio::sync::{RwLock, mpsc};
 
-use crate::error::{Error, ErrorKind};
 use crate::magnet::hex_encode;
 use crate::metainfo::{Metainfo, Mode};
 use crate::peer::PeerId;
@@ -170,45 +169,6 @@ impl TorrentHandle {
         self.storage = Some(storage);
         self.control_tx = Some(control_tx);
         self.task = Some(task);
-    }
-
-    /// Pause this torrent. No-op if not yet activated.
-    #[allow(dead_code)]
-    pub async fn pause(&self) -> Result<(), Error> {
-        if let Some(tx) = &self.control_tx {
-            tx.send(TorrentCommand::Pause)
-                .await
-                .map_err(|_| Error::new(ErrorKind::Protocol))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Resume this torrent. No-op if not yet activated.
-    #[allow(dead_code)]
-    pub async fn resume(&self) -> Result<(), Error> {
-        if let Some(tx) = &self.control_tx {
-            tx.send(TorrentCommand::Resume)
-                .await
-                .map_err(|_| Error::new(ErrorKind::Protocol))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Cancel this torrent (shuts down the download loop).
-    pub async fn cancel(&mut self) {
-        if let Some(tx) = &self.control_tx {
-            let _ = tx.send(TorrentCommand::Cancel).await;
-        }
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
-    }
-    /// Get the current status.
-    #[allow(dead_code)]
-    pub async fn status(&self) -> TorrentStatus {
-        self.status.read().await.clone()
     }
 }
 

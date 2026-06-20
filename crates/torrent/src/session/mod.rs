@@ -29,11 +29,11 @@ use std::time::Duration;
 
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
-use crate::magnet::MagnetUri;
-use crate::metainfo::Metainfo;
+use crate::magnet::{MagnetUri, hex_encode};
+use crate::metainfo::{Metainfo, Mode};
 use crate::spec::TorrentSpec;
 
-use self::torrent::TorrentHandle;
+use self::torrent::{TorrentCommand, TorrentHandle};
 
 /// High-level session managing all torrent downloads/uploads.
 ///
@@ -152,8 +152,25 @@ impl Session {
 
         // Register handle (consumes spec)
         let handle = TorrentHandle::register(spec, &self.config);
+        let metainfo = handle.metainfo.as_ref();
+        let (name, num_pieces) = metainfo
+            .map(|m| {
+                (
+                    match &m.info.mode {
+                        Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+                    },
+                    m.info.num_pieces().to_string(),
+                )
+            })
+            .unwrap_or_else(|| ("<unknown>".into(), "?".into()));
 
         self.torrents.write().unwrap().insert(info_hash, handle);
+
+        tracing::info!("torrent registered: {name} ({num_pieces} pieces)");
+        tracing::debug!(
+            "torrent registered: {} ({num_pieces} pieces)",
+            hex_encode(info_hash)
+        );
 
         Ok(TorrentBuilder::new(
             self,
@@ -185,18 +202,96 @@ impl Session {
     }
 
     // ── Lifecycle ──
+
+    /// Pause an active torrent. No-op if not yet activated or already paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    /// Returns [`ErrorKind::Protocol`] if the download loop has stopped
+    /// unexpectedly.
+    pub async fn pause_torrent(&self, info_hash: &InfoHash) -> Result<(), Error> {
+        let (control_tx, name) = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(h) => (h.control_tx.clone(), torrent_name(h)),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+
+        if let Some(tx) = control_tx {
+            tracing::info!("pausing torrent: {name}");
+            tracing::debug!("pausing torrent {} ({name})", hex_encode(*info_hash));
+            tx.send(TorrentCommand::Pause)
+                .await
+                .map_err(|_| Error::new(ErrorKind::Protocol))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Resume a paused torrent. No-op if not yet activated or already running.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    /// Returns [`ErrorKind::Protocol`] if the download loop has stopped
+    /// unexpectedly.
+    pub async fn resume_torrent(&self, info_hash: &InfoHash) -> Result<(), Error> {
+        let (control_tx, name) = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(h) => (h.control_tx.clone(), torrent_name(h)),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+        if let Some(tx) = control_tx {
+            tracing::info!("resuming torrent: {name}");
+            tracing::debug!("resuming torrent {} ({name})", hex_encode(*info_hash));
+            tx.send(TorrentCommand::Resume)
+                .await
+                .map_err(|_| Error::new(ErrorKind::Protocol))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Remove a torrent and cancel its download loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
     pub async fn remove_torrent(&self, info_hash: &InfoHash) -> Result<(), Error> {
         let handle = self.torrents.write().unwrap().remove(info_hash);
 
-        if let Some(mut h) = handle {
-            h.cancel().await;
-            // Await the task to ensure clean shutdown (cancel() already awaits)
+        let mut handle = handle.ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
+        let name = torrent_name(&handle);
+
+        tracing::info!("removing torrent: {name}");
+        tracing::debug!("removing torrent {} ({name})", hex_encode(*info_hash));
+
+        if let Some(tx) = &handle.control_tx {
+            // Channel may already be closed if the download loop stopped;
+            // still need to await the task below.
+            let _ = tx.send(TorrentCommand::Cancel).await.inspect_err(|_| {
+                tracing::debug!("cancel send failed (loop already stopped): {name}")
+            });
+        }
+
+        if let Some(task) = handle.task.take() {
+            if let Err(e) = task.await {
+                tracing::warn!("download loop panicked for torrent: {name} ({e})");
+            }
         }
 
         Ok(())
     }
 
     /// Get the status of a torrent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
     pub async fn torrent_status(&self, info_hash: &InfoHash) -> Result<TorrentStatus, Error> {
         let status = {
             let torrents = self.torrents.read().unwrap();
@@ -216,6 +311,17 @@ impl Session {
     pub fn active_torrents(&self) -> Vec<InfoHash> {
         self.torrents.read().unwrap().keys().copied().collect()
     }
+}
+
+/// Extract a human-readable name from a [`TorrentHandle`].
+fn torrent_name(handle: &TorrentHandle) -> String {
+    let metainfo = handle.metainfo.as_ref();
+
+    metainfo
+        .map(|m| match &m.info.mode {
+            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+        })
+        .unwrap_or_else(|| "<unknown>".into())
 }
 
 /// Spawn a background task that periodically queries the DHT for
