@@ -8,9 +8,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::bencode::{decode as bencode_decode, encode as bencode_encode};
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::Metainfo;
-use crate::peer::metadata::{METADATA_PIECE_SIZE, MetadataData, MetadataRequest};
+use crate::peer::metadata::{
+    METADATA_PIECE_SIZE, MetadataData, MetadataRequest, UT_METADATA_EXT, UT_METADATA_ID,
+};
 use crate::peer::{ExtensionNegotiation, PeerConnection, PeerId, PeerMessage};
 use crate::storage::{FileStorageFactory, StorageFactory};
 
@@ -230,12 +233,9 @@ async fn download_metadata_from_peer(
 
     // 2. Send LTEP handshake (ext_id 0) with ut_metadata extension
     let mut our_neg = ExtensionNegotiation::new();
-    our_neg.add_extension(
-        crate::peer::metadata::UT_METADATA_EXT,
-        crate::peer::metadata::UT_METADATA_ID,
-    );
+    our_neg.add_extension(UT_METADATA_EXT, UT_METADATA_ID);
     let handshake_data = our_neg.to_bencode();
-    let handshake_bytes = crate::bencode::encode(&handshake_data);
+    let handshake_bytes = bencode_encode(&handshake_data);
     conn.send(&PeerMessage::Extended {
         ext_id: 0,
         data: handshake_bytes,
@@ -246,11 +246,11 @@ async fn download_metadata_from_peer(
     let msg = conn.recv().await?;
     let (remote_ext_id, metadata_size) = match msg {
         PeerMessage::Extended { ext_id: 0, data } => {
-            let (ben, _) = crate::bencode::decode(&data)
+            let (ben, _) = bencode_decode(&data)
                 .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
             let neg = ExtensionNegotiation::from_bencode(&ben)
                 .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
-            let ext_id = neg.m.get(crate::peer::metadata::UT_METADATA_EXT).copied();
+            let ext_id = neg.m.get(UT_METADATA_EXT).copied();
             let size = neg.metadata_size.map(|s| s as u64);
             (ext_id, size)
         }
@@ -271,7 +271,7 @@ async fn download_metadata_from_peer(
         let req_ben = req.to_bencode();
         conn.send(&PeerMessage::Extended {
             ext_id,
-            data: crate::bencode::encode(&req_ben),
+            data: bencode_encode(&req_ben),
         })
         .await?;
 
@@ -284,7 +284,7 @@ async fn download_metadata_from_peer(
                 // BEP 9: data contains bencoded dict prefix followed by raw piece data
                 // Parse the bencoded dict to get piece index and total_size
                 let (dict, raw_data) = split_bep9_data(&data)?;
-                let (ben, _) = crate::bencode::decode(&dict)
+                let (ben, _) = bencode_decode(&dict)
                     .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
 
                 if MetadataData::is_reject(&ben) {
