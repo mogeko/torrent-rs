@@ -43,7 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Add the bundled Debian 13.5 torrent.
     let data = include_bytes!("data/debian-13.5.0-amd64-netinst.iso.torrent");
-    let info_hash = session.add_torrent_bytes(data, &download_dir).await?;
+    let info_hash = session
+        .add_torrent_bytes(data)?
+        .download_dir(&download_dir)
+        .start()
+        .await?;
     let status = session.torrent_status(&info_hash).await?;
     let total_bytes = {
         let meta = Metainfo::try_from(data)?;

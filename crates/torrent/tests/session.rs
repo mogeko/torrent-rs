@@ -41,7 +41,7 @@ async fn session_new_with_temp_dir() -> Result<(), Error> {
         ..Default::default()
     };
     let session = Session::new(config).await?;
-    assert!(session.active_torrents().await.is_empty());
+    assert!(session.active_torrents().is_empty());
     Ok(())
 }
 
@@ -55,10 +55,14 @@ async fn add_torrent_bytes_and_query_status() -> Result<(), Error> {
     let session = Session::new(config).await?;
 
     let data = make_single_file_torrent();
-    let info_hash = session.add_torrent_bytes(&data, tmp.path()).await?;
+    let info_hash = session
+        .add_torrent_bytes(&data)?
+        .download_dir(tmp.path())
+        .start()
+        .await?;
 
     // Verify the torrent appears in active list
-    let active = session.active_torrents().await;
+    let active = session.active_torrents();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0], info_hash);
 
@@ -82,11 +86,15 @@ async fn remove_torrent() -> Result<(), Error> {
     let session = Session::new(config).await?;
 
     let data = make_single_file_torrent();
-    let info_hash = session.add_torrent_bytes(&data, tmp.path()).await?;
-    assert_eq!(session.active_torrents().await.len(), 1);
+    let info_hash = session
+        .add_torrent_bytes(&data)?
+        .download_dir(tmp.path())
+        .start()
+        .await?;
+    assert_eq!(session.active_torrents().len(), 1);
 
     session.remove_torrent(&info_hash).await?;
-    assert!(session.active_torrents().await.is_empty());
+    assert!(session.active_torrents().is_empty());
 
     // Querying a removed torrent should fail
     let err = session.torrent_status(&info_hash).await.unwrap_err();
@@ -105,7 +113,11 @@ async fn add_and_query_multiple_times() -> Result<(), Error> {
     let session = Session::new(config).await?;
 
     let data = make_single_file_torrent();
-    let info_hash = session.add_torrent_bytes(&data, tmp.path()).await?;
+    let info_hash = session
+        .add_torrent_bytes(&data)?
+        .download_dir(tmp.path())
+        .start()
+        .await?;
 
     // Query status multiple times — should be consistent
     for _ in 0..3 {
@@ -129,13 +141,12 @@ async fn add_magnet_str_minimal() -> Result<(), Error> {
     let session = Session::new(config).await?;
 
     let info_hash = session
-        .add_magnet_str(
-            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-            tmp.path(),
-        )
+        .add_magnet_str("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567")?
+        .download_dir(tmp.path())
+        .start()
         .await?;
 
-    let active = session.active_torrents().await;
+    let active = session.active_torrents();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0], info_hash);
 
@@ -160,11 +171,12 @@ async fn add_magnet_str_with_trackers() -> Result<(), Error> {
         .add_magnet_str(
             "magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\
              &tr=http://t1.com/ann&tr=http://t2.com/ann",
-            tmp.path(),
-        )
+        )?
+        .download_dir(tmp.path())
+        .start()
         .await?;
 
-    assert!(session.active_torrents().await.contains(&info_hash));
+    assert!(session.active_torrents().contains(&info_hash));
     let status = session.torrent_status(&info_hash).await?;
     assert_eq!(status.state, TorrentState::Registered);
 
@@ -173,7 +185,6 @@ async fn add_magnet_str_with_trackers() -> Result<(), Error> {
 
 #[tokio::test]
 async fn add_magnet_str_invalid() -> Result<(), Error> {
-    let tmp = tempfile::tempdir().unwrap();
     let config = SessionConfig {
         bootstrap_nodes: None,
         ..Default::default()
@@ -181,9 +192,7 @@ async fn add_magnet_str_invalid() -> Result<(), Error> {
     let session = Session::new(config).await?;
 
     // No xt parameter — should fail
-    let result = session
-        .add_magnet_str("magnet:?dn=no_hash", tmp.path())
-        .await;
+    let result = session.add_magnet_str("magnet:?dn=no_hash");
     assert!(result.is_err());
 
     Ok(())
@@ -201,8 +210,9 @@ async fn add_magnet_str_with_display_name() -> Result<(), Error> {
     let info_hash = session
         .add_magnet_str(
             "magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc&dn=Test+File",
-            tmp.path(),
-        )
+        )?
+        .download_dir(tmp.path())
+        .start()
         .await?;
 
     let status = session.torrent_status(&info_hash).await?;
@@ -229,7 +239,11 @@ async fn magnet_via_add_torrent() -> Result<(), Error> {
     .unwrap();
     let info_hash = *magnet.primary_info_hash();
 
-    session.add_torrent(magnet, tmp.path()).await?;
+    session
+        .add_torrent(magnet)?
+        .download_dir(tmp.path())
+        .start()
+        .await?;
 
     let status = session.torrent_status(&info_hash).await?;
     assert_eq!(status.name, "Direct");

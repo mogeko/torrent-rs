@@ -9,13 +9,9 @@
 //! - [`InfoHash`] — SHA-1 identifier for a torrent
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::dht::BootstrapNode;
-#[cfg(test)]
-use crate::storage::FileStorageFactory;
-use crate::storage::StorageFactory;
 
 /// Unique identifier for a torrent (SHA-1 info hash).
 ///
@@ -145,19 +141,6 @@ pub struct SessionConfig {
     /// Default: `256`.
     pub peer_msg_buffer_size: usize,
 
-    // ── Storage ──
-    /// Default storage factory. Overrideable per-torrent via
-    /// [`TorrentBuilder::download_dir`] or [`TorrentBuilder::storage`].
-    ///
-    /// When `None`, each torrent must provide a factory through the builder.
-    ///
-    /// Default: `None`.
-    ///
-    /// [`TorrentBuilder::download_dir`]: crate::session::TorrentBuilder::download_dir
-    /// [`TorrentBuilder::storage`]: crate::session::TorrentBuilder::storage
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub default_storage: Option<Arc<dyn StorageFactory>>,
-
     // ── DHT ──
     /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
     /// When `Some`, the session initializes a DHT node and uses these
@@ -212,7 +195,6 @@ impl Default for SessionConfig {
             ]),
             bootstrap_nodes_v6: None,
             node_id: None,
-            default_storage: None,
         }
     }
 }
@@ -328,7 +310,6 @@ mod serde_tests {
             pex_enabled: false,
             pex_interval: Duration::from_secs(120),
             peer_msg_buffer_size: 512,
-            default_storage: Some(Arc::new(FileStorageFactory::new("."))),
         };
 
         let json = serde_json::to_string(&config).unwrap();

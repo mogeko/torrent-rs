@@ -13,10 +13,8 @@ use super::{Storage, StorageFactory};
 /// [`StorageFactory`] that creates file-backed storage.
 ///
 /// Construct with [`FileStorageFactory::new`], passing the download
-/// directory. Use with [`SessionConfig::default_storage`] or via
-/// [`TorrentBuilder::download_dir`].
+/// directory. Use with [`TorrentBuilder::download_dir`].
 ///
-/// [`SessionConfig::default_storage`]: crate::session::SessionConfig::default_storage
 /// [`TorrentBuilder::download_dir`]: crate::session::TorrentBuilder::download_dir
 ///
 /// # Examples
@@ -183,24 +181,16 @@ impl Storage for FileStorage {
                     if let Some(parent) = path.parent() {
                         fs::create_dir_all(parent).await?;
                     }
-                    let f = fs::File::create_new(path)
-                        .await
-                        .map_err(|_| Error::new(ErrorKind::Protocol))?;
-                    f.set_len(self.total_size)
-                        .await
-                        .map_err(|_| Error::new(ErrorKind::Protocol))?;
+                    let f = fs::File::create_new(path).await?;
+                    f.set_len(self.total_size).await?;
                 }
                 StorageMode::MultiFile { files } => {
                     for file in files {
                         if let Some(parent) = file.path.parent() {
                             fs::create_dir_all(parent).await?;
                         }
-                        let f = fs::File::create_new(&file.path)
-                            .await
-                            .map_err(|_| Error::new(ErrorKind::Protocol))?;
-                        f.set_len(file.length)
-                            .await
-                            .map_err(|_| Error::new(ErrorKind::Protocol))?;
+                        let f = fs::File::create_new(&file.path).await?;
+                        f.set_len(file.length).await?;
                     }
                 }
             }
