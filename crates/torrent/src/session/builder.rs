@@ -286,6 +286,12 @@ async fn download_metadata_from_peer(
                     .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
                 let ext_id = neg.m.get(UT_METADATA_EXT).copied();
                 let size = neg.metadata_size.map(|s| s as u64);
+                tracing::debug!(
+                    "LTEP handshake with {}: v={:?}, metadata_size={:?}",
+                    addr,
+                    neg.v,
+                    size,
+                );
                 break (ext_id, size);
             }
             PeerMessage::KeepAlive
