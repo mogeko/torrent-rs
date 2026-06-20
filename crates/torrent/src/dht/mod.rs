@@ -13,7 +13,9 @@ mod node;
 mod query;
 mod rpc;
 
-pub use torrent_core::dht::{BootstrapNode, Node, RoutingTable, generate_node_id, krpc};
+pub use torrent_core::dht::{
+    BootstrapNode, DualRoutingTable, Node, RoutingTable, generate_node_id, krpc,
+};
 
 pub(crate) use self::node::DhtNode;
 pub use self::query::{announce_peer, find_node, get_peers};

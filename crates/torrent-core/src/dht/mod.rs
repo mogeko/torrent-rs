@@ -112,22 +112,124 @@ impl RoutingTable {
     /// Delegates to the appropriate K-bucket which handles LRU ordering
     /// and eviction. Returns `true` if the node was newly added.
     pub fn insert(&mut self, node: Node) -> bool {
-        tracing::debug!("DHT insert: {}", node.addr);
-        let idx = bucket_index(&self.node_id, &node.id);
-        self.buckets[idx].insert(node)
+        insert_into_buckets(&mut self.buckets, &self.node_id, node)
     }
 
     /// Find the K closest nodes to a target ID.
     pub fn find_closest(&self, target: &[u8; 20], count: usize) -> Vec<Node> {
-        let mut all: Vec<&Node> = self.buckets.iter().flat_map(|b| b.iter()).collect();
-        all.sort_by_key(|n| xor_distance(&n.id, target));
-        all.into_iter().take(count).cloned().collect()
+        find_closest_in_buckets(&self.buckets, target, count)
     }
 
     /// Number of known nodes in the routing table.
     pub fn num_nodes(&self) -> usize {
         self.buckets.iter().map(|b| b.len()).sum()
     }
+}
+
+/// Dual-stack routing table (BEP 32).
+///
+/// Maintains two independent sets of 160 K-buckets — one for IPv4
+/// and one for IPv6. BEP 32 defines IPv4 and IPv6 DHTs as separate
+/// networks; both share a single node ID.
+///
+/// Currently unused — reserved for future cross-family bootstrap support.
+pub struct DualRoutingTable {
+    /// Shared node ID (BEP 32 §3.2 recommends same ID for both DHTs).
+    pub node_id: [u8; 20],
+    /// IPv4 K-buckets (160 buckets).
+    buckets_v4: Vec<KBucket>,
+    /// IPv6 K-buckets (160 buckets).
+    buckets_v6: Vec<KBucket>,
+}
+
+impl DualRoutingTable {
+    /// Create a new dual-stack routing table with a random node ID.
+    pub fn new() -> Self {
+        Self::with_id(generate_node_id())
+    }
+
+    /// Create a new dual-stack routing table with a specific node ID.
+    pub fn with_id(node_id: [u8; 20]) -> Self {
+        Self {
+            node_id,
+            buckets_v4: (0..NUM_BUCKETS).map(|_| KBucket::new()).collect(),
+            buckets_v6: (0..NUM_BUCKETS).map(|_| KBucket::new()).collect(),
+        }
+    }
+
+    /// Insert or update a node, dispatching to the correct address-family buckets.
+    pub fn insert(&mut self, node: Node) -> bool {
+        if node.addr.is_ipv4() {
+            insert_into_buckets(&mut self.buckets_v4, &self.node_id, node)
+        } else {
+            insert_into_buckets(&mut self.buckets_v6, &self.node_id, node)
+        }
+    }
+
+    /// Find the K closest nodes to a target ID, merging both families.
+    pub fn find_closest(&self, target: &[u8; 20], count: usize) -> Vec<Node> {
+        let v4 = self.find_closest_v4(target, count);
+        let v6 = self.find_closest_v6(target, count);
+        let mut all = v4;
+        all.extend(v6);
+        all.sort_by_key(|n| xor_distance(&n.id, target));
+        all.truncate(count);
+        all
+    }
+
+    /// Find the K closest IPv4 nodes to a target ID.
+    pub fn find_closest_v4(&self, target: &[u8; 20], count: usize) -> Vec<Node> {
+        find_closest_in_buckets(&self.buckets_v4, target, count)
+    }
+
+    /// Find the K closest IPv6 nodes to a target ID.
+    pub fn find_closest_v6(&self, target: &[u8; 20], count: usize) -> Vec<Node> {
+        find_closest_in_buckets(&self.buckets_v6, target, count)
+    }
+
+    /// Total number of known nodes across both families.
+    pub fn num_nodes(&self) -> usize {
+        self.num_nodes_v4() + self.num_nodes_v6()
+    }
+
+    /// Number of known IPv4 nodes.
+    pub fn num_nodes_v4(&self) -> usize {
+        self.buckets_v4.iter().map(|b| b.len()).sum()
+    }
+
+    /// Number of known IPv6 nodes.
+    pub fn num_nodes_v6(&self) -> usize {
+        self.buckets_v6.iter().map(|b| b.len()).sum()
+    }
+}
+
+impl Default for DualRoutingTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for DualRoutingTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DualRoutingTable")
+            .field("num_nodes_v4", &self.num_nodes_v4())
+            .field("num_nodes_v6", &self.num_nodes_v6())
+            .finish()
+    }
+}
+
+// ── Shared bucket helpers ─────────────────────────────────────────
+
+fn insert_into_buckets(buckets: &mut [KBucket], our_id: &[u8; 20], node: Node) -> bool {
+    tracing::debug!("DHT insert: {}", node.addr);
+    let idx = bucket_index(our_id, &node.id);
+    buckets[idx].insert(node)
+}
+
+fn find_closest_in_buckets(buckets: &[KBucket], target: &[u8; 20], count: usize) -> Vec<Node> {
+    let mut all: Vec<&Node> = buckets.iter().flat_map(|b| b.iter()).collect();
+    all.sort_by_key(|n| xor_distance(&n.id, target));
+    all.into_iter().take(count).cloned().collect()
 }
 
 /// Compute the XOR distance between two 160-bit IDs as a big integer.
@@ -316,6 +418,92 @@ mod tests {
     fn bucket_index_same_id() {
         let id = [0x42u8; 20];
         assert_eq!(bucket_index(&id, &id), 0);
+    }
+
+    // ── DualRoutingTable tests (BEP 32) ────────────────────────
+
+    #[test]
+    fn dual_table_new_is_empty() {
+        let table = DualRoutingTable::new();
+        assert_eq!(table.num_nodes(), 0);
+        assert_eq!(table.num_nodes_v4(), 0);
+        assert_eq!(table.num_nodes_v6(), 0);
+    }
+
+    #[test]
+    fn dual_table_insert_dispatches_by_family() {
+        let mut table = DualRoutingTable::with_id([0x42u8; 20]);
+        let v4 = Node {
+            id: [0x01u8; 20],
+            addr: "10.0.0.1:6881".parse().unwrap(),
+        };
+        let v6 = Node {
+            id: [0x02u8; 20],
+            addr: "[::1]:6881".parse().unwrap(),
+        };
+        assert!(table.insert(v4));
+        assert!(table.insert(v6));
+        assert_eq!(table.num_nodes_v4(), 1);
+        assert_eq!(table.num_nodes_v6(), 1);
+        assert_eq!(table.num_nodes(), 2);
+    }
+
+    #[test]
+    fn dual_table_find_closest_merges() {
+        let mut table = DualRoutingTable::with_id([0x00u8; 20]);
+        let v4 = Node {
+            id: [0x01u8; 20],
+            addr: "10.0.0.1:6881".parse().unwrap(),
+        };
+        let v6 = Node {
+            id: [0x02u8; 20],
+            addr: "[::1]:6881".parse().unwrap(),
+        };
+        table.insert(v4.clone());
+        table.insert(v6.clone());
+        let closest = table.find_closest(&[0x00u8; 20], 2);
+        assert_eq!(closest.len(), 2);
+        assert_eq!(closest[0], v4);
+        assert_eq!(closest[1], v6);
+    }
+
+    #[test]
+    fn dual_table_find_closest_v4_only_ipv4() {
+        let mut table = DualRoutingTable::with_id([0x00u8; 20]);
+        table.insert(Node {
+            id: [0x01u8; 20],
+            addr: "10.0.0.1:6881".parse().unwrap(),
+        });
+        table.insert(Node {
+            id: [0x02u8; 20],
+            addr: "[::1]:6881".parse().unwrap(),
+        });
+        let closest = table.find_closest_v4(&[0x00u8; 20], 2);
+        assert_eq!(closest.len(), 1);
+        assert!(closest[0].addr.is_ipv4());
+    }
+
+    #[test]
+    fn dual_table_find_closest_v6_only_ipv6() {
+        let mut table = DualRoutingTable::with_id([0x00u8; 20]);
+        table.insert(Node {
+            id: [0x01u8; 20],
+            addr: "10.0.0.1:6881".parse().unwrap(),
+        });
+        table.insert(Node {
+            id: [0x02u8; 20],
+            addr: "[::1]:6881".parse().unwrap(),
+        });
+        let closest = table.find_closest_v6(&[0x00u8; 20], 2);
+        assert_eq!(closest.len(), 1);
+        assert!(closest[0].addr.is_ipv6());
+    }
+
+    #[test]
+    fn dual_table_shares_node_id() {
+        let id = [0xABu8; 20];
+        let table = DualRoutingTable::with_id(id);
+        assert_eq!(table.node_id, id);
     }
 }
 
