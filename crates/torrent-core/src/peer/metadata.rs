@@ -12,7 +12,7 @@
 //!
 //! Both messages are bencoded dictionaries wrapped in
 //! [`PeerMessage::Extended`]. The extension ID is negotiated during
-//! the LTEP handshake (see [`ExtensionNegotiation::metadata_size`]).
+//! the LTEP handshake (see [`crate::peer::ExtensionNegotiation::metadata_size`]).
 //!
 //! Request (msg_type 0):
 //! ```text
@@ -48,7 +48,7 @@ pub const METADATA_PIECE_SIZE: u64 = 16 * 1024; // 16 KB
 /// Request a metadata piece from a peer (BEP 9, msg_type 0).
 ///
 /// Sent after the LTEP handshake when the peer's
-/// [`ExtensionNegotiation::metadata_size`] is known.
+/// [`crate::peer::ExtensionNegotiation::metadata_size`] is known.
 ///
 /// # Examples
 ///

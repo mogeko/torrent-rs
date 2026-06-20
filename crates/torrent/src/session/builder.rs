@@ -24,7 +24,36 @@ use super::{InfoHash, Session};
 /// Maximum number of peer connection attempts for metadata download.
 const MAX_METADATA_PEERS: usize = 8;
 
-/// Builder for configuring and activating a torrent.
+/// Builder for configuring and activating a registered torrent.
+///
+/// Returned by [`Session::add_torrent`](super::Session::add_torrent) and its
+/// convenience wrappers ([`Session::add_torrent_bytes`]).  The torrent is
+/// registered immediately upon creation; call [`start`](Self::start) to
+/// create storage and begin downloading.
+///
+/// # Lifecycle
+///
+/// ```text
+/// Session::add_torrent*  →  TorrentBuilder  →  download_dir / storage  →  start  →  download loop
+///                                              resolve_metadata (optional for magnet links)
+/// ```
+///
+/// # Examples
+///
+/// ```no_run
+/// # use torrent::session::{Session, SessionConfig};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let session = Session::new(SessionConfig::default()).await?;
+///
+/// let data = std::fs::read("my.torrent")?;
+/// let _info_hash = session
+///     .add_torrent_bytes(&data)?
+///     .download_dir("./downloads")
+///     .start()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// Holds a reference to the [`Session`] — cannot outlive it.
 pub struct TorrentBuilder<'s> {

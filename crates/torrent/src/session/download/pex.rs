@@ -3,7 +3,8 @@ use std::time::Instant;
 
 use crate::bencode::{decode as bencode_decode, encode as bencode_encode};
 use crate::error::{Error, ErrorKind};
-use crate::peer::{ExtensionNegotiation, PeerMessage, PexMessage};
+use crate::peer::pex::PexMessage;
+use crate::peer::{ExtensionNegotiation, PeerMessage};
 
 use super::DownloadLoop;
 use super::types::{PIPELINE_SIZE, UT_PEX};
