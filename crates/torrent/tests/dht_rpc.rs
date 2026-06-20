@@ -76,7 +76,7 @@ fn parse_compact_nodes() {
     data.extend_from_slice(&[127, 0, 0, 1]);
     data.extend_from_slice(&0x1AE1u16.to_be_bytes());
 
-    let nodes = krpc::parse_compact_nodes(&data);
+    let nodes = krpc::parse_compact_nodes4(&data);
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].id, [1u8; 20]);
     assert_eq!(nodes[0].addr, "127.0.0.1:6881".parse().unwrap());
@@ -84,7 +84,7 @@ fn parse_compact_nodes() {
 
 #[test]
 fn parse_compact_nodes_empty() {
-    let nodes = krpc::parse_compact_nodes(&[]);
+    let nodes = krpc::parse_compact_nodes4(&[]);
     assert!(nodes.is_empty());
 }
 

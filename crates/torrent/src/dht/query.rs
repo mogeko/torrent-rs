@@ -26,10 +26,18 @@ pub async fn find_node(
 
     match &response {
         krpc::KrpcMessage::Response { result, .. } => {
+            // Check nodes (IPv4 compact, BEP 5) and nodes6 (IPv6 compact, BEP 32).
+            let mut nodes = Vec::new();
             if let Some(nodes_bytes) = krpc::dict_get_bytes(result, b"nodes") {
-                Ok(krpc::parse_compact_nodes(nodes_bytes))
-            } else {
+                nodes.extend(krpc::parse_compact_nodes4(nodes_bytes));
+            }
+            if let Some(nodes6_bytes) = krpc::dict_get_bytes(result, b"nodes6") {
+                nodes.extend(krpc::parse_compact_nodes6(nodes6_bytes));
+            }
+            if nodes.is_empty() {
                 Err(Error::new(ErrorKind::Protocol))
+            } else {
+                Ok(nodes)
             }
         }
         _ => Err(Error::new(ErrorKind::Protocol)),
