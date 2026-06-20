@@ -131,19 +131,19 @@ impl DownloadLoop {
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
                     self.handle_peer_event(addr, event).await;
                     if let Err(e) = self.fill_pipelines().await {
-                        tracing::warn!("fill_pipelines failed: {}", e);
+                        tracing::warn!("failed to fill pipelines: {}", e);
                     }
                 }
                 _ = status_tick.tick() => {
                     self.update_status().await;
                     self.announce_if_needed().await;
                     if let Err(e) = self.connect_pending().await {
-                        tracing::debug!("connect_pending: {}", e);
+                        tracing::warn!("failed to connect pending peers: {}", e);
                     }
                 }
                 _ = choke_tick.tick() => {
                     if let Err(e) = self.run_choke_unchoke().await {
-                        tracing::warn!("choke_unchoke failed: {}", e);
+                        tracing::warn!("failed to run choke/unchoke: {}", e);
                     }
                 }
                 _ = stale_tick.tick() => {
@@ -152,7 +152,7 @@ impl DownloadLoop {
                 _ = pex_tick.tick() => {
                     if self.pex_enabled {
                         if let Err(e) = self.broadcast_pex().await {
-                            tracing::warn!("PEX broadcast failed: {}", e);
+                            tracing::warn!("failed to broadcast PEX: {}", e);
                         }
                     }
                 }
@@ -223,14 +223,17 @@ impl DownloadLoop {
             if let Some(conn_arc) = conn_arc {
                 let mut pi = PeerInfo::new();
 
-                // BEP 10: if the remote peer signals extension support,
-                // and we have extensions to offer, record our offering
-                // and send the LTEP handshake.
+                // BEP 10: register our enabled extensions.
                 if self.pex_enabled {
+                    pi.our_extension_ids.insert(UT_PEX.to_string(), UT_PEX_ID);
+                }
+
+                // Send the LTEP handshake if we have any extensions to
+                // offer and the remote peer supports the protocol.
+                if !pi.our_extension_ids.is_empty() {
                     let remote_ltep = conn_arc.remote_reserved()[5] & 0x10 != 0
                         || conn_arc.remote_has_extension(63);
                     if remote_ltep {
-                        pi.our_extension_ids.insert(UT_PEX.to_string(), UT_PEX_ID);
                         self.send_extended_handshake(*addr, &pi.our_extension_ids)
                             .await;
                     }

@@ -53,7 +53,7 @@ impl DownloadLoop {
         // Now that we know the remote's extension IDs, send an initial PEX.
         if self.pex_enabled {
             if let Err(e) = self.send_pex_message(addr, &[]).await {
-                tracing::debug!("failed to send initial PEX to {}: {}", addr, e);
+                tracing::warn!("failed to send initial PEX to {}: {}", addr, e);
             }
         }
 
@@ -170,7 +170,7 @@ impl DownloadLoop {
             let dropped = dropped_snapshot.iter().filter(|a| **a != addr).copied();
             let dropped: Vec<SocketAddr> = dropped.collect();
             if let Err(e) = self.send_pex_message(addr, &dropped).await {
-                tracing::debug!("failed to send PEX to {}: {}", addr, e);
+                tracing::warn!("failed to send PEX to {}: {}", addr, e);
             }
         }
         Ok(())
