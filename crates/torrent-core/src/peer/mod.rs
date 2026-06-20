@@ -14,6 +14,7 @@
 mod extension;
 mod handshake;
 mod message;
+pub mod metadata;
 mod pex;
 
 pub use self::extension::ExtensionNegotiation;

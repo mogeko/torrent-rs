@@ -10,6 +10,7 @@
 
 mod stream;
 
+pub use torrent_core::peer::metadata;
 pub use torrent_core::peer::{
     ExtensionNegotiation, Handshake, PeerId, PeerMessage, PeerState, PexMessage, decode, encode,
 };

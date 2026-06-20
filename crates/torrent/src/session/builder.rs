@@ -9,6 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::{Error, ErrorKind};
+use crate::metainfo::Metainfo;
+use crate::peer::metadata::{METADATA_PIECE_SIZE, MetadataData, MetadataRequest};
+use crate::peer::{ExtensionNegotiation, PeerConnection, PeerId, PeerMessage};
 use crate::storage::{FileStorageFactory, StorageFactory};
 
 use super::{InfoHash, Session};
@@ -69,13 +72,31 @@ impl<'s> TorrentBuilder<'s> {
         };
 
         if needs_resolve {
-            // TODO: BEP 9/10 — download metainfo from peers via LTEP handshake.
-            // Steps:
-            // 1. Connect to peers (use handle.peer_mgr)
-            // 2. Send LTEP handshake with ut_metadata extension
-            // 3. Request metadata pieces
-            // 4. Reconstruct full metainfo
-            // 5. Update handle.metainfo and handle.piece_mgr
+            let addrs: Vec<SocketAddr> = std::mem::take(&mut self.magnet_peers);
+
+            // If no peer addresses are available, skip resolution.
+            // The download loop will discover peers via DHT/tracker
+            // and can download metadata once connected.
+            if addrs.is_empty() {
+                self.metadata_resolved = true;
+                return Ok(self);
+            }
+
+            // Download metadata from the first reachable peer
+            let meta_bytes = download_metadata_from_peers(self.info_hash, &addrs).await?;
+
+            // Parse and update the handle
+            let new_meta = Metainfo::try_from(&meta_bytes[..])?;
+            {
+                let mut torrents = self.session.torrents().write().unwrap();
+
+                match torrents.get_mut(&self.info_hash) {
+                    Some(handle) => handle.metainfo = new_meta,
+                    None => {
+                        return Err(Error::new(ErrorKind::InvalidInput));
+                    }
+                }
+            }
         }
 
         self.metadata_resolved = true;
@@ -169,4 +190,147 @@ impl<'s> TorrentBuilder<'s> {
 
         Ok(self.info_hash)
     }
+}
+
+/// Maximum number of peer connection attempts for metadata download.
+const MAX_METADATA_PEERS: usize = 8;
+
+/// Download full metainfo bytes from a magnet link peer (BEP 9/10).
+///
+/// Tries each peer address in order. On success, returns the raw
+/// bencoded bytes of the info dictionary.
+async fn download_metadata_from_peers(
+    info_hash: [u8; 20], addrs: &[SocketAddr],
+) -> Result<Vec<u8>, Error> {
+    if addrs.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput));
+    }
+
+    let our_peer_id = PeerId::random();
+
+    for &addr in &addrs[..addrs.len().min(MAX_METADATA_PEERS)] {
+        match download_metadata_from_peer(addr, info_hash, our_peer_id).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => {
+                tracing::debug!("metadata download from {} failed: {}", addr, e);
+                continue;
+            }
+        }
+    }
+
+    Err(Error::new(ErrorKind::PeerConnectionClosed))
+}
+
+/// Connect to a single peer and download metadata via LTEP (BEP 10) + BEP 9.
+async fn download_metadata_from_peer(
+    addr: SocketAddr, info_hash: [u8; 20], our_peer_id: PeerId,
+) -> Result<Vec<u8>, Error> {
+    // 1. TCP connect + BEP 3 handshake
+    let conn = PeerConnection::connect(addr, info_hash, our_peer_id).await?;
+
+    // 2. Send LTEP handshake (ext_id 0) with ut_metadata extension
+    let mut our_neg = ExtensionNegotiation::new();
+    our_neg.add_extension(
+        crate::peer::metadata::UT_METADATA_EXT,
+        crate::peer::metadata::UT_METADATA_ID,
+    );
+    let handshake_data = our_neg.to_bencode();
+    let handshake_bytes = crate::bencode::encode(&handshake_data);
+    conn.send(&PeerMessage::Extended {
+        ext_id: 0,
+        data: handshake_bytes,
+    })
+    .await?;
+
+    // 3. Receive remote LTEP handshake
+    let msg = conn.recv().await?;
+    let (remote_ext_id, metadata_size) = match msg {
+        PeerMessage::Extended { ext_id: 0, data } => {
+            let (ben, _) = crate::bencode::decode(&data)
+                .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+            let neg = ExtensionNegotiation::from_bencode(&ben)
+                .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+            let ext_id = neg.m.get(crate::peer::metadata::UT_METADATA_EXT).copied();
+            let size = neg.metadata_size.map(|s| s as u64);
+            (ext_id, size)
+        }
+        _ => return Err(Error::new(ErrorKind::PeerInvalidExtendedMessage)),
+    };
+
+    let ext_id = remote_ext_id.ok_or_else(|| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+    let total_size =
+        metadata_size.ok_or_else(|| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+
+    // 4. Calculate number of pieces
+    let num_pieces = total_size.div_ceil(METADATA_PIECE_SIZE);
+
+    // 5. Request and collect all pieces
+    let mut buf = vec![0u8; total_size as usize];
+    for piece_idx in 0..num_pieces as u32 {
+        let req = MetadataRequest { piece: piece_idx };
+        let req_ben = req.to_bencode();
+        conn.send(&PeerMessage::Extended {
+            ext_id,
+            data: crate::bencode::encode(&req_ben),
+        })
+        .await?;
+
+        let resp = conn.recv().await?;
+        match resp {
+            PeerMessage::Extended {
+                ext_id: resp_id,
+                data,
+            } if resp_id == ext_id => {
+                // BEP 9: data contains bencoded dict prefix followed by raw piece data
+                // Parse the bencoded dict to get piece index and total_size
+                let (dict, raw_data) = split_bep9_data(&data)?;
+                let (ben, _) = crate::bencode::decode(&dict)
+                    .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+
+                if MetadataData::is_reject(&ben) {
+                    return Err(Error::new(ErrorKind::PeerInvalidExtendedMessage));
+                }
+
+                let piece = MetadataData::from_bencode(&ben, raw_data)?;
+                let offset = piece.piece as usize * METADATA_PIECE_SIZE as usize;
+                let end = (offset + piece.data.len()).min(buf.len());
+                buf[offset..end].copy_from_slice(&piece.data);
+            }
+            _ => return Err(Error::new(ErrorKind::PeerInvalidExtendedMessage)),
+        }
+    }
+
+    Ok(buf)
+}
+
+/// Split BEP 9 extended message data into bencoded dict prefix and raw data.
+///
+/// BEP 9 specifies that metadata messages contain a bencoded dictionary
+/// followed by the raw piece bytes (without any length prefix for the raw bytes).
+/// We parse the bencoded portion, and the remainder is the raw data.
+fn split_bep9_data(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    // Find the end of the bencoded dictionary (ends with 'e')
+    // This is a simplification — a full recursive parser would be more robust
+    let mut depth = 0i32;
+    let mut dict_end = None;
+    for (i, &b) in data.iter().enumerate() {
+        match b {
+            b'd' => depth += 1,
+            b'e' => {
+                depth -= 1;
+                if depth == 0 {
+                    dict_end = Some(i + 1);
+                    break;
+                }
+            }
+            b'l' => depth += 1,
+            b'i' => {
+                // Skip integer: find 'e' (depth unchanged for integers)
+                let _end = data[i..].iter().position(|&c| c == b'e').unwrap_or(0);
+            }
+            _ => {}
+        }
+    }
+    let end = dict_end.ok_or_else(|| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+    Ok((data[..end].to_vec(), data[end..].to_vec()))
 }
