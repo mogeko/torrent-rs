@@ -31,7 +31,9 @@ const ALPHA: usize = 8;
 const LOOKUP_CONCURRENCY: usize = 3;
 
 /// Cross-family want parameter — request both IPv4 and IPv6 data
-/// from all DHT queries (BEP 32 cross-family bootstrap).
+/// from all DHT queries (BEP 32 §2.2: dual-stack nodes should
+/// request both families during bootstrap to accelerate
+/// routing table population).
 const WANT_CROSS_FAMILY: Option<&[&str]> = Some(&["n4", "n6"]);
 
 /// Dual-stack DHT node — one per session.
