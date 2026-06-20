@@ -9,7 +9,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use torrent_core::bencode;
-use torrent_core::peer::{ExtensionNegotiation, PeerMessage, PexMessage, decode, encode};
+use torrent_core::peer::pex::PexMessage;
+use torrent_core::peer::{ExtensionNegotiation, PeerMessage, decode, encode};
 use torrent_core::tracker::{
     encode_compact_peers_ipv4, encode_compact_peers_ipv6, parse_compact_peers_ipv4,
     parse_compact_peers_ipv6,

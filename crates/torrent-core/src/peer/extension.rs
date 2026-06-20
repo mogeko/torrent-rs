@@ -180,7 +180,7 @@ impl ExtensionNegotiation {
 
 impl Default for ExtensionNegotiation {
     fn default() -> Self {
-        Self::new()
+        ExtensionNegotiation::new()
     }
 }
 

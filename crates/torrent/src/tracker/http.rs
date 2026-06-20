@@ -66,7 +66,7 @@ impl HttpTracker {
     /// or `https://tracker.example.com/announce`). Automatically detects TLS.
     /// Accepts `&str`, `String`, `&String`, or `Url`.
     pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
-        Self::with_timeout(url, DEFAULT_TIMEOUT)
+        HttpTracker::with_timeout(url, DEFAULT_TIMEOUT)
     }
 
     /// Create a new HTTP tracker client with a custom timeout.

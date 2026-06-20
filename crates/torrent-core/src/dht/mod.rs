@@ -89,19 +89,19 @@ pub struct RoutingTable {
 
 impl Default for RoutingTable {
     fn default() -> Self {
-        Self::new()
+        RoutingTable::new()
     }
 }
 
 impl RoutingTable {
     /// Create a new routing table with a random node ID (SHA-1 of random data).
     pub fn new() -> Self {
-        Self::with_id(generate_node_id())
+        RoutingTable::with_id(generate_node_id())
     }
 
     /// Create a routing table with a specific node ID.
     pub fn with_id(node_id: [u8; 20]) -> Self {
-        Self {
+        RoutingTable {
             node_id,
             buckets: (0..NUM_BUCKETS).map(|_| KBucket::new()).collect(),
         }
@@ -145,12 +145,12 @@ pub struct DualRoutingTable {
 impl DualRoutingTable {
     /// Create a new dual-stack routing table with a random node ID.
     pub fn new() -> Self {
-        Self::with_id(generate_node_id())
+        DualRoutingTable::with_id(generate_node_id())
     }
 
     /// Create a new dual-stack routing table with a specific node ID.
     pub fn with_id(node_id: [u8; 20]) -> Self {
-        Self {
+        DualRoutingTable {
             node_id,
             buckets_v4: (0..NUM_BUCKETS).map(|_| KBucket::new()).collect(),
             buckets_v6: (0..NUM_BUCKETS).map(|_| KBucket::new()).collect(),
@@ -205,7 +205,7 @@ impl DualRoutingTable {
 
 impl Default for DualRoutingTable {
     fn default() -> Self {
-        Self::new()
+        DualRoutingTable::new()
     }
 }
 

@@ -98,7 +98,7 @@ impl KrpcMessage {
     pub fn from_bytes(data: &[u8]) -> Result<Self, Error> {
         tracing::trace!("decoding KRPC message ({} bytes)", data.len());
         let (val, _rest) = bencode::decode(data)?;
-        Self::from_bencode(&val)
+        KrpcMessage::from_bencode(&val)
     }
 
     /// Decode a KRPC message from a bencoded value.

@@ -10,6 +10,7 @@
 //! The loop periodically connects to peers, requests blocks, verifies
 //! pieces using SHA-1, and updates the torrent status.
 
+mod builder;
 mod config;
 mod download;
 mod peer_manager;
@@ -17,16 +18,14 @@ mod torrent;
 mod uni_deque;
 mod upload;
 
-pub use config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
+pub use self::builder::TorrentBuilder;
+pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
-
-use tokio::sync::RwLock;
 
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
@@ -54,7 +53,9 @@ use self::torrent::TorrentHandle;
 ///
 /// // Add a torrent from a .torrent file, specifying a download directory
 /// let data = std::fs::read("torrent.torrent").unwrap();
-/// let info_hash = session.add_torrent_bytes(&data, "./downloads").await.unwrap();
+/// let info_hash = session.add_torrent_bytes(&data).unwrap()
+///     .download_dir("./downloads")
+///     .start().await.unwrap();
 ///
 /// // Check its status
 /// let status = session.torrent_status(&info_hash).await.unwrap();
@@ -126,161 +127,137 @@ impl Session {
         })
     }
 
-    /// Add a torrent from a [`TorrentSpec`].
+    // ── Torrent registration (sync) ──
+
+    /// Register a torrent. Returns a [`TorrentBuilder`] for optional configuration.
     ///
-    /// Accepts both full metadata ([`Metainfo`]) and magnet links
-    /// ([`MagnetUri`]). For magnet links, file download cannot start
-    /// until metadata is obtained from peers.
+    /// The torrent is inserted into the session immediately (state = [`TorrentState::Registered`]).
+    /// Call [`.start()`](TorrentBuilder::start) on the builder to activate download.
     ///
-    /// `download_dir` specifies where to store the torrent's files.
-    /// Each torrent can have its own directory.
-    ///
-    /// [`add_torrent_bytes`](Session::add_torrent_bytes) and
-    /// [`add_magnet_str`](Session::add_magnet_str) are convenience
-    /// wrappers.
-    pub async fn add_torrent(
-        &self, spec: impl Into<TorrentSpec>, download_dir: impl Into<PathBuf>,
-    ) -> Result<InfoHash, Error> {
-        let download_dir = download_dir.into();
+    /// For magnet links, call [`.resolve_metadata()`](TorrentBuilder::resolve_metadata)
+    /// before `.start()` to inspect metadata, or let `.start()` resolve automatically.
+    pub fn add_torrent(&self, spec: impl Into<TorrentSpec>) -> Result<TorrentBuilder<'_>, Error> {
+        let spec = spec.into();
 
-        match spec.into() {
-            TorrentSpec::Metainfo(meta) => self.add_metainfo(meta, &download_dir).await,
-            TorrentSpec::Magnet(uri) => self.add_magnet(uri, &download_dir).await,
-        }
-    }
-
-    /// Add a torrent from a magnet URI string (BEP 9).
-    ///
-    /// `download_dir` specifies where to store the torrent's files.
-    pub async fn add_magnet_str(
-        &self, uri: impl AsRef<str>, download_dir: impl Into<PathBuf>,
-    ) -> Result<InfoHash, Error> {
-        let magnet: MagnetUri = uri.as_ref().parse()?;
-        self.add_torrent(magnet, download_dir).await
-    }
-
-    /// Add a torrent from raw bencoded bytes (a `.torrent` file).
-    ///
-    /// `download_dir` specifies where to store the torrent's files.
-    pub async fn add_torrent_bytes(
-        &self, data: &[u8], download_dir: impl Into<PathBuf>,
-    ) -> Result<InfoHash, Error> {
-        self.add_torrent(Metainfo::try_from(data)?, download_dir)
-            .await
-    }
-
-    /// Core: bootstrap a torrent from full metadata.
-    async fn add_metainfo(&self, meta: Metainfo, download_dir: &Path) -> Result<InfoHash, Error> {
-        self.check_capacity().await?;
-
-        let info_hash = meta.info_hash();
-        let _name = match &meta.info.mode {
-            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
-        };
-
-        let storage_factory = &self.config.storage_factory;
-        let storage = storage_factory.create(&meta.info, download_dir).await?;
-        let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
-
-        self.torrents.write().await.insert(info_hash, handle);
-
-        Ok(info_hash)
-    }
-
-    /// Core: bootstrap a torrent from a magnet URI.
-    async fn add_magnet(&self, uri: MagnetUri, download_dir: &Path) -> Result<InfoHash, Error> {
-        self.check_capacity().await?;
-
-        let info_hash = *uri.primary_info_hash();
-        let name = uri
-            .display_name
-            .clone()
-            .unwrap_or_else(|| hex_encode(info_hash));
-        let announce = uri.trackers.first().cloned().unwrap_or_default();
-        let announce_list = if uri.trackers.len() > 1 {
-            vec![uri.trackers[1..].to_vec()]
+        // Extract magnet peers (BEP 9 x.pe) before consuming spec
+        let magnet_peers: Vec<SocketAddr> = if let TorrentSpec::Magnet(ref uri) = spec {
+            let peers = uri.peers.iter();
+            peers.filter_map(|p| SocketAddr::from_str(p).ok()).collect()
         } else {
             vec![]
         };
 
-        // Build a minimal Metainfo stub: no pieces, no raw_info.
-        // The download loop will be idle until metadata is discovered.
-        let meta = Metainfo {
-            announce,
-            announce_list,
-            info: Info {
-                piece_length: 0,
-                pieces: vec![],
-                mode: Mode::Single {
-                    name: name.clone(),
-                    length: uri.exact_length.unwrap_or(0),
-                },
-                raw_info: RawInfo::Hash(info_hash),
-            },
-            creation_date: None,
-            comment: None,
-            created_by: None,
-            encoding: None,
-        };
+        // Resolve spec → (Metainfo, InfoHash)
+        let (meta, info_hash) = resolve_spec(spec.clone());
+        let metadata_resolved = matches!(spec, TorrentSpec::Metainfo(_));
 
-        let storage_factory = &self.config.storage_factory;
-        let storage = storage_factory.create(&meta.info, download_dir).await?;
-        let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
+        // Register handle
+        let handle = TorrentHandle::register(meta, info_hash, &self.config);
 
-        // Inject x.pe addresses directly into the connection pool (BEP 9).
-        if !uri.peers.is_empty() {
-            let mut peer_addrs = Vec::with_capacity(uri.peers.len());
-            for peer_str in &uri.peers {
-                if let Ok(addr) = SocketAddr::from_str(peer_str) {
-                    peer_addrs.push(addr);
-                }
-            }
-            if !peer_addrs.is_empty() {
-                handle.peer_mgr.write().await.add_peers(peer_addrs);
-            }
-        }
+        self.torrents.write().unwrap().insert(info_hash, handle);
 
-        self.torrents.write().await.insert(info_hash, handle);
-
-        Ok(info_hash)
+        Ok(TorrentBuilder::new(
+            self,
+            info_hash,
+            metadata_resolved,
+            magnet_peers,
+        ))
     }
 
-    /// Remove a torrent by info_hash.
+    /// Register a torrent from raw bencoded bytes (a `.torrent` file).
+    pub fn add_torrent_bytes(&self, data: &[u8]) -> Result<TorrentBuilder<'_>, Error> {
+        self.add_torrent(Metainfo::try_from(data)?)
+    }
+
+    /// Register a torrent from a magnet URI string (BEP 9).
+    pub fn add_magnet_str(&self, uri: impl AsRef<str>) -> Result<TorrentBuilder<'_>, Error> {
+        let magnet: MagnetUri = uri.as_ref().parse()?;
+        self.add_torrent(magnet)
+    }
+
+    // ── Accessors (for TorrentBuilder) ──
+
+    pub(crate) fn config(&self) -> &SessionConfig {
+        &self.config
+    }
+
+    pub(crate) fn torrents(&self) -> &Arc<RwLock<HashMap<InfoHash, TorrentHandle>>> {
+        &self.torrents
+    }
+
+    // ── Lifecycle ──
     pub async fn remove_torrent(&self, info_hash: &InfoHash) -> Result<(), Error> {
-        let handle = self.torrents.write().await.remove(info_hash);
+        let handle = self.torrents.write().unwrap().remove(info_hash);
+
         if let Some(mut h) = handle {
             h.cancel().await;
-            // Await the task to ensure clean shutdown
-            let _ = h.task.await;
+            // Await the task to ensure clean shutdown (cancel() already awaits)
         }
+
         Ok(())
     }
 
     /// Get the status of a torrent.
     pub async fn torrent_status(&self, info_hash: &InfoHash) -> Result<TorrentStatus, Error> {
-        let torrents = self.torrents.read().await;
-        let handle = torrents
-            .get(info_hash)
-            .ok_or(Error::new(ErrorKind::InvalidInput))?;
-        Ok(handle.status().await)
+        let status = {
+            let torrents = self.torrents.read().unwrap();
+
+            match torrents.get(info_hash) {
+                Some(handle) => handle.status.clone(), // Clone Arc, drop read guard before await
+                None => {
+                    return Err(Error::new(ErrorKind::InvalidInput));
+                }
+            }
+        };
+
+        Ok(status.read().await.clone())
     }
 
     /// List all active info_hashes.
-    pub async fn active_torrents(&self) -> Vec<InfoHash> {
-        self.torrents.read().await.keys().copied().collect()
+    pub fn active_torrents(&self) -> Vec<InfoHash> {
+        self.torrents.read().unwrap().keys().copied().collect()
     }
+}
 
-    /// Check whether the session has room for another torrent.
-    async fn check_capacity(&self) -> Result<(), Error> {
-        let limit = self.config.max_active_torrents;
-        if limit == 0 {
-            return Ok(());
+/// Resolve a [`TorrentSpec`] into a [`Metainfo`] and info hash.
+///
+/// For magnet links, builds a minimal stub [`Metainfo`] with
+/// zero `piece_length` and no pieces — the download loop waits
+/// for metadata from peers before requesting blocks.
+fn resolve_spec(spec: TorrentSpec) -> (Metainfo, [u8; 20]) {
+    match spec {
+        TorrentSpec::Metainfo(meta) => {
+            let ih = meta.info_hash();
+            (meta, ih)
         }
-        let count = self.torrents.read().await.len();
-        if count >= limit {
-            return Err(Error::new(ErrorKind::InvalidInput));
+        TorrentSpec::Magnet(uri) => {
+            let ih = *uri.primary_info_hash();
+            let name = uri.display_name.clone().unwrap_or_else(|| hex_encode(ih));
+            let announce = uri.trackers.first().cloned().unwrap_or_default();
+            let announce_list = if uri.trackers.len() > 1 {
+                vec![uri.trackers[1..].to_vec()]
+            } else {
+                vec![]
+            };
+            let meta = Metainfo {
+                announce,
+                announce_list,
+                info: Info {
+                    piece_length: 0,
+                    pieces: vec![],
+                    mode: Mode::Single {
+                        name,
+                        length: uri.exact_length.unwrap_or(0),
+                    },
+                    raw_info: RawInfo::Hash(ih),
+                },
+                creation_date: None,
+                comment: None,
+                created_by: None,
+                encoding: None,
+            };
+            (meta, ih)
         }
-        Ok(())
     }
 }
 
@@ -293,12 +270,18 @@ fn spawn_dht_poll(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(poll_interval).await;
-            let info_hashes: Vec<InfoHash> = torrents.read().await.keys().copied().collect();
+            let info_hashes: Vec<InfoHash> = torrents.read().unwrap().keys().copied().collect();
             for ih in info_hashes {
                 let peers = dht.get_peers(&ih).await;
                 if !peers.is_empty() {
-                    if let Some(handle) = torrents.read().await.get(&ih) {
-                        handle.peer_mgr.write().await.add_peers(peers);
+                    // Drop the read guard before awaiting on peer_mgr
+                    let peer_mgr = torrents
+                        .read()
+                        .unwrap()
+                        .get(&ih)
+                        .map(|h| h.peer_mgr.clone());
+                    if let Some(peer_mgr) = peer_mgr {
+                        peer_mgr.write().await.add_peers(peers);
                     }
                 }
             }

@@ -38,7 +38,7 @@ impl UdpTracker {
     /// `url` must be a `udp://` URL (e.g. `udp://tracker.example.com:6969`).
     /// Accepts `&str`, `String`, `&String`, or `Url`.
     pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
-        Self::with_timeout(url, DEFAULT_TIMEOUT)
+        UdpTracker::with_timeout(url, DEFAULT_TIMEOUT)
     }
 
     /// Create a new UDP tracker client with a custom timeout.

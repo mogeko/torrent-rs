@@ -28,7 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Add a torrent from a real .torrent file (bundled at compile time).
     let data = include_bytes!("data/debian-13.5.0-amd64-netinst.iso.torrent");
-    let info_hash = session.add_torrent_bytes(data, download_dir.path()).await?;
+    let info_hash = session
+        .add_torrent_bytes(data)?
+        .download_dir(download_dir.path())
+        .start()
+        .await?;
     println!("\nTorrent added:");
     println!("  info_hash: {:02x?}", info_hash);
 
@@ -40,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  peers:     {}", status.num_peers);
 
     // 5. List all active torrents.
-    let active = session.active_torrents().await;
+    let active = session.active_torrents();
     println!("\nActive torrents: {}", active.len());
     for ih in &active {
         let s = session.torrent_status(ih).await?;
@@ -50,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 6. Remove the torrent when done.
     session.remove_torrent(&info_hash).await?;
     println!("\nTorrent removed.");
-    println!("Active torrents: {}", session.active_torrents().await.len());
+    println!("Active torrents: {}", session.active_torrents().len());
 
     Ok(())
 }

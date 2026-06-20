@@ -94,7 +94,7 @@ impl Tracker {
     ///
     /// Returns `None` if the URL is invalid or uses an unsupported scheme.
     pub fn single(url: impl IntoUrl) -> Option<Self> {
-        Self::single_with_timeout(url, DEFAULT_TIMEOUT)
+        Tracker::single_with_timeout(url, DEFAULT_TIMEOUT)
     }
 
     /// Create a single `Tracker` from a URL with a custom timeout.
@@ -116,7 +116,7 @@ impl Tracker {
     where
         I::Item: IntoUrl,
     {
-        Self::multi_with_timeout(urls, DEFAULT_TIMEOUT)
+        Tracker::multi_with_timeout(urls, DEFAULT_TIMEOUT)
     }
 
     /// Create a `Tracker` from multiple tracker URLs with a custom timeout.
@@ -157,7 +157,7 @@ impl Tracker {
     ///
     /// Returns `None` if no valid tracker URLs were found.
     pub fn from_torrent(spec: impl Into<TorrentSpec>) -> Option<Self> {
-        Self::from_torrent_with_timeout(spec, DEFAULT_TIMEOUT)
+        Tracker::from_torrent_with_timeout(spec, DEFAULT_TIMEOUT)
     }
 
     /// Create a `Tracker` from anything that converts into a [`TorrentSpec`]
@@ -165,7 +165,7 @@ impl Tracker {
     pub fn from_torrent_with_timeout(
         spec: impl Into<TorrentSpec>, timeout: Duration,
     ) -> Option<Self> {
-        Self::multi_with_timeout(spec.into().trackers(), timeout)
+        Tracker::multi_with_timeout(spec.into().trackers(), timeout)
     }
 
     /// Returns the number of trackers.

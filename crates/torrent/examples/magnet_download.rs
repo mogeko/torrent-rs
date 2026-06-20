@@ -52,7 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add via magnet URI string (convenience)
     let info_hash = session
-        .add_magnet_str(uri_str, "/tmp/torrent-downloads")
+        .add_magnet_str(uri_str)?
+        .download_dir("/tmp/torrent-downloads")
+        .start()
         .await?;
     println!("Added torrent: {:02x?}", info_hash);
 

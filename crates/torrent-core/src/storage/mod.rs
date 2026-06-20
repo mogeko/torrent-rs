@@ -7,8 +7,7 @@
 //! The async `FileStorage` implementation lives in the `torrent` crate.
 
 use std::fmt::Debug;
-use std::future::Future;
-use std::path::Path;
+use std::future::{Future, ready};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -35,13 +34,14 @@ use crate::metainfo::Info;
 ///
 /// impl StorageFactory for MyFactory {
 ///     fn create<'a>(
-///         &'a self, _info: &'a Info, _dir: &'a std::path::Path,
+///         &'a self, _info: &'a Info,
 ///     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<dyn Storage>, Error>> + Send + 'a>> {
 ///         Box::pin(async move {
 ///             // Create a custom storage backend here
 ///             todo!()
 ///         })
 ///     }
+///     // `prepare` is optional — inherits the default no-op
 /// }
 /// ```
 #[allow(clippy::type_complexity)]
@@ -49,15 +49,16 @@ pub trait StorageFactory: Debug + Send + Sync {
     /// Create a new [`Storage`] backend for a torrent.
     ///
     /// `info` contains the torrent's file layout metadata.
-    /// `download_dir` is the user-specified download directory;
-    /// implementations may use or ignore it as appropriate.
+    /// The returned [`Storage`] may not yet be ready for I/O —
+    /// call [`Storage::prepare`] for resource allocation before
+    /// starting the download loop.
     ///
     /// For magnet-link torrents (BEP 9), `info` is a stub with
     /// `piece_length = 0` and no pieces. Implementations should
     /// handle this gracefully, e.g. by deferring allocation until
     /// metadata arrives from peers.
     fn create<'a>(
-        &'a self, info: &'a Info, download_dir: &'a Path,
+        &'a self, info: &'a Info,
     ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Storage>, Error>> + Send + 'a>>;
 }
 
@@ -95,6 +96,14 @@ pub trait Storage: Send + Sync {
     fn read_block<'a>(
         &'a self, piece: u32, offset: u32, buf: &'a mut [u8],
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
+
+    /// Prepare storage for I/O. Called once before the download loop starts.
+    ///
+    /// Override for resource allocation: disk file creation, remote bucket
+    /// provisioning, connection verification, etc. The default is a no-op.
+    fn prepare<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(ready(Ok(())))
+    }
 
     /// Total number of pieces.
     fn num_pieces(&self) -> usize;

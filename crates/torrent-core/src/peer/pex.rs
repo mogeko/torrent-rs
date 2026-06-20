@@ -1,3 +1,16 @@
+//! Peer Exchange (PEX) message types (BEP 11).
+//!
+//! PEX allows peers to share their known peer lists directly, reducing
+//! reliance on trackers and DHT for peer discovery. Messages are exchanged
+//! as [`PeerMessage::Extended`](crate::peer::PeerMessage::Extended) with
+//! the `ut_pex` extension ID negotiated via LTEP (BEP 10).
+//!
+//! # Key Types
+//!
+//! - [`PexMessage`] — the wire-format message containing added/dropped peer lists
+//!
+//! See [`PexMessage`] for the wire format and usage examples.
+
 use std::net::SocketAddr;
 
 use crate::bencode::{Bencode, Bytes, dict_get_bytes};
@@ -9,9 +22,9 @@ use crate::tracker::{
 
 /// A Peer Exchange (PEX) message (BEP 11).
 ///
-/// PEX allows peers to exchange their lists of known peers without relying
-/// on a tracker or DHT. The message is sent as a `PeerMessage::Extended`
-/// with the `ut_pex` extension ID negotiated via LTEP (BEP 10).
+/// Carries lists of peers that have been added to or dropped from a swarm
+/// since the last exchange. Sent as [`PeerMessage::Extended`](crate::peer::PeerMessage::Extended) with the
+/// `ut_pex` extension ID.
 ///
 /// # Wire format (bencoded)
 ///
@@ -32,7 +45,7 @@ use crate::tracker::{
 ///
 /// ```
 /// use std::net::{Ipv4Addr, SocketAddr};
-/// use torrent_core::peer::PexMessage;
+/// use torrent_core::peer::pex::PexMessage;
 ///
 /// let mut msg = PexMessage::new();
 /// msg.added.push(SocketAddr::new(
@@ -173,7 +186,7 @@ impl PexMessage {
 
 impl Default for PexMessage {
     fn default() -> Self {
-        Self::new()
+        PexMessage::new()
     }
 }
 

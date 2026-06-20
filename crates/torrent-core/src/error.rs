@@ -177,27 +177,27 @@ impl Error {
     }
 
     /// Creates an I/O error with the given source.
-    pub fn io(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
-        Self::with_source(ErrorKind::Io, source)
+    pub fn io(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Error {
+        Error::with_source(ErrorKind::Io, source)
     }
 
     /// Creates a peer connection closed error.
     pub fn peer_closed(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
-        Self::with_source(ErrorKind::PeerConnectionClosed, source)
+        Error::with_source(ErrorKind::PeerConnectionClosed, source)
     }
 
     /// Creates a tracker request failed error.
     pub fn tracker_failed(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
-        Self::with_source(ErrorKind::TrackerRequestFailed, source)
+        Error::with_source(ErrorKind::TrackerRequestFailed, source)
     }
 
     /// Creates a protocol error.
     pub fn protocol(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
-        Self::with_source(ErrorKind::Protocol, source)
+        Error::with_source(ErrorKind::Protocol, source)
     }
 
     /// Creates an invalid input error.
     pub fn invalid_input(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
-        Self::with_source(ErrorKind::InvalidInput, source)
+        Error::with_source(ErrorKind::InvalidInput, source)
     }
 }

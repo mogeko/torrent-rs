@@ -10,35 +10,45 @@ use crate::metainfo::{Info, Mode};
 
 use super::{Storage, StorageFactory};
 
-/// Default [`StorageFactory`] that creates file-backed storage.
+/// [`StorageFactory`] that creates file-backed storage.
 ///
-/// This is the default storage backend used by
-/// [`Session`](crate::session::Session).
-/// Each call to [`create`](StorageFactory::create) pre-allocates
-/// files on disk based on the torrent's metadata.
+/// Construct with [`FileStorageFactory::new`], passing the download
+/// directory. Use with [`TorrentBuilder::download_dir`].
+///
+/// [`TorrentBuilder::download_dir`]: crate::session::TorrentBuilder::download_dir
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use std::sync::Arc;
 /// use torrent::storage::{FileStorageFactory, StorageFactory};
-/// use torrent::metainfo::Info;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let factory = FileStorageFactory;
-/// // Use with SessionConfig::storage_factory
+/// let factory = FileStorageFactory::new("./downloads");
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Debug)]
-pub struct FileStorageFactory;
+pub struct FileStorageFactory {
+    download_dir: PathBuf,
+}
+
+impl FileStorageFactory {
+    /// Create a factory that stores files under `download_dir`.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            download_dir: dir.into(),
+        }
+    }
+}
 
 impl StorageFactory for FileStorageFactory {
     fn create<'a>(
-        &'a self, info: &'a Info, download_dir: &'a Path,
+        &'a self, info: &'a Info,
     ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Storage>, Error>> + Send + 'a>> {
+        let dir = self.download_dir.clone();
         Box::pin(async move {
-            let fs = FileStorage::new(info, download_dir).await?;
+            let fs = FileStorage::new(info, &dir);
             Ok(Arc::new(fs) as Arc<dyn Storage>)
         })
     }
@@ -67,41 +77,30 @@ struct StorageFile {
 }
 
 impl FileStorage {
-    /// Create a new FileStorage from metainfo info.
-    pub async fn new(info: &Info, download_dir: &Path) -> Result<Self, Error> {
+    /// Build a [`FileStorage`] layout from metainfo. No disk I/O.
+    ///
+    /// Call [`Storage::prepare`] afterwards to create directories
+    /// and pre-allocate files on disk.
+    pub fn new(info: &Info, download_dir: &Path) -> Self {
         let root = download_dir.to_path_buf();
 
         let num_pieces = info.num_pieces();
         let piece_length = info.piece_length;
         let total_size = info.total_size();
 
-        // Create download directory
-        fs::create_dir_all(&root).await?;
-
         let mode = match &info.mode {
-            Mode::Single { name, length } => {
+            Mode::Single { name, length: _ } => {
                 let path = root.join(name);
-                // Create and preallocate
-                let f = fs::File::create_new(&path).await?;
-                f.set_len(*length).await?;
                 StorageMode::SingleFile { path }
             }
             Mode::Multiple { name, files } => {
                 let dir = root.join(name);
-                fs::create_dir_all(&dir).await?;
-
                 let mut storage_files = Vec::with_capacity(files.len());
                 for file_info in files {
                     let mut file_path = dir.clone();
                     for component in &file_info.path {
                         file_path.push(component);
                     }
-                    // Ensure parent directories exist
-                    if let Some(parent) = file_path.parent() {
-                        fs::create_dir_all(parent).await?;
-                    }
-                    let f = fs::File::create_new(&file_path).await?;
-                    f.set_len(file_info.length).await?;
                     storage_files.push(StorageFile {
                         path: file_path,
                         length: file_info.length,
@@ -114,17 +113,17 @@ impl FileStorage {
         };
 
         tracing::info!(
-            "storage initialized: {} pieces, {} total bytes",
+            "storage layout computed: {} pieces, {} total bytes",
             num_pieces,
             total_size
         );
 
-        Ok(FileStorage {
+        FileStorage {
             num_pieces,
             piece_length,
             total_size,
             mode,
-        })
+        }
     }
 
     /// Map a piece to byte range [offset, offset+piece_len).
@@ -172,6 +171,35 @@ impl Storage for FileStorage {
             );
             let global_offset = self.piece_offset(piece) + offset as u64;
             self.read_range(global_offset, buf.len(), buf).await
+        })
+    }
+
+    fn prepare<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(async move {
+            match &self.mode {
+                StorageMode::SingleFile { path } => {
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent).await?;
+                    }
+                    let f = fs::File::create_new(path).await?;
+                    f.set_len(self.total_size).await?;
+                }
+                StorageMode::MultiFile { files } => {
+                    for file in files {
+                        if let Some(parent) = file.path.parent() {
+                            fs::create_dir_all(parent).await?;
+                        }
+                        let f = fs::File::create_new(&file.path).await?;
+                        f.set_len(file.length).await?;
+                    }
+                }
+            }
+            tracing::info!(
+                "storage prepared: {} pieces, {} total bytes",
+                self.num_pieces,
+                self.total_size
+            );
+            Ok(())
         })
     }
 
@@ -384,7 +412,9 @@ mod tests {
             },
             raw_info: RawInfo::Bytes(Bytes::new()),
         };
-        let storage = FileStorage::new(&info, dir.path()).await.unwrap();
+        let storage = FileStorage::new(&info, dir.path());
+        // Prepare storage (pre-allocate files on disk)
+        storage.prepare().await.unwrap();
 
         // Write a block
         let data = vec![0x42u8; 16];
@@ -417,7 +447,8 @@ mod tests {
             },
             raw_info: RawInfo::Bytes(Bytes::new()),
         };
-        let storage = FileStorage::new(&info, dir.path()).await.unwrap();
+        let storage = FileStorage::new(&info, dir.path());
+        storage.prepare().await.unwrap();
 
         let data = vec![0xFFu8; 64];
         storage.write_block(0, 0, &data).await.unwrap();

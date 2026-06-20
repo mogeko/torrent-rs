@@ -14,12 +14,16 @@
 //! ```no_run
 //! use torrent::session::{Session, SessionConfig};
 //!
-//! # async fn example() {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = SessionConfig::default();
 //! let session = Session::new(config).await.unwrap();
 //!
 //! let data = std::fs::read("torrent.torrent").unwrap();
-//! let info_hash = session.add_torrent_bytes(&data, "./downloads").await.unwrap();
+//! let info_hash = session
+//!     .add_torrent_bytes(&data).unwrap()
+//!     .download_dir("./downloads")
+//!     .start().await.unwrap();
+//! # Ok(())
 //! # }
 //! ```
 
