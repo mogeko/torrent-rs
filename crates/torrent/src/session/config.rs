@@ -166,6 +166,12 @@ pub struct SessionConfig {
     ///
     /// Default: `Some(vec![router.bittorrent.com:6881, dht.transmissionbt.com:6881])`.
     pub bootstrap_nodes: Option<Vec<BootstrapNode>>,
+    /// IPv6 DHT bootstrap nodes (BEP 32). Set to `None` to disable
+    /// the IPv6 DHT. When `Some` with at least one node, the session
+    /// initializes a second DHT node for IPv6.
+    ///
+    /// Default: `None`.
+    pub bootstrap_nodes_v6: Option<Vec<BootstrapNode>>,
     /// Optional DHT node ID (20 bytes). If `None`, a random one is generated
     /// each session. Set this to a persisted value to keep a stable identity
     /// across restarts (BEP 5 recommends persisting the node ID).
@@ -205,6 +211,7 @@ impl Default for SessionConfig {
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
                 BootstrapNode::from(("dht.transmissionbt.com", 6881)),
             ]),
+            bootstrap_nodes_v6: None,
             node_id: None,
             storage_factory: Arc::new(FileStorageFactory),
         }
@@ -322,6 +329,7 @@ mod serde_tests {
             announce_fallback_interval: Duration::from_secs(60),
             tracker_timeout: Duration::from_secs(30),
             bootstrap_nodes: None,
+            bootstrap_nodes_v6: None,
             node_id: Some([0xAB; 20]),
             dht_poll_interval: Duration::from_secs(60),
             pex_enabled: false,
@@ -357,6 +365,7 @@ mod serde_tests {
         assert_eq!(back.announce_fallback_interval, Duration::from_secs(60));
         assert_eq!(back.tracker_timeout, Duration::from_secs(30));
         assert!(back.bootstrap_nodes.is_none());
+        assert!(back.bootstrap_nodes_v6.is_none());
         assert_eq!(back.node_id, Some([0xAB; 20]));
         assert_eq!(back.dht_poll_interval, Duration::from_secs(60));
         assert_eq!(back.pex_enabled, false);

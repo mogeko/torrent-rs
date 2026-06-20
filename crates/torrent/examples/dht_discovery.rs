@@ -80,7 +80,7 @@ async fn main() {
     let info_hash: [u8; 20] = rand::random();
     for node in &closest {
         let tid = rand::random();
-        match get_peers(&rpc, node.addr, tid, &node_id, &info_hash).await {
+        match get_peers(&rpc, node.addr, tid, &node_id, &info_hash, None).await {
             Ok(krpc::GetPeersResult::Values { peers, .. }) => {
                 println!("  {} → {} peers", node.addr, peers.len());
             }
@@ -100,7 +100,7 @@ async fn main() {
 async fn find_node(
     rpc: &DhtRpc, node: &Node, tid: krpc::TransactionId, node_id: &[u8; 20], target: &[u8; 20],
 ) -> Result<Vec<Node>, Box<dyn std::error::Error>> {
-    Ok(torrent::dht::find_node(rpc, node.addr, tid, node_id, target).await?)
+    Ok(torrent::dht::find_node(rpc, node.addr, tid, node_id, target, None).await?)
 }
 
 fn hex4(bytes: &[u8]) -> String {

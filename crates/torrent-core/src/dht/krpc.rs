@@ -178,38 +178,59 @@ pub fn build_ping(tid: TransactionId, node_id: &[u8; 20]) -> Vec<u8> {
     .to_bytes()
 }
 
-/// Build a find_node query (BEP 5).
+/// Build a find_node query (BEP 5 / BEP 32).
 ///
 /// Creates a KRPC `find_node` query for discovering nodes close to
-/// a target ID. Used during the DHT bootstrap and recursive lookup process.
-pub fn build_find_node(tid: TransactionId, node_id: &[u8; 20], target: &[u8; 20]) -> Vec<u8> {
+/// a target ID. When `want` is `Some`, includes a `want` parameter
+/// to request specific address families (`"n4"`, `"n6"`).
+pub fn build_find_node(
+    tid: TransactionId, node_id: &[u8; 20], target: &[u8; 20], want: Option<&[&str]>,
+) -> Vec<u8> {
+    let mut entries = vec![
+        (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+        (target_key(), Bencode::Bytes(Bytes::copy_from_slice(target))),
+    ];
+    if let Some(w) = want {
+        let want_list: Vec<Bencode> = w
+            .iter()
+            .map(|s| Bencode::Bytes(Bytes::copy_from_slice(s.as_bytes())))
+            .collect();
+        entries.push((Bytes::from("want"), Bencode::List(want_list)));
+    }
     KrpcMessage::Query {
         transaction_id: tid,
         method: "find_node".into(),
-        args: Bencode::Dict(vec![
-            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
-            (target_key(), Bencode::Bytes(Bytes::copy_from_slice(target))),
-        ]),
+        args: Bencode::Dict(entries),
     }
     .to_bytes()
 }
 
-/// Build a get_peers query (BEP 5).
+/// Build a get_peers query (BEP 5 / BEP 32).
 ///
 /// Creates a KRPC `get_peers` query to discover peers sharing a torrent
-/// identified by `info_hash`. The response may contain peer addresses
-/// or closer DHT nodes.
-pub fn build_get_peers(tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 20]) -> Vec<u8> {
+/// identified by `info_hash`. When `want` is `Some`, includes a `want`
+/// parameter to request specific address families (`"n4"`, `"n6"`).
+pub fn build_get_peers(
+    tid: TransactionId, node_id: &[u8; 20], info_hash: &[u8; 20], want: Option<&[&str]>,
+) -> Vec<u8> {
+    let mut entries = vec![
+        (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
+        (
+            info_hash_key(),
+            Bencode::Bytes(Bytes::copy_from_slice(info_hash)),
+        ),
+    ];
+    if let Some(w) = want {
+        let want_list: Vec<Bencode> = w
+            .iter()
+            .map(|s| Bencode::Bytes(Bytes::copy_from_slice(s.as_bytes())))
+            .collect();
+        entries.push((Bytes::from("want"), Bencode::List(want_list)));
+    }
     KrpcMessage::Query {
         transaction_id: tid,
         method: "get_peers".into(),
-        args: Bencode::Dict(vec![
-            (id_key(), Bencode::Bytes(Bytes::copy_from_slice(node_id))),
-            (
-                info_hash_key(),
-                Bencode::Bytes(Bytes::copy_from_slice(info_hash)),
-            ),
-        ]),
+        args: Bencode::Dict(entries),
     }
     .to_bytes()
 }
@@ -602,7 +623,7 @@ mod tests {
         let tid = [0x12, 0x34];
         let node_id = [0x11u8; 20];
         let target = [0x22u8; 20];
-        let bytes = build_find_node(tid, &node_id, &target);
+        let bytes = build_find_node(tid, &node_id, &target, None);
 
         let msg = KrpcMessage::from_bytes(&bytes).unwrap();
         match &msg {

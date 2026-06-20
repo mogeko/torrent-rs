@@ -25,7 +25,7 @@ fn krpc_find_node_message_builds() {
     let tid: krpc::TransactionId = [0x01, 0x02];
     let node_id = [0xAA; 20];
     let target = [0xBB; 20];
-    let data = krpc::build_find_node(tid, &node_id, &target);
+    let data = krpc::build_find_node(tid, &node_id, &target, None);
     assert_eq!(data[0], b'd');
 }
 
@@ -34,7 +34,7 @@ fn krpc_get_peers_message_builds() {
     let tid: krpc::TransactionId = [0x01, 0x02];
     let node_id = [0xAA; 20];
     let info_hash = [0xBB; 20];
-    let data = krpc::build_get_peers(tid, &node_id, &info_hash);
+    let data = krpc::build_get_peers(tid, &node_id, &info_hash, None);
     assert_eq!(data[0], b'd');
 }
 
@@ -168,7 +168,7 @@ async fn handle_find_node_via_loopback() {
         .query(
             server_addr,
             tid,
-            &krpc::build_find_node(tid, &node_for_query, &target),
+            &krpc::build_find_node(tid, &node_for_query, &target, None),
         )
         .await
         .unwrap();

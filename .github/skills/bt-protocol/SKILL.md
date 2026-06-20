@@ -21,6 +21,7 @@ argument-hint: "[BEP number or protocol feature to implement]"
 | ------ | ---------------------------------------- | -------------------------------------------------------------- |
 | BEP 3  | The BitTorrent Protocol Specification    | `bencode`, `metainfo`, `peer`, `tracker`, `storage`, `session` |
 | BEP 5  | DHT Protocol                             | `dht` (krpc, routing table, rpc, query)                        |
+| BEP 7  | IPv6 Tracker Extension                   | `tracker` (AnnounceRequest ip/ipv6, compact peers6, UDP IPv6)  |
 | BEP 9  | Extension for Peers to Send Metadata     | `magnet`                                                       |
 | BEP 10 | Extension Protocol (LTEP)                | `peer::extension`, `peer::message` (Extended), `peer::stream`  |
 | BEP 11 | Peer Exchange (PEX)                      | `peer::pex`, `session::download::pex`                          |
@@ -28,6 +29,7 @@ argument-hint: "[BEP number or protocol feature to implement]"
 | BEP 15 | UDP Tracker Protocol                     | `tracker::udp`                                                 |
 | BEP 19 | WebSeed — HTTP/FTP Seeding               | `magnet` (ws parameter parsing only; download not implemented) |
 | BEP 23 | Tracker Returns Compact Peer Lists       | `tracker` (compact response)                                   |
+| BEP 32 | DHT Extensions for IPv6                  | `dht` (nodes6, want, dual routing tables, dual DHT nodes)      |
 | BEP 52 | The BitTorrent Protocol Specification v2 | `metainfo` (bt2 metainfo)                                      |
 
 ## Architecture: Where Protocol Lives
@@ -183,7 +185,6 @@ These BEPs are reserved or partially referenced in the codebase but not yet full
 | BEP | Title                           | Notes                                                               |
 | --- | ------------------------------- | ------------------------------------------------------------------- |
 | 6   | Fast Extension                  | Reserved bit 44 in handshake; Have All/None, Suggest, Allowed Fast  |
-| 7   | IPv6 Tracker Extension          | Required for modern dual-stack network support                      |
 | 14  | Local Service Discovery (LSD)   | LAN peer discovery via multicast                                    |
 | 27  | Private Torrents                | Single `private` flag in metainfo                                   |
 | 29  | uTP (Micro Transport Protocol)  | UDP-based congestion-controlled transport; required by most clients |
