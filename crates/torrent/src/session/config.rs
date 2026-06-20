@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::dht::BootstrapNode;
-use crate::storage::{FileStorageFactory, StorageFactory};
+#[cfg(test)]
+use crate::storage::FileStorageFactory;
+use crate::storage::StorageFactory;
 
 /// Unique identifier for a torrent (SHA-1 info hash).
 ///
@@ -144,20 +146,17 @@ pub struct SessionConfig {
     pub peer_msg_buffer_size: usize,
 
     // ── Storage ──
-    /// Factory for creating storage backends.
+    /// Default storage factory. Overrideable per-torrent via
+    /// [`TorrentBuilder::download_dir`] or [`TorrentBuilder::storage`].
     ///
-    /// Override this to inject a custom [`Storage`] implementation
-    /// (e.g. in-memory, remote, or processing-pipeline backends).
-    /// The default is [`FileStorageFactory`], which creates
-    /// file-backed storage.
+    /// When `None`, each torrent must provide a factory through the builder.
     ///
-    /// For magnet-link torrents (BEP 9), the factory receives a stub
-    /// `Info` with zero `piece_length` and no pieces. Custom factories
-    /// should handle this gracefully.
+    /// Default: `None`.
     ///
-    /// [`Storage`]: crate::storage::Storage
-    #[cfg_attr(feature = "serde", serde(skip, default = "default_storage_factory"))]
-    pub storage_factory: Arc<dyn StorageFactory>,
+    /// [`TorrentBuilder::download_dir`]: crate::session::TorrentBuilder::download_dir
+    /// [`TorrentBuilder::storage`]: crate::session::TorrentBuilder::storage
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub default_storage: Option<Arc<dyn StorageFactory>>,
 
     // ── DHT ──
     /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
@@ -213,15 +212,9 @@ impl Default for SessionConfig {
             ]),
             bootstrap_nodes_v6: None,
             node_id: None,
-            storage_factory: Arc::new(FileStorageFactory::new(".")),
+            default_storage: None,
         }
     }
-}
-
-/// Default [`StorageFactory`] for serde deserialization.
-#[cfg(feature = "serde")]
-fn default_storage_factory() -> Arc<dyn StorageFactory> {
-    Arc::new(FileStorageFactory::new("."))
 }
 
 /// Status of a torrent, exposed via the public API.
@@ -335,7 +328,7 @@ mod serde_tests {
             pex_enabled: false,
             pex_interval: Duration::from_secs(120),
             peer_msg_buffer_size: 512,
-            storage_factory: Arc::new(FileStorageFactory::new(".")),
+            default_storage: Some(Arc::new(FileStorageFactory::new("."))),
         };
 
         let json = serde_json::to_string(&config).unwrap();

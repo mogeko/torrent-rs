@@ -178,7 +178,11 @@ impl Session {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
         };
 
-        let storage_factory = &self.config.storage_factory;
+        let storage_factory = self
+            .config
+            .default_storage
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
         let storage = storage_factory.create(&meta.info).await?;
         storage.prepare().await?;
         let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
@@ -224,7 +228,11 @@ impl Session {
             encoding: None,
         };
 
-        let storage_factory = &self.config.storage_factory;
+        let storage_factory = self
+            .config
+            .default_storage
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
         let storage = storage_factory.create(&meta.info).await?;
         storage.prepare().await?;
         let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
