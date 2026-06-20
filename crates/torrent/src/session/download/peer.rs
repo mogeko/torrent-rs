@@ -28,6 +28,9 @@ impl DownloadLoop {
                 }
                 self.peers.remove(&addr);
                 self.peer_mgr.write().await.remove_peer(&addr);
+                if self.pex_enabled {
+                    self.recently_dropped.push(addr);
+                }
             }
             PeerEvent::Message(msg) => {
                 if let Err(_e) = self.handle_peer_message(addr, msg).await {
@@ -46,6 +49,9 @@ impl DownloadLoop {
                     }
                     self.peers.remove(&addr);
                     self.peer_mgr.write().await.remove_peer(&addr);
+                    if self.pex_enabled {
+                        self.recently_dropped.push(addr);
+                    }
                 }
             }
         }
@@ -172,6 +178,13 @@ impl DownloadLoop {
                 }
             }
             PeerMessage::Port(_) => {}
+            PeerMessage::Extended { ext_id: 0, data } => {
+                // BEP 10: LTEP extension negotiation handshake
+                self.handle_ltep_handshake(addr, &data).await?;
+            }
+            PeerMessage::Extended { ext_id, data } => {
+                self.handle_extended_message(addr, ext_id, data).await?;
+            }
         }
 
         Ok(())

@@ -34,10 +34,16 @@ pub struct PeerConnection {
     state: PeerState,
     /// The remote peer's ID (set after handshake).
     remote_peer_id: Option<PeerId>,
+    /// Remote peer's reserved bytes from the BEP 3 handshake
+    /// (for extension negotiation, BEP 10).
+    remote_reserved: [u8; 8],
 }
 
 impl PeerConnection {
     /// Connect to a peer, perform the handshake, and return a connection.
+    ///
+    /// Performs BEP 3 TCP handshake followed by BEP 10 LTEP extension
+    /// negotiation if the remote peer supports extensions (bit 63 set).
     pub async fn connect(
         addr: SocketAddr, info_hash: [u8; 20], our_peer_id: PeerId,
     ) -> Result<Self, Error> {
@@ -50,11 +56,14 @@ impl PeerConnection {
                 _ => return Err(Error::new(ErrorKind::PeerConnectionClosed)),
             };
 
-        // Perform handshake directly on the raw TcpStream so that no
+        // Perform BEP 3 handshake directly on the raw TcpStream so that no
         // BufReader read-ahead can steal bytes from subsequent wire
         // messages (Bitfield, Unchoke, etc.) that the peer may send
         // immediately after its handshake.
-        let handshake = Handshake::new(info_hash, our_peer_id.0);
+        let mut handshake = Handshake::with_extensions(info_hash, our_peer_id.0, &[63]);
+        // BEP 10 convention: byte 5 bit 4 = 0x10 signals LTEP support
+        // (alongside bit 63 which is shared with DHT)
+        handshake.set_reserved_byte(5, handshake.reserved[5] | 0x10);
         let handshake_bytes = handshake.to_bytes();
 
         if let Err(e) =
@@ -79,6 +88,8 @@ impl PeerConnection {
             return Err(Error::new(ErrorKind::PeerInvalidHandshake));
         }
 
+        let remote_reserved = remote_handshake.reserved;
+
         // Now split into independent read/write halves so that recv and
         // send can proceed concurrently without lock contention.
         // BufReader/BufWriter are applied AFTER the split so no handshake
@@ -92,6 +103,7 @@ impl PeerConnection {
             writer: Mutex::new(BufWriter::new(write_half)),
             state: PeerState::Init,
             remote_peer_id: Some(PeerId(remote_handshake.peer_id)),
+            remote_reserved,
         })
     }
 
@@ -169,5 +181,23 @@ impl PeerConnection {
     /// Return the remote peer's ID.
     pub fn remote_peer_id(&self) -> Option<PeerId> {
         self.remote_peer_id
+    }
+
+    /// Check if the remote peer advertised a specific extension bit
+    /// in its BEP 3 handshake reserved bytes.
+    ///
+    /// Bit numbering follows BEP 3 conventions: bit 0 = MSB of byte 0.
+    pub fn remote_has_extension(&self, bit: usize) -> bool {
+        if bit >= 64 {
+            return false;
+        }
+        let byte = bit / 8;
+        let bit_in_byte = 7 - (bit % 8);
+        (self.remote_reserved[byte] >> bit_in_byte) & 1 == 1
+    }
+
+    /// Return the remote peer's reserved bytes from the BEP 3 handshake.
+    pub fn remote_reserved(&self) -> &[u8; 8] {
+        &self.remote_reserved
     }
 }

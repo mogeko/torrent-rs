@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -8,6 +9,12 @@ pub(super) const PIPELINE_SIZE: usize = 5;
 
 /// Default block size (BEP 3: 2^14 = 16 KB).
 pub(super) const BLOCK_SIZE: u32 = 16 * 1024;
+
+/// BEP 10 extension name: Peer Exchange (BEP 11).  µTorrent prefix.
+pub(super) const UT_PEX: &str = "ut_pex";
+/// Our assigned extension message ID for `ut_pex` in outgoing LTEP
+/// handshakes.
+pub(super) const UT_PEX_ID: u8 = 1;
 
 /// Event from a peer reader task.
 pub(crate) enum PeerEvent {
@@ -43,6 +50,26 @@ pub(crate) struct PeerInfo {
     pub(super) corrupt_blocks: u32,
     /// Last time we received a Piece message from this peer.
     pub(super) last_data_received: Option<Instant>,
+    /// Extension name → message ID mapping from the remote peer (BEP 10).
+    /// Used when sending extended messages TO this peer.
+    pub(super) remote_extension_ids: HashMap<String, u8>,
+    /// Extension name → message ID mapping we offered to the remote (BEP 10).
+    /// Used when decoding extended messages FROM this peer.
+    pub(super) our_extension_ids: HashMap<String, u8>,
+    /// Last time we sent a PEX message to this peer.
+    pub(super) last_pex_sent: Option<Instant>,
+    /// Last time we received a PEX message from this peer.
+    pub(super) last_pex_received: Option<Instant>,
+    /// Maximum number of outstanding block requests this peer accepts.
+    /// Derived from the remote's BEP 10 `reqq` handshake field, capped
+    /// at [`PIPELINE_SIZE`]. Defaults to [`PIPELINE_SIZE`] if the remote
+    /// did not advertise a value.
+    pub(super) max_requests: usize,
+    /// Client name and version from remote's LTEP handshake (BEP 10 `v`).
+    pub(super) client_version: Option<String>,
+    /// Metadata size from remote's LTEP handshake (BEP 10 `metadata_size`,
+    /// for BEP 9 metadata exchange).
+    pub(super) metadata_size: Option<i64>,
 }
 
 impl PeerInfo {
@@ -59,12 +86,23 @@ impl PeerInfo {
             downloaded_this_round: 0,
             corrupt_blocks: 0,
             last_data_received: None,
+            remote_extension_ids: HashMap::new(),
+            our_extension_ids: HashMap::new(),
+            last_pex_sent: None,
+            last_pex_received: None,
+            max_requests: PIPELINE_SIZE,
+            client_version: None,
+            metadata_size: None,
         }
     }
 
     /// Whether this peer can accept a new request.
     pub(super) fn can_request(&self) -> bool {
-        !self.am_choked && self.pipeline.iter().any(Option::is_none)
+        if self.am_choked {
+            return false;
+        }
+        let active = self.pipeline.iter().filter(|s| s.is_some()).count();
+        active < self.max_requests
     }
 
     /// Record a new outstanding request.

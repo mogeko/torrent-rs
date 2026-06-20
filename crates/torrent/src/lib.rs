@@ -34,3 +34,17 @@ pub mod tracker;
 
 // Re-export commonly-used types at the crate root for convenience.
 pub use peer::PeerId;
+
+/// Client identifier sent in BEP 10 LTEP handshakes.
+///
+/// Defaults to `"torrent-rs <version>"`.  Library consumers building a
+/// custom client should override via the `TORRENT_CLIENT_VERSION`
+/// environment variable at compile time:
+///
+/// ```bash
+/// TORRENT_CLIENT_VERSION="MyApp/2.0" cargo build
+/// ```
+pub const CLIENT_VERSION: &str = match option_env!("TORRENT_CLIENT_VERSION") {
+    Some(v) => v,
+    None => concat!("torrent-rs ", env!("CARGO_PKG_VERSION")),
+};

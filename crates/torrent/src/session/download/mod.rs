@@ -1,6 +1,7 @@
 mod announce;
 mod choke;
 mod peer;
+mod pex;
 mod pieces;
 pub(super) mod types;
 
@@ -13,9 +14,10 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{RwLock, mpsc};
 
+use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
 use crate::metainfo::Metainfo;
-use crate::peer::PeerId;
+use crate::peer::{ExtensionNegotiation, PeerId, PeerMessage};
 use crate::piece::{PieceManager, PieceSelector};
 use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
@@ -24,6 +26,8 @@ use super::peer_manager::PeerManager;
 use super::torrent::TorrentCommand;
 use super::upload::UploadManager;
 use super::{TorrentState, TorrentStatus};
+
+use self::types::{UT_PEX, UT_PEX_ID};
 
 /// The core download engine for a single torrent.
 pub(crate) struct DownloadLoop {
@@ -85,6 +89,12 @@ pub(crate) struct DownloadLoop {
     /// Cached completed pieces for upload serving (avoid repeated disk reads).
     /// Ordered by insertion time — oldest first for LRU eviction.
     pub(crate) piece_cache: Vec<(u32, Arc<Vec<u8>>)>,
+    /// Recently disconnected peers to announce in PEX dropped field.
+    pub(crate) recently_dropped: Vec<SocketAddr>,
+    /// Enable Peer Exchange (BEP 11).
+    pub(crate) pex_enabled: bool,
+    /// PEX broadcast interval.
+    pub(crate) pex_interval: Duration,
 }
 
 impl DownloadLoop {
@@ -98,6 +108,7 @@ impl DownloadLoop {
         let mut status_tick = tokio::time::interval(Duration::from_secs(1));
         let mut choke_tick = tokio::time::interval(self.choke_interval);
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
+        let mut pex_tick = tokio::time::interval(self.pex_interval);
 
         loop {
             tokio::select! {
@@ -120,23 +131,30 @@ impl DownloadLoop {
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
                     self.handle_peer_event(addr, event).await;
                     if let Err(e) = self.fill_pipelines().await {
-                        tracing::warn!("fill_pipelines failed: {}", e);
+                        tracing::warn!("failed to fill pipelines: {}", e);
                     }
                 }
                 _ = status_tick.tick() => {
                     self.update_status().await;
                     self.announce_if_needed().await;
                     if let Err(e) = self.connect_pending().await {
-                        tracing::warn!("connect_pending failed: {}", e);
+                        tracing::warn!("failed to connect pending peers: {}", e);
                     }
                 }
                 _ = choke_tick.tick() => {
                     if let Err(e) = self.run_choke_unchoke().await {
-                        tracing::warn!("choke_unchoke failed: {}", e);
+                        tracing::warn!("failed to run choke/unchoke: {}", e);
                     }
                 }
                 _ = stale_tick.tick() => {
                     self.expire_stale_requests().await;
+                }
+                _ = pex_tick.tick() => {
+                    if self.pex_enabled {
+                        if let Err(e) = self.broadcast_pex().await {
+                            tracing::warn!("failed to broadcast PEX: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -203,11 +221,58 @@ impl DownloadLoop {
                 pm.connection(addr)
             };
             if let Some(conn_arc) = conn_arc {
+                let mut pi = PeerInfo::new();
+
+                // BEP 10: register our enabled extensions.
+                if self.pex_enabled {
+                    pi.our_extension_ids.insert(UT_PEX.to_string(), UT_PEX_ID);
+                }
+
+                // Send the LTEP handshake if we have any extensions to
+                // offer and the remote peer supports the protocol.
+                if !pi.our_extension_ids.is_empty() {
+                    let remote_ltep = conn_arc.remote_reserved()[5] & 0x10 != 0
+                        || conn_arc.remote_has_extension(63);
+                    if remote_ltep {
+                        self.send_extended_handshake(*addr, &pi.our_extension_ids)
+                            .await;
+                    }
+                }
+
                 self.spawn_peer_reader(*addr, conn_arc);
-                self.peers.insert(*addr, PeerInfo::new());
+                self.peers.insert(*addr, pi);
                 self.send_bitfield(*addr).await?;
+
+                // PEX is deferred: remote_extension_ids are not known yet.
+                // They will be populated when the remote's LTEP handshake
+                // arrives via handle_ltep_handshake, which then sends the
+                // initial PEX message.
             }
         }
         Ok(())
+    }
+
+    /// Send our BEP 10 LTEP extension negotiation handshake.
+    async fn send_extended_handshake(&self, addr: SocketAddr, our_ids: &HashMap<String, u8>) {
+        let mut neg = ExtensionNegotiation::new();
+        for (name, &id) in our_ids {
+            neg.add_extension(name, id);
+        }
+        neg.v = Some(crate::CLIENT_VERSION.to_string());
+        let payload = bencode_encode(&neg.to_bencode());
+        let peer_mgr = self.peer_mgr.read().await;
+
+        if let Err(e) = peer_mgr
+            .send_to(
+                &addr,
+                &PeerMessage::Extended {
+                    ext_id: 0,
+                    data: payload,
+                },
+            )
+            .await
+        {
+            tracing::warn!("failed to send LTEP handshake to {}: {}", addr, e);
+        }
     }
 }

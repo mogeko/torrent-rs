@@ -115,6 +115,15 @@ pub struct SessionConfig {
     ///
     /// Default: `30` s.
     pub dht_poll_interval: Duration,
+    /// Enable Peer Exchange (PEX, BEP 11). When enabled, the session
+    /// exchanges peer lists with connected peers that support it.
+    ///
+    /// Default: `true`.
+    pub pex_enabled: bool,
+    /// How often to broadcast PEX messages to connected peers.
+    ///
+    /// Default: `60` s.
+    pub pex_interval: Duration,
     /// Buffer size for the peer message channel (per torrent).
     ///
     /// Default: `256`.
@@ -173,6 +182,8 @@ impl Default for SessionConfig {
             announce_fallback_interval: Duration::from_secs(30),
             tracker_timeout: Duration::from_secs(15),
             dht_poll_interval: Duration::from_secs(30),
+            pex_enabled: true,
+            pex_interval: Duration::from_secs(60),
             peer_msg_buffer_size: 256,
             bootstrap_nodes: Some(vec![
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
@@ -265,6 +276,8 @@ mod serde_tests {
         assert_eq!(back.tracker_timeout, config.tracker_timeout);
         assert_eq!(back.node_id, config.node_id);
         assert_eq!(back.dht_poll_interval, config.dht_poll_interval);
+        assert_eq!(back.pex_enabled, config.pex_enabled);
+        assert_eq!(back.pex_interval, config.pex_interval);
         assert_eq!(back.peer_msg_buffer_size, config.peer_msg_buffer_size);
     }
 
@@ -292,6 +305,8 @@ mod serde_tests {
             bootstrap_nodes: None,
             node_id: Some([0xAB; 20]),
             dht_poll_interval: Duration::from_secs(60),
+            pex_enabled: false,
+            pex_interval: Duration::from_secs(120),
             peer_msg_buffer_size: 512,
             storage_factory: Arc::new(FileStorageFactory),
         };
@@ -320,6 +335,8 @@ mod serde_tests {
         assert!(back.bootstrap_nodes.is_none());
         assert_eq!(back.node_id, Some([0xAB; 20]));
         assert_eq!(back.dht_poll_interval, Duration::from_secs(60));
+        assert_eq!(back.pex_enabled, false);
+        assert_eq!(back.pex_interval, Duration::from_secs(120));
         assert_eq!(back.peer_msg_buffer_size, 512);
     }
 
