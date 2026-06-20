@@ -5,9 +5,11 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::error::{Error, ErrorKind};
+use crate::magnet::hex_encode;
 use crate::metainfo::{Metainfo, Mode};
 use crate::peer::PeerId;
 use crate::piece::{PieceManager, RarestFirst};
+use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 use crate::tracker::Tracker;
 
@@ -24,10 +26,11 @@ pub(crate) enum TorrentCommand {
 }
 
 /// Internal handle for a single torrent.
-#[allow(dead_code)]
 pub(crate) struct TorrentHandle {
     pub info_hash: [u8; 20],
-    pub metainfo: Metainfo,
+    /// Full torrent metadata — `None` for magnet links until
+    /// [`TorrentBuilder::resolve_metadata`] downloads it from peers (BEP 9/10).
+    pub metainfo: Option<Metainfo>,
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
@@ -39,16 +42,27 @@ pub(crate) struct TorrentHandle {
     pub task: Option<tokio::task::JoinHandle<()>>,
 }
 
-#[allow(dead_code)]
 impl TorrentHandle {
     /// Register a torrent without storage or download loop.
     /// State = [`TorrentState::Registered`].
-    pub(crate) fn register(
-        metainfo: Metainfo, info_hash: [u8; 20], config: &SessionConfig,
-    ) -> Self {
-        let num_pieces = metainfo.info.num_pieces();
-        let name = match &metainfo.info.mode {
-            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+    ///
+    /// For magnet links, `metainfo` is `None` and `num_pieces` is 0 —
+    /// metainfo must be downloaded from peers before activation.
+    pub(crate) fn register(spec: TorrentSpec, config: &SessionConfig) -> Self {
+        let (metainfo, info_hash, name, num_pieces) = match spec {
+            TorrentSpec::Metainfo(meta) => {
+                let ih = meta.info_hash();
+                let num = meta.info.num_pieces();
+                let name = match &meta.info.mode {
+                    Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+                };
+                (Some(meta), ih, name, num)
+            }
+            TorrentSpec::Magnet(uri) => {
+                let ih = *uri.primary_info_hash();
+                let name = uri.display_name.unwrap_or_else(|| hex_encode(ih));
+                (None, ih, name, 0)
+            }
         };
 
         let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
@@ -87,14 +101,20 @@ impl TorrentHandle {
 
     /// Attach storage and spawn the download loop.
     /// Transitions from [`TorrentState::Registered`] to downloading.
+    ///
+    /// # Panics
+    ///
+    /// Panics if metainfo has not been resolved (i.e. `self.metainfo` is `None`).
     pub(crate) fn activate(&mut self, storage: Arc<dyn Storage>, config: &SessionConfig) {
-        let name = match &self.metainfo.info.mode {
+        let metainfo = self.metainfo.as_ref();
+        let metainfo = metainfo.expect("metainfo must be resolved before activate");
+        let name = match &metainfo.info.mode {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
         };
         tracing::info!(
             "torrent activated: {} ({} pieces)",
             name,
-            self.metainfo.info.num_pieces()
+            metainfo.info.num_pieces()
         );
 
         let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
@@ -102,12 +122,12 @@ impl TorrentHandle {
             mpsc::channel::<(SocketAddr, PeerEvent)>(config.peer_msg_buffer_size);
 
         let peer_id = PeerId::random();
-        let tracker = Tracker::from_torrent_with_timeout(&self.metainfo, config.tracker_timeout);
+        let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
         let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
 
         let mut download_loop = DownloadLoop {
             info_hash: self.info_hash,
-            metainfo: self.metainfo.clone(),
+            metainfo: metainfo.clone(),
             storage: storage.clone(),
             piece_mgr: self.piece_mgr.clone(),
             peer_mgr: self.peer_mgr.clone(),
@@ -153,6 +173,7 @@ impl TorrentHandle {
     }
 
     /// Pause this torrent. No-op if not yet activated.
+    #[allow(dead_code)]
     pub async fn pause(&self) -> Result<(), Error> {
         if let Some(tx) = &self.control_tx {
             tx.send(TorrentCommand::Pause)
@@ -164,6 +185,7 @@ impl TorrentHandle {
     }
 
     /// Resume this torrent. No-op if not yet activated.
+    #[allow(dead_code)]
     pub async fn resume(&self) -> Result<(), Error> {
         if let Some(tx) = &self.control_tx {
             tx.send(TorrentCommand::Resume)
@@ -183,8 +205,8 @@ impl TorrentHandle {
             let _ = task.await;
         }
     }
-
     /// Get the current status.
+    #[allow(dead_code)]
     pub async fn status(&self) -> TorrentStatus {
         self.status.read().await.clone()
     }

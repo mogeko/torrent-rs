@@ -29,8 +29,8 @@ use std::time::Duration;
 
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
-use crate::magnet::{MagnetUri, hex_encode};
-use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
+use crate::magnet::MagnetUri;
+use crate::metainfo::Metainfo;
 use crate::spec::TorrentSpec;
 
 use self::torrent::TorrentHandle;
@@ -147,12 +147,11 @@ impl Session {
             vec![]
         };
 
-        // Resolve spec → (Metainfo, InfoHash)
-        let (meta, info_hash) = resolve_spec(spec.clone());
         let metadata_resolved = matches!(spec, TorrentSpec::Metainfo(_));
+        let info_hash = spec.info_hash();
 
-        // Register handle
-        let handle = TorrentHandle::register(meta, info_hash, &self.config);
+        // Register handle (consumes spec)
+        let handle = TorrentHandle::register(spec, &self.config);
 
         self.torrents.write().unwrap().insert(info_hash, handle);
 
@@ -216,48 +215,6 @@ impl Session {
     /// List all active info_hashes.
     pub fn active_torrents(&self) -> Vec<InfoHash> {
         self.torrents.read().unwrap().keys().copied().collect()
-    }
-}
-
-/// Resolve a [`TorrentSpec`] into a [`Metainfo`] and info hash.
-///
-/// For magnet links, builds a minimal stub [`Metainfo`] with
-/// zero `piece_length` and no pieces — the download loop waits
-/// for metadata from peers before requesting blocks.
-fn resolve_spec(spec: TorrentSpec) -> (Metainfo, [u8; 20]) {
-    match spec {
-        TorrentSpec::Metainfo(meta) => {
-            let ih = meta.info_hash();
-            (meta, ih)
-        }
-        TorrentSpec::Magnet(uri) => {
-            let ih = *uri.primary_info_hash();
-            let name = uri.display_name.clone().unwrap_or_else(|| hex_encode(ih));
-            let announce = uri.trackers.first().cloned().unwrap_or_default();
-            let announce_list = if uri.trackers.len() > 1 {
-                vec![uri.trackers[1..].to_vec()]
-            } else {
-                vec![]
-            };
-            let meta = Metainfo {
-                announce,
-                announce_list,
-                info: Info {
-                    piece_length: 0,
-                    pieces: vec![],
-                    mode: Mode::Single {
-                        name,
-                        length: uri.exact_length.unwrap_or(0),
-                    },
-                    raw_info: RawInfo::Hash(ih),
-                },
-                creation_date: None,
-                comment: None,
-                created_by: None,
-                encoding: None,
-            };
-            (meta, ih)
-        }
     }
 }
 

@@ -96,7 +96,7 @@ impl MetadataRequest {
 /// The `total_size` field gives the full metadata size so the
 /// receiver knows how many pieces to request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataData {
+pub struct Metadata {
     /// Piece index (corresponds to the request).
     pub piece: u32,
     /// Total metadata size in bytes.
@@ -105,7 +105,7 @@ pub struct MetadataData {
     pub data: Vec<u8>,
 }
 
-impl MetadataData {
+impl Metadata {
     /// Serialize the bencoded dictionary prefix (without raw data).
     pub fn to_bencode_with_data(&self) -> Bencode {
         Bencode::Dict(vec![
@@ -129,7 +129,7 @@ impl MetadataData {
             .ok_or_else(|| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
         let total_size = dict_get_int(val, b"total_size")
             .ok_or_else(|| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
-        Ok(MetadataData {
+        Ok(Metadata {
             piece: piece as u32,
             total_size: total_size as u64,
             data: raw_data,
@@ -156,13 +156,13 @@ mod tests {
 
     #[test]
     fn metadata_data_roundtrip() {
-        let data = MetadataData {
+        let data = Metadata {
             piece: 2,
             total_size: 32768,
             data: vec![0x41; 100],
         };
         let ben = data.to_bencode_with_data();
-        let parsed = MetadataData::from_bencode(&ben, data.data.clone()).unwrap();
+        let parsed = Metadata::from_bencode(&ben, data.data.clone()).unwrap();
         assert_eq!(parsed.piece, 2);
         assert_eq!(parsed.total_size, 32768);
         assert_eq!(parsed.data.len(), 100);
@@ -174,7 +174,7 @@ mod tests {
             (Bytes::from("msg_type"), Bencode::Integer(2)),
             (Bytes::from("piece"), Bencode::Integer(0)),
         ]);
-        assert!(MetadataData::is_reject(&ben));
+        assert!(Metadata::is_reject(&ben));
     }
 
     #[test]
