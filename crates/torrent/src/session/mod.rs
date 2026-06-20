@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use crate::dht::{BootstrapNode, DhtNode, generate_node_id};
+use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
@@ -67,12 +67,9 @@ pub struct Session {
     config: SessionConfig,
     /// Active torrents, keyed by info_hash.
     torrents: Arc<RwLock<HashMap<InfoHash, TorrentHandle>>>,
-    /// Shared IPv4 DHT node (if DHT is enabled).
+    /// Shared dual-stack DHT node (if DHT is enabled).
     #[expect(dead_code)]
     dht_node: Option<Arc<DhtNode>>,
-    /// Shared IPv6 DHT node (if IPv6 DHT is enabled, BEP 32).
-    #[expect(dead_code)]
-    dht_node_v6: Option<Arc<DhtNode>>,
 }
 
 impl Session {
@@ -83,60 +80,49 @@ impl Session {
 
         let node_id = config.node_id.unwrap_or_else(generate_node_id);
 
-        // Initialize IPv4 DHT if bootstrap nodes are configured
-        let dht_node = if let Some(ref bootstrap) = config.bootstrap_nodes
-            && !bootstrap.is_empty()
-        {
-            Some(
-                init_dht(
-                    bootstrap,
-                    SocketAddr::V4(SocketAddrV4::new(
-                        Ipv4Addr::UNSPECIFIED,
-                        config.listen_port + 1,
-                    )),
-                    node_id,
-                    &torrents,
-                    config.dht_poll_interval,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
+        // Initialize dual-stack DHT if any bootstrap nodes are configured
+        let dht_node = {
+            let bootstrap_nodes = config.bootstrap_nodes.as_deref().unwrap_or(&[]);
+            let v4 = bootstrap_nodes
+                .iter()
+                .map(|n| (n.host.as_str(), n.port))
+                .collect::<Vec<_>>();
+            let bootstrap_nodes_v6 = config.bootstrap_nodes_v6.as_deref().unwrap_or(&[]);
+            let v6 = bootstrap_nodes_v6
+                .iter()
+                .map(|n| (n.host.as_str(), n.port))
+                .collect::<Vec<_>>();
 
-        // Initialize IPv6 DHT if bootstrap nodes are configured (BEP 32)
-        let dht_node_v6 = if let Some(ref bootstrap_v6) = config.bootstrap_nodes_v6
-            && !bootstrap_v6.is_empty()
-        {
-            match init_dht(
-                bootstrap_v6,
-                SocketAddr::V6(SocketAddrV6::new(
+            if v4.is_empty() && v6.is_empty() {
+                None
+            } else {
+                let bind_v4 = SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::UNSPECIFIED,
+                    config.listen_port + 1,
+                ));
+                let bind_v6 = SocketAddr::V6(SocketAddrV6::new(
                     Ipv6Addr::UNSPECIFIED,
                     config.listen_port + 2,
                     0,
                     0,
-                )),
-                node_id,
-                &torrents,
-                config.dht_poll_interval,
-            )
-            .await
-            {
-                Ok(node) => Some(node),
-                Err(e) => {
-                    tracing::warn!("IPv6 DHT init failed (continuing with IPv4 only): {e}");
-                    None
+                ));
+                match DhtNode::new(node_id, bind_v4, bind_v6, &v4, &v6).await {
+                    Ok(node) => {
+                        spawn_dht_poll(node.clone(), torrents.clone(), config.dht_poll_interval);
+                        Some(node)
+                    }
+                    Err(e) => {
+                        tracing::warn!("DHT init failed, DHT disabled: {e}");
+                        None
+                    }
                 }
             }
-        } else {
-            None
         };
 
         Ok(Session {
             config,
             torrents,
             dht_node,
-            dht_node_v6,
         })
     }
 
@@ -298,37 +284,24 @@ impl Session {
     }
 }
 
-/// Initialize a DHT node and spawn a background poll loop.
-///
-/// Binds to `bind_addr`, resolves `bootstrap` hostnames, creates a
-/// [`DhtNode`], and spawns a `tokio` task that periodically queries
-/// the DHT for peers of all active torrents.
-async fn init_dht(
-    bootstrap: &[BootstrapNode], bind_addr: SocketAddr, node_id: [u8; 20],
-    torrents: &Arc<RwLock<HashMap<InfoHash, TorrentHandle>>>, poll_interval: Duration,
-) -> Result<Arc<DhtNode>, Error> {
-    let bootstrap_refs: Vec<(&str, u16)> = bootstrap
-        .iter()
-        .map(|n| (n.host.as_str(), n.port))
-        .collect();
-    let node = DhtNode::new(node_id, bind_addr, &bootstrap_refs).await?;
-
-    let dht = node.clone();
-    let t = torrents.clone();
+/// Spawn a background task that periodically queries the DHT for
+/// peers of all active torrents.
+fn spawn_dht_poll(
+    dht: Arc<DhtNode>, torrents: Arc<RwLock<HashMap<InfoHash, TorrentHandle>>>,
+    poll_interval: Duration,
+) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(poll_interval).await;
-            let info_hashes: Vec<InfoHash> = t.read().await.keys().copied().collect();
+            let info_hashes: Vec<InfoHash> = torrents.read().await.keys().copied().collect();
             for ih in info_hashes {
                 let peers = dht.get_peers(&ih).await;
                 if !peers.is_empty() {
-                    if let Some(handle) = t.read().await.get(&ih) {
+                    if let Some(handle) = torrents.read().await.get(&ih) {
                         handle.peer_mgr.write().await.add_peers(peers);
                     }
                 }
             }
         }
     });
-
-    Ok(node)
 }
