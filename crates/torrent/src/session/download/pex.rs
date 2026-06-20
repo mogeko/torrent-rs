@@ -126,21 +126,34 @@ impl DownloadLoop {
             None => return Ok(()), // Peer doesn't support PEX
         };
 
+        // BEP 11: PEX SHOULD be sent at most once per interval per peer.
+        if peer
+            .last_pex_sent
+            .is_some_and(|t| t.elapsed() < self.pex_interval)
+        {
+            return Ok(());
+        }
+
         // Gather currently connected peers (excluding this peer itself).
-        // BEP 11: limit to 50 added peers per message.
+        // BEP 11: limit to 50 added peers per message, per address family.
         let connected = self.peer_mgr.read().await.connection_addrs();
-        let added: Vec<SocketAddr> = connected
+        let (added, added6): (Vec<_>, Vec<_>) = connected
             .into_iter()
             .filter(|a| *a != addr)
-            .take(50)
-            .collect();
+            .partition(|a| a.is_ipv4());
+        let added: Vec<SocketAddr> = added.into_iter().take(50).collect();
+        let added6: Vec<SocketAddr> = added6.into_iter().take(50).collect();
 
-        let pex_msg = PexMessage {
-            added,
-            dropped: dropped.to_vec(),
-            added6: Vec::new(),
-            dropped6: Vec::new(),
-        };
+        // Partition dropped peers by address family (recipient already excluded).
+        let (dropped_v4, dropped_v6): (Vec<_>, Vec<_>) = dropped.iter().partition(|a| a.is_ipv4());
+        let dropped: Vec<SocketAddr> = dropped_v4.into_iter().copied().collect();
+        let dropped6: Vec<SocketAddr> = dropped_v6.into_iter().copied().collect();
+
+        let mut pex_msg = PexMessage::new();
+        pex_msg.added = added;
+        pex_msg.added6 = added6;
+        pex_msg.dropped = dropped;
+        pex_msg.dropped6 = dropped6;
 
         let payload = bencode_encode(&pex_msg.to_bencode());
         self.peer_mgr
@@ -162,10 +175,17 @@ impl DownloadLoop {
         Ok(())
     }
 
-    /// Broadcast PEX messages to all connected peers.
+    /// Broadcast PEX messages to all PEX-capable connected peers.
     pub(super) async fn broadcast_pex(&mut self) -> Result<(), Error> {
         let dropped_snapshot: Vec<SocketAddr> = self.recently_dropped.drain(..).collect();
-        let addresses: Vec<SocketAddr> = self.peers.keys().copied().collect();
+        // Only broadcast to peers that have completed LTEP negotiation and
+        // advertised support for ut_pex (BEP 11).
+        let addresses: Vec<SocketAddr> = self
+            .peers
+            .iter()
+            .filter(|(_, info)| info.remote_extension_ids.contains_key(UT_PEX))
+            .map(|(addr, _)| *addr)
+            .collect();
         for addr in addresses {
             let dropped = dropped_snapshot.iter().filter(|a| **a != addr).copied();
             let dropped: Vec<SocketAddr> = dropped.collect();

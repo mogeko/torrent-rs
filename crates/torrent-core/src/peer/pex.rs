@@ -44,6 +44,7 @@ use crate::tracker::{
 /// assert_eq!(msg, parsed);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PexMessage {
     /// Peers added since the last PEX message (compact IPv4 format).
     pub added: Vec<SocketAddr>,

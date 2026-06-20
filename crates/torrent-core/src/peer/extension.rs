@@ -37,6 +37,7 @@ use crate::error::{Error, ErrorKind};
 /// assert_eq!(parsed.m.get("ut_pex"), Some(&1u8));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExtensionNegotiation {
     /// Extension name → assigned message ID mapping.
     ///
