@@ -213,7 +213,7 @@ impl Default for SessionConfig {
             ]),
             bootstrap_nodes_v6: None,
             node_id: None,
-            storage_factory: Arc::new(FileStorageFactory),
+            storage_factory: Arc::new(FileStorageFactory::new(".")),
         }
     }
 }
@@ -221,7 +221,7 @@ impl Default for SessionConfig {
 /// Default [`StorageFactory`] for serde deserialization.
 #[cfg(feature = "serde")]
 fn default_storage_factory() -> Arc<dyn StorageFactory> {
-    Arc::new(FileStorageFactory)
+    Arc::new(FileStorageFactory::new("."))
 }
 
 /// Status of a torrent, exposed via the public API.
@@ -250,8 +250,8 @@ pub struct TorrentStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TorrentState {
-    /// Waiting to start.
-    Queued,
+    /// Metadata registered, no storage/download started yet.
+    Registered,
     /// Actively downloading.
     Downloading,
     /// All pieces downloaded, uploading only.
@@ -335,7 +335,7 @@ mod serde_tests {
             pex_enabled: false,
             pex_interval: Duration::from_secs(120),
             peer_msg_buffer_size: 512,
-            storage_factory: Arc::new(FileStorageFactory),
+            storage_factory: Arc::new(FileStorageFactory::new(".")),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -409,7 +409,7 @@ mod serde_tests {
     #[test]
     fn torrent_state_roundtrip() {
         let states = [
-            TorrentState::Queued,
+            TorrentState::Registered,
             TorrentState::Downloading,
             TorrentState::Seeding,
             TorrentState::Paused,

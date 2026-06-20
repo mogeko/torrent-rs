@@ -71,7 +71,7 @@ impl TorrentHandle {
             upload_rate: 0.0,
             num_peers: 0,
             num_seeds: 0,
-            state: TorrentState::Queued,
+            state: TorrentState::Registered,
         }));
 
         let (peer_msg_tx, peer_msg_rx) =

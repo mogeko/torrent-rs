@@ -66,7 +66,7 @@ async fn add_torrent_bytes_and_query_status() -> Result<(), Error> {
     let status = session.torrent_status(&info_hash).await?;
     assert_eq!(status.info_hash, info_hash);
     assert_eq!(status.name, "test.txt");
-    assert_eq!(status.state, TorrentState::Queued);
+    assert_eq!(status.state, TorrentState::Registered);
     assert_eq!(status.progress, 0.0);
 
     Ok(())
@@ -111,7 +111,7 @@ async fn add_and_query_multiple_times() -> Result<(), Error> {
     for _ in 0..3 {
         let status = session.torrent_status(&info_hash).await?;
         assert_eq!(status.info_hash, info_hash);
-        assert_eq!(status.state, TorrentState::Queued);
+        assert_eq!(status.state, TorrentState::Registered);
     }
 
     Ok(())
@@ -141,7 +141,7 @@ async fn add_magnet_str_minimal() -> Result<(), Error> {
 
     let status = session.torrent_status(&info_hash).await?;
     assert_eq!(status.info_hash, info_hash);
-    assert_eq!(status.state, TorrentState::Queued);
+    assert_eq!(status.state, TorrentState::Registered);
     assert_eq!(status.progress, 0.0);
 
     Ok(())
@@ -166,7 +166,7 @@ async fn add_magnet_str_with_trackers() -> Result<(), Error> {
 
     assert!(session.active_torrents().await.contains(&info_hash));
     let status = session.torrent_status(&info_hash).await?;
-    assert_eq!(status.state, TorrentState::Queued);
+    assert_eq!(status.state, TorrentState::Registered);
 
     Ok(())
 }

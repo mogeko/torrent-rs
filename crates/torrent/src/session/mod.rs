@@ -17,7 +17,7 @@ mod torrent;
 mod uni_deque;
 mod upload;
 
-pub use config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
+pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -170,7 +170,7 @@ impl Session {
     }
 
     /// Core: bootstrap a torrent from full metadata.
-    async fn add_metainfo(&self, meta: Metainfo, download_dir: &Path) -> Result<InfoHash, Error> {
+    async fn add_metainfo(&self, meta: Metainfo, _download_dir: &Path) -> Result<InfoHash, Error> {
         self.check_capacity().await?;
 
         let info_hash = meta.info_hash();
@@ -179,7 +179,8 @@ impl Session {
         };
 
         let storage_factory = &self.config.storage_factory;
-        let storage = storage_factory.create(&meta.info, download_dir).await?;
+        let storage = storage_factory.create(&meta.info).await?;
+        storage.prepare().await?;
         let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
 
         self.torrents.write().await.insert(info_hash, handle);
@@ -188,7 +189,7 @@ impl Session {
     }
 
     /// Core: bootstrap a torrent from a magnet URI.
-    async fn add_magnet(&self, uri: MagnetUri, download_dir: &Path) -> Result<InfoHash, Error> {
+    async fn add_magnet(&self, uri: MagnetUri, _download_dir: &Path) -> Result<InfoHash, Error> {
         self.check_capacity().await?;
 
         let info_hash = *uri.primary_info_hash();
@@ -224,7 +225,8 @@ impl Session {
         };
 
         let storage_factory = &self.config.storage_factory;
-        let storage = storage_factory.create(&meta.info, download_dir).await?;
+        let storage = storage_factory.create(&meta.info).await?;
+        storage.prepare().await?;
         let handle = TorrentHandle::new(meta, info_hash, storage, &self.config);
 
         // Inject x.pe addresses directly into the connection pool (BEP 9).
