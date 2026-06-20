@@ -173,7 +173,7 @@ impl PexMessage {
 
 impl Default for PexMessage {
     fn default() -> Self {
-        Self::new()
+        PexMessage::new()
     }
 }
 

@@ -141,10 +141,8 @@ impl Session {
 
         // Extract magnet peers (BEP 9 x.pe) before consuming spec
         let magnet_peers: Vec<SocketAddr> = if let TorrentSpec::Magnet(ref uri) = spec {
-            uri.peers
-                .iter()
-                .filter_map(|p| SocketAddr::from_str(p).ok())
-                .collect()
+            let peers = uri.peers.iter();
+            peers.filter_map(|p| SocketAddr::from_str(p).ok()).collect()
         } else {
             vec![]
         };
@@ -168,8 +166,7 @@ impl Session {
 
     /// Register a torrent from raw bencoded bytes (a `.torrent` file).
     pub fn add_torrent_bytes(&self, data: &[u8]) -> Result<TorrentBuilder<'_>, Error> {
-        let meta = Metainfo::try_from(data)?;
-        self.add_torrent(meta)
+        self.add_torrent(Metainfo::try_from(data)?)
     }
 
     /// Register a torrent from a magnet URI string (BEP 9).
@@ -191,10 +188,12 @@ impl Session {
     // ── Lifecycle ──
     pub async fn remove_torrent(&self, info_hash: &InfoHash) -> Result<(), Error> {
         let handle = self.torrents.write().unwrap().remove(info_hash);
+
         if let Some(mut h) = handle {
             h.cancel().await;
             // Await the task to ensure clean shutdown (cancel() already awaits)
         }
+
         Ok(())
     }
 
@@ -202,11 +201,15 @@ impl Session {
     pub async fn torrent_status(&self, info_hash: &InfoHash) -> Result<TorrentStatus, Error> {
         let status = {
             let torrents = self.torrents.read().unwrap();
-            let handle = torrents
-                .get(info_hash)
-                .ok_or(Error::new(ErrorKind::InvalidInput))?;
-            handle.status.clone() // Clone Arc, drop read guard before await
+
+            match torrents.get(info_hash) {
+                Some(handle) => handle.status.clone(), // Clone Arc, drop read guard before await
+                None => {
+                    return Err(Error::new(ErrorKind::InvalidInput));
+                }
+            }
         };
+
         Ok(status.read().await.clone())
     }
 

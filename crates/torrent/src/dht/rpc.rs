@@ -48,7 +48,7 @@ impl DhtRpc {
     /// Spawns a background receive loop that dispatches incoming KRPC
     /// messages to the corresponding in-flight query via transaction ID.
     pub async fn new(bind_addr: SocketAddr) -> Result<Arc<Self>, Error> {
-        Self::with_timeout(bind_addr, RPC_TIMEOUT).await
+        DhtRpc::with_timeout(bind_addr, RPC_TIMEOUT).await
     }
 
     /// Create a new DHT RPC client with a custom query timeout.
