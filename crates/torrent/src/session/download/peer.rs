@@ -28,7 +28,9 @@ impl DownloadLoop {
                 }
                 self.peers.remove(&addr);
                 self.peer_mgr.write().await.remove_peer(&addr);
-                self.recently_dropped.push(addr);
+                if self.pex_enabled {
+                    self.recently_dropped.push(addr);
+                }
             }
             PeerEvent::Message(msg) => {
                 if let Err(_e) = self.handle_peer_message(addr, msg).await {
@@ -47,7 +49,9 @@ impl DownloadLoop {
                     }
                     self.peers.remove(&addr);
                     self.peer_mgr.write().await.remove_peer(&addr);
-                    self.recently_dropped.push(addr);
+                    if self.pex_enabled {
+                        self.recently_dropped.push(addr);
+                    }
                 }
             }
         }
