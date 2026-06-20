@@ -18,7 +18,7 @@ use crate::error::{Error, ErrorKind};
 /// d
 ///   1:m d
 ///     6:ut_pex i1e
-///     9:ut_metadata i2e
+///     11:ut_metadata i2e
 ///   e
 ///   1:v 14:torrent.rs 0.1
 ///   6:yourip 4:\x7f\x00\x00\x01

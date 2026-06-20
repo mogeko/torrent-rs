@@ -18,7 +18,7 @@ use crate::tracker::{
 /// ```text
 /// d
 ///   5:added  <compact IPv4 list (6 bytes each)>
-///   7:added6 <compact IPv6 list (18 bytes each, optional)>
+///   6:added6 <compact IPv6 list (18 bytes each, optional)>
 ///   7:dropped <compact IPv4 list>
 ///   8:dropped6 <compact IPv6 list (optional)>
 /// e
