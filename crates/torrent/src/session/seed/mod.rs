@@ -13,14 +13,22 @@
 
 mod hash;
 pub mod source;
+mod storage_adapter;
+mod verify;
 
 pub use self::source::DataSource;
+pub use self::storage_adapter::DataSourceStorage;
+pub(crate) use self::verify::verify_existing;
+
+use std::sync::Arc;
 
 use crate::error::{Error, ErrorKind};
 use crate::magnet::hex_encode;
 use crate::metainfo::{Metainfo, Mode};
+use crate::piece::PieceManager;
 use crate::session::InfoHash;
 use crate::spec::TorrentSpec;
+use crate::storage::Storage;
 
 use super::Session;
 
@@ -148,7 +156,7 @@ impl<'s> SeedBuilder<'s> {
     /// slow for large files. Returns a [`SeededTorrent`] that can be
     /// exported as a `.torrent` file, converted to a magnet URI, or
     /// passed to [`SeededTorrent::seed`] to start serving.
-    pub async fn hash(self) -> Result<SeededTorrent, Error> {
+    pub async fn hash(&self) -> Result<SeededTorrent, Error> {
         // Resolve piece length
         let piece_length = resolve_piece_length(self.source.as_ref(), self.piece_length).await?;
 
@@ -156,10 +164,11 @@ impl<'s> SeedBuilder<'s> {
         let builder = hash_source(self.source.as_ref(), piece_length).await?;
 
         // Determine name
-        let name = self.name.unwrap_or_else(|| self.source.name().to_string());
+        let name = self.name.clone();
+        let name = name.unwrap_or_else(|| self.source.name().to_string());
 
         let total_length = builder.total_length();
-        let announce = self.announce.unwrap_or_default();
+        let announce = self.announce.clone().unwrap_or_default();
 
         // Build Metainfo
         let mut metainfo = builder.finish(
@@ -170,14 +179,14 @@ impl<'s> SeedBuilder<'s> {
             },
         );
 
-        if let Some(list) = self.announce_list {
-            metainfo.announce_list = list;
+        if let Some(list) = &self.announce_list {
+            metainfo.announce_list = list.clone();
         }
-        if let Some(c) = self.comment {
-            metainfo.comment = Some(c);
+        if let Some(c) = &self.comment {
+            metainfo.comment = Some(c.clone());
         }
-        if let Some(cb) = self.created_by {
-            metainfo.created_by = Some(cb);
+        if let Some(cb) = &self.created_by {
+            metainfo.created_by = Some(cb.clone());
         }
 
         // Serialize to .torrent bytes
@@ -193,12 +202,21 @@ impl<'s> SeedBuilder<'s> {
 
     /// Hash and begin seeding in one step.
     ///
-    /// Convenience wrapper around [`hash`](Self::hash) +
-    /// [`SeededTorrent::seed`]. Returns the torrent's info hash.
+    /// Consumes the builder. Internally hashes the data source via
+    /// [`hash`](Self::hash), wraps it in a [`Storage`] adapter, verifies
+    /// on-disk data against piece hashes, and activates the download loop.
     pub async fn start(self) -> Result<InfoHash, Error> {
         let session = self.session;
         let seeded = self.hash().await?;
-        seeded.seed(session).await
+        let info = seeded.metainfo().info.clone();
+
+        // Verify existing data via the source
+        let storage = DataSourceStorage::new(self.source, &info);
+        let num_pieces = info.num_pieces();
+        let mut piece_mgr = PieceManager::new(num_pieces);
+        verify_existing(&storage, &info, &mut piece_mgr).await?;
+
+        seeded.seed(session, Arc::new(storage) as Arc<dyn Storage>, piece_mgr)
     }
 }
 
@@ -225,8 +243,7 @@ impl<'s> SeedBuilder<'s> {
 /// // Print magnet link
 /// println!("{}", seeded.magnet_uri());
 ///
-/// // Start seeding
-/// seeded.seed(&session).await?;
+/// // Start seeding — use DataSourceStorage adapter\n/// // See SeedBuilder::start() for the one-step path
 /// # Ok(())
 /// # }
 /// ```
@@ -265,19 +282,26 @@ impl SeededTorrent {
 
     /// Start seeding this torrent in the given session.
     ///
-    /// Registers the torrent with the session and activates it for
-    /// seeding. The data source must still be accessible at the
-    /// original path — this method only hands off the metadata.
-    pub async fn seed(self, session: &Session) -> Result<InfoHash, Error> {
+    /// `storage` must provide read access to the data that was hashed
+    /// to create this [`SeededTorrent`]. `piece_mgr` should be populated
+    /// via disk verification before calling.
+    pub fn seed(
+        self, session: &Session, storage: Arc<dyn Storage>, piece_mgr: PieceManager,
+    ) -> Result<InfoHash, Error> {
         let info_hash = self.info_hash();
-        let spec = TorrentSpec::Metainfo(self.metainfo);
+        let metainfo = self.metainfo;
 
-        // Register (consumes spec)
-        let _builder = session.add_torrent(spec)?;
-        // Torrent is now registered with state = Registered.
-        // Full seeding activation (prepare skip + verify) will be
-        // completed in Phase 6. For now, we return the info_hash
-        // so the caller knows the torrent is registered.
+        // Register with the session
+        let _builder = session.add_torrent(TorrentSpec::Metainfo(metainfo.clone()))?;
+
+        // Activate synchronously (piece_mgr is already verified)
+        let mut torrents = session.torrents().write().unwrap();
+        match torrents.get_mut(&info_hash) {
+            Some(handle) => {
+                handle.activate_seed(metainfo, storage, piece_mgr, session.config());
+            }
+            None => return Err(Error::new(ErrorKind::InvalidInput)),
+        }
 
         Ok(info_hash)
     }
