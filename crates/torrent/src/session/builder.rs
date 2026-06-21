@@ -14,7 +14,7 @@ use crate::bencode::{decode as bencode_decode, encode as bencode_encode};
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::Metainfo;
 use crate::peer::metadata::{
-    METADATA_PIECE_SIZE, MetadataData, MetadataRequest, UT_METADATA_EXT, UT_METADATA_ID,
+    METADATA_PIECE_SIZE, Metadata, MetadataRequest, UT_METADATA_EXT, UT_METADATA_ID,
 };
 use crate::peer::{ExtensionNegotiation, PeerConnection, PeerId, PeerMessage};
 use crate::storage::{FileStorageFactory, StorageFactory};
@@ -104,8 +104,8 @@ impl<'s> TorrentBuilder<'s> {
             let Some(handle) = torrents.get(&self.info_hash) else {
                 return Err(Error::new(ErrorKind::InvalidInput));
             };
-            // Metainfo torrents have non-zero piece_length and non-empty pieces
-            handle.metainfo.info.piece_length == 0
+            // Magnet torrents have no metainfo until downloaded from peers
+            handle.metainfo.is_none()
         };
 
         if needs_resolve {
@@ -125,7 +125,7 @@ impl<'s> TorrentBuilder<'s> {
                     let mut torrents = self.session.torrents().write().unwrap();
 
                     match torrents.get_mut(&self.info_hash) {
-                        Some(handle) => handle.metainfo = new_meta,
+                        Some(handle) => handle.metainfo = Some(new_meta),
                         None => {
                             return Err(Error::new(ErrorKind::InvalidInput));
                         }
@@ -193,12 +193,24 @@ impl<'s> TorrentBuilder<'s> {
             None => return Ok(self.info_hash), // Stay Registered
         };
 
-        // 3. Get Info from registered handle
+        // 2b. If metadata is still unavailable (magnet + no peers),
+        //     stay Registered — the download loop will download metadata
+        //     once peers are discovered via DHT/tracker.
+        {
+            let torrents = self.session.torrents().read().unwrap();
+            match torrents.get(&self.info_hash) {
+                Some(handle) if handle.metainfo.is_none() => return Ok(self.info_hash),
+                Some(_) => {} // metainfo is available, proceed
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        }
+
+        // 3. Get Info from registered handle (metadata must be resolved by now)
         let info = {
             let torrents = self.session.torrents().read().unwrap();
 
             match torrents.get(&self.info_hash) {
-                Some(handle) => handle.metainfo.info.clone(),
+                Some(handle) => handle.metainfo.as_ref().unwrap().info.clone(),
                 None => {
                     return Err(Error::new(ErrorKind::InvalidInput));
                 }
@@ -286,6 +298,12 @@ async fn download_metadata_from_peer(
                     .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
                 let ext_id = neg.m.get(UT_METADATA_EXT).copied();
                 let size = neg.metadata_size.map(|s| s as u64);
+                tracing::debug!(
+                    "LTEP handshake with {}: v={:?}, metadata_size={:?}",
+                    addr,
+                    neg.v,
+                    size,
+                );
                 break (ext_id, size);
             }
             PeerMessage::KeepAlive
@@ -325,11 +343,11 @@ async fn download_metadata_from_peer(
                 let (ben, _) = bencode_decode(&dict)
                     .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
 
-                if MetadataData::is_reject(&ben) {
+                if Metadata::is_reject(&ben) {
                     return Err(Error::new(ErrorKind::PeerInvalidExtendedMessage));
                 }
 
-                let piece = MetadataData::from_bencode(&ben, raw_data)?;
+                let piece = Metadata::from_bencode(&ben, raw_data)?;
                 let offset = piece.piece as usize * piece_size;
                 let end = (offset + piece.data.len()).min(buf.len());
                 buf[offset..end].copy_from_slice(&piece.data);
@@ -359,7 +377,7 @@ mod tests {
     #[test]
     fn split_dict_with_data() {
         // Use real MetadataData to produce valid bencoded dict
-        let piece = MetadataData {
+        let piece = Metadata {
             piece: 0,
             total_size: 42,
             data: b"hello".to_vec(),
@@ -375,7 +393,7 @@ mod tests {
 
     #[test]
     fn split_empty_raw_data() {
-        let piece = MetadataData {
+        let piece = Metadata {
             piece: 0,
             total_size: 0,
             data: vec![],
