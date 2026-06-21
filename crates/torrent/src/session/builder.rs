@@ -1,7 +1,7 @@
-//! Torrent builder — configures and activates a registered torrent.
+//! Download builder — configures and activates a registered torrent.
 //!
 //! Created by [`Session::add_torrent`] (or its convenience wrappers).
-//! The torrent is registered immediately; call [`start`](TorrentBuilder::start)
+//! The torrent is registered immediately; call [`start`](DownloadBuilder::start)
 //! to create storage and begin downloading.
 
 use std::net::SocketAddr;
@@ -34,7 +34,7 @@ const MAX_METADATA_PEERS: usize = 8;
 /// # Lifecycle
 ///
 /// ```text
-/// Session::add_torrent*  →  TorrentBuilder  →  download_dir / storage  →  start  →  download loop
+/// Session::add_torrent*  →  DownloadBuilder  →  download_dir / storage  →  start  →  download loop
 ///                                              resolve_metadata (optional for magnet links)
 /// ```
 ///
@@ -56,7 +56,7 @@ const MAX_METADATA_PEERS: usize = 8;
 /// ```
 ///
 /// Holds a reference to the [`Session`] — cannot outlive it.
-pub struct TorrentBuilder<'s> {
+pub struct DownloadBuilder<'s> {
     session: &'s Session,
     pub(crate) info_hash: InfoHash,
     storage_factory: Option<Arc<dyn StorageFactory>>,
@@ -65,13 +65,13 @@ pub struct TorrentBuilder<'s> {
     magnet_peers: Vec<SocketAddr>,
 }
 
-impl<'s> TorrentBuilder<'s> {
+impl<'s> DownloadBuilder<'s> {
     /// Create a new builder. Called by [`Session::add_torrent`].
     pub(crate) fn new(
         session: &'s Session, info_hash: InfoHash, metadata_resolved: bool,
         magnet_peers: Vec<SocketAddr>,
     ) -> Self {
-        TorrentBuilder {
+        DownloadBuilder {
             session,
             info_hash,
             storage_factory: None,

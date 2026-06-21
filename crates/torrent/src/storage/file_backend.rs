@@ -11,9 +11,9 @@ use super::{BoxFuture, Storage, StorageFactory};
 /// [`StorageFactory`] that creates file-backed storage.
 ///
 /// Construct with [`FileStorageFactory::new`], passing the download
-/// directory. Use with [`TorrentBuilder::download_dir`].
+/// directory. Use with [`DownloadBuilder::download_dir`].
 ///
-/// [`TorrentBuilder::download_dir`]: crate::session::TorrentBuilder::download_dir
+/// [`DownloadBuilder::download_dir`]: crate::session::DownloadBuilder::download_dir
 ///
 /// # Examples
 ///

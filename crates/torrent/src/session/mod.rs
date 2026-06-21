@@ -19,7 +19,7 @@ mod torrent;
 mod uni_deque;
 mod upload;
 
-pub use self::builder::TorrentBuilder;
+pub use self::builder::DownloadBuilder;
 pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 
 use std::collections::HashMap;
@@ -130,14 +130,14 @@ impl Session {
 
     // ── Torrent registration (sync) ──
 
-    /// Register a torrent. Returns a [`TorrentBuilder`] for optional configuration.
+    /// Register a torrent. Returns a [`DownloadBuilder`] for optional configuration.
     ///
     /// The torrent is inserted into the session immediately (state = [`TorrentState::Registered`]).
-    /// Call [`.start()`](TorrentBuilder::start) on the builder to activate download.
+    /// Call [`.start()`](DownloadBuilder::start) on the builder to activate download.
     ///
-    /// For magnet links, call [`.resolve_metadata()`](TorrentBuilder::resolve_metadata)
+    /// For magnet links, call [`.resolve_metadata()`](DownloadBuilder::resolve_metadata)
     /// before `.start()` to inspect metadata, or let `.start()` resolve automatically.
-    pub fn add_torrent(&self, spec: impl Into<TorrentSpec>) -> Result<TorrentBuilder<'_>, Error> {
+    pub fn add_torrent(&self, spec: impl Into<TorrentSpec>) -> Result<DownloadBuilder<'_>, Error> {
         let spec = spec.into();
 
         // Extract magnet peers (BEP 9 x.pe) before consuming spec
@@ -173,7 +173,7 @@ impl Session {
             hex_encode(info_hash)
         );
 
-        Ok(TorrentBuilder::new(
+        Ok(DownloadBuilder::new(
             self,
             info_hash,
             metadata_resolved,
@@ -182,17 +182,17 @@ impl Session {
     }
 
     /// Register a torrent from raw bencoded bytes (a `.torrent` file).
-    pub fn add_torrent_bytes(&self, data: &[u8]) -> Result<TorrentBuilder<'_>, Error> {
+    pub fn add_torrent_bytes(&self, data: &[u8]) -> Result<DownloadBuilder<'_>, Error> {
         self.add_torrent(Metainfo::try_from(data)?)
     }
 
     /// Register a torrent from a magnet URI string (BEP 9).
-    pub fn add_magnet_str(&self, uri: impl AsRef<str>) -> Result<TorrentBuilder<'_>, Error> {
+    pub fn add_magnet_str(&self, uri: impl AsRef<str>) -> Result<DownloadBuilder<'_>, Error> {
         let magnet: MagnetUri = uri.as_ref().parse()?;
         self.add_torrent(magnet)
     }
 
-    // ── Accessors (for TorrentBuilder) ──
+    // ── Accessors (for DownloadBuilder) ──
 
     pub(crate) fn config(&self) -> &SessionConfig {
         &self.config

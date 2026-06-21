@@ -28,7 +28,7 @@ pub(crate) enum TorrentCommand {
 pub(crate) struct TorrentHandle {
     pub info_hash: [u8; 20],
     /// Full torrent metadata — `None` for magnet links until
-    /// [`TorrentBuilder::resolve_metadata`] downloads it from peers (BEP 9/10).
+    /// [`DownloadBuilder::resolve_metadata`] downloads it from peers (BEP 9/10).
     pub metainfo: Option<Metainfo>,
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
