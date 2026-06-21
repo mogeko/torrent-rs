@@ -1,6 +1,4 @@
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::fs;
@@ -8,7 +6,7 @@ use tokio::fs;
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Info, Mode};
 
-use super::{Storage, StorageFactory};
+use super::{BoxFuture, Storage, StorageFactory};
 
 /// [`StorageFactory`] that creates file-backed storage.
 ///
@@ -43,9 +41,7 @@ impl FileStorageFactory {
 }
 
 impl StorageFactory for FileStorageFactory {
-    fn create<'a>(
-        &'a self, info: &'a Info,
-    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Storage>, Error>> + Send + 'a>> {
+    fn create<'a>(&'a self, info: &'a Info) -> BoxFuture<'a, Arc<dyn Storage>> {
         let dir = self.download_dir.clone();
         Box::pin(async move {
             let fs = FileStorage::new(info, &dir);
@@ -133,9 +129,7 @@ impl FileStorage {
 }
 
 impl Storage for FileStorage {
-    fn read_piece<'a>(
-        &'a self, index: u32, buf: &'a mut [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+    fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             tracing::trace!("reading piece {}", index);
             let offset = self.piece_offset(index);
@@ -144,9 +138,7 @@ impl Storage for FileStorage {
         })
     }
 
-    fn write_block<'a>(
-        &'a self, piece: u32, offset: u32, data: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+    fn write_block<'a>(&'a self, piece: u32, offset: u32, data: &'a [u8]) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             tracing::trace!(
                 "writing block: piece {} offset {} ({} bytes)",
@@ -159,9 +151,7 @@ impl Storage for FileStorage {
         })
     }
 
-    fn read_block<'a>(
-        &'a self, piece: u32, offset: u32, buf: &'a mut [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             tracing::trace!(
                 "reading block: piece {} offset {} ({} bytes)",
@@ -174,7 +164,7 @@ impl Storage for FileStorage {
         })
     }
 
-    fn prepare<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+    fn prepare(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             match &self.mode {
                 StorageMode::SingleFile { path } => {

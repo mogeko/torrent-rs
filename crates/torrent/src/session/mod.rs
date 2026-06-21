@@ -14,6 +14,7 @@ mod builder;
 mod config;
 mod download;
 mod peer_manager;
+pub mod seed;
 mod torrent;
 mod uni_deque;
 mod upload;
