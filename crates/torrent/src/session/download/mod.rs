@@ -201,7 +201,11 @@ impl DownloadLoop {
             status.num_seeds = num_seeds;
             status.download_rate = download_rate;
             status.upload_rate = upload_rate;
-            if is_complete {
+            if is_complete && status.state != TorrentState::Seeding {
+                tracing::info!(
+                    "download complete, transitioning to seeding ({} pieces)",
+                    self.metainfo.info.num_pieces(),
+                );
                 status.state = TorrentState::Seeding;
             }
         }

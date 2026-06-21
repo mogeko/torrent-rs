@@ -79,6 +79,7 @@ impl DownloadLoop {
         }
 
         let previously_unchoked: Vec<SocketAddr> = um.unchoked_peers().copied().collect();
+        let choked_count = previously_unchoked.len();
         for addr in previously_unchoked {
             if !to_unchoke.contains(&addr) {
                 // Cancel outstanding requests before choking
@@ -121,6 +122,13 @@ impl DownloadLoop {
             info.uploaded_this_round = 0;
             info.downloaded_this_round = 0;
         }
+
+        tracing::debug!(
+            "choke round: {} unchoked, {} choked ({} peers total)",
+            to_unchoke.len(),
+            choked_count.saturating_sub(to_unchoke.len()),
+            self.peers.len(),
+        );
 
         Ok(())
     }

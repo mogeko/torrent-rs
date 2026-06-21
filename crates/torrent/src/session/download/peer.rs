@@ -102,6 +102,13 @@ impl DownloadLoop {
                 peer.bitfield = parse_bitfield(&bytes, num_pieces);
             }
             PeerMessage::Piece { index, begin, data } => {
+                tracing::trace!(
+                    "received {} bytes (piece {} offset {}) from {}",
+                    data.len(),
+                    index,
+                    begin,
+                    addr
+                );
                 self.storage.write_block(index, begin, &data).await?;
                 self.total_downloaded += data.len() as u64;
                 if let Some(p) = self.peers.get_mut(&addr) {
@@ -153,6 +160,13 @@ impl DownloadLoop {
 
                 if !block_data.is_empty() {
                     let uploaded = block_data.len() as u64;
+                    tracing::trace!(
+                        "sending {} bytes (piece {} offset {}) to {}",
+                        uploaded,
+                        index,
+                        begin,
+                        addr
+                    );
                     let msg = PeerMessage::Piece {
                         index,
                         begin,
