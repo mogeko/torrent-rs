@@ -34,6 +34,7 @@ use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{Metainfo, Mode};
 use crate::spec::TorrentSpec;
 
+use self::seed::{DataSource, SeedBuilder};
 use self::torrent::{TorrentCommand, TorrentHandle};
 
 /// High-level session managing all torrent downloads/uploads.
@@ -190,6 +191,34 @@ impl Session {
     pub fn add_magnet_str(&self, uri: impl AsRef<str>) -> Result<DownloadBuilder<'_>, Error> {
         let magnet: MagnetUri = uri.as_ref().parse()?;
         self.add_torrent(magnet)
+    }
+
+    // ── Seeding ──
+
+    /// Prepare to seed from a data source.
+    ///
+    /// Returns a [`SeedBuilder`] that configures metadata parameters
+    /// (piece length, tracker URL, etc.) and can either produce
+    /// a `.torrent` file via [`.hash()`](SeedBuilder::hash) or begin seeding
+    /// immediately via [`.start()`](SeedBuilder::start).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use torrent::session::{Session, SessionConfig};
+    /// let session = Session::new(SessionConfig::default()).await?;
+    ///
+    /// let info_hash = session
+    ///     .seed_from(std::path::PathBuf::from("./my_release/video.mp4"))
+    ///     .announce("http://tracker.example.com/announce")
+    ///     .start()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn seed_from(&self, source: impl DataSource + 'static) -> SeedBuilder<'_> {
+        SeedBuilder::new(self, source)
     }
 
     // ── Accessors (for DownloadBuilder) ──
