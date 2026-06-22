@@ -14,7 +14,11 @@ use std::sync::Arc;
 use crate::error::Error;
 use crate::metainfo::Info;
 
-/// Future returned by [`Storage`] and [`StorageFactory`] methods.
+/// A pinned, boxed, [`Send`]-safe future yielding `Result<T, Error>`.
+///
+/// This alias keeps async trait method signatures readable while
+/// preserving dyn-compatibility. It is re-exported by the `torrent`
+/// crate and used wherever async traits return fallible values.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 
 /// Factory trait for creating [`Storage`] backends.

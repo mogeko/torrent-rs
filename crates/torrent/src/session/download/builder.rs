@@ -17,16 +17,15 @@ use crate::peer::metadata::{
     METADATA_PIECE_SIZE, Metadata, MetadataRequest, UT_METADATA_EXT, UT_METADATA_ID,
 };
 use crate::peer::{ExtensionNegotiation, PeerConnection, PeerId, PeerMessage};
+use crate::session::{InfoHash, Session};
 use crate::storage::{FileStorageFactory, StorageFactory};
-
-use super::{InfoHash, Session};
 
 /// Maximum number of peer connection attempts for metadata download.
 const MAX_METADATA_PEERS: usize = 8;
 
 /// Builder for configuring and activating a registered torrent.
 ///
-/// Returned by [`Session::add_torrent`](super::Session::add_torrent) and its
+/// Returned by [`super::super::Session::add_torrent`] and its
 /// convenience wrappers ([`Session::add_torrent_bytes`]).  The torrent is
 /// registered immediately upon creation; call [`start`](Self::start) to
 /// create storage and begin downloading.

@@ -10,17 +10,15 @@
 //! The loop periodically connects to peers, requests blocks, verifies
 //! pieces using SHA-1, and updates the torrent status.
 
-mod builder;
 mod config;
 mod download;
 mod peer_manager;
 pub mod seed;
 mod torrent;
 mod uni_deque;
-mod upload;
 
-pub use self::builder::DownloadBuilder;
 pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
+pub use self::download::builder::DownloadBuilder;
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};

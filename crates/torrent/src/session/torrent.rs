@@ -12,9 +12,9 @@ use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 use crate::tracker::Tracker;
 
+use super::download::upload::UploadManager;
 use super::download::{DownloadLoop, PeerEvent};
 use super::peer_manager::PeerManager;
-use super::upload::UploadManager;
 use super::{SessionConfig, TorrentState, TorrentStatus};
 
 /// Commands sent to the download loop.

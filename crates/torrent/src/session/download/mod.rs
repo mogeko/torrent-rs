@@ -1,9 +1,11 @@
 mod announce;
+pub(super) mod builder;
 mod choke;
 mod peer;
 mod pex;
 mod pieces;
 pub(super) mod types;
+pub(super) mod upload;
 
 pub(crate) use types::{ActiveDownload, PeerEvent, PeerInfo};
 
@@ -22,16 +24,17 @@ use crate::piece::{PieceManager, PieceSelector};
 use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
+use super::InfoHash;
 use super::peer_manager::PeerManager;
 use super::torrent::TorrentCommand;
-use super::upload::UploadManager;
 use super::{TorrentState, TorrentStatus};
 
 use self::types::{UT_PEX, UT_PEX_ID};
+use self::upload::UploadManager;
 
 /// The core download engine for a single torrent.
 pub(crate) struct DownloadLoop {
-    pub info_hash: [u8; 20],
+    pub info_hash: InfoHash,
     pub metainfo: Metainfo,
     pub storage: Arc<dyn Storage>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
