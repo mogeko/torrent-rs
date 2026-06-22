@@ -339,6 +339,62 @@ impl Session {
     pub fn active_torrents(&self) -> Vec<InfoHash> {
         self.torrents.read().unwrap().keys().copied().collect()
     }
+
+    // ── Metadata export ──
+
+    /// Get a clone of the torrent's full [`Metainfo`].
+    ///
+    /// Works for both downloaded and seeded torrents — any torrent
+    /// whose metadata has been resolved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the info_hash is not
+    /// found or if metadata has not yet been resolved (e.g. magnet
+    /// link without downloaded metadata).
+    pub fn metainfo(&self, info_hash: &InfoHash) -> Result<Metainfo, Error> {
+        let torrents = self.torrents.read().unwrap();
+        let handle = torrents
+            .get(info_hash)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
+        let meta = handle.metainfo.clone();
+
+        meta.ok_or_else(|| Error::new(ErrorKind::InvalidInput))
+    }
+
+    /// Get the serialized `.torrent` bytes for a torrent.
+    ///
+    /// Convenience wrapper around [`metainfo`](Self::metainfo) that
+    /// calls [`Metainfo::to_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the info_hash is not
+    /// found or if metadata has not yet been resolved.
+    pub fn torrent_bytes(&self, info_hash: &InfoHash) -> Result<Vec<u8>, Error> {
+        self.metainfo(info_hash)?
+            .to_bytes()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput))
+    }
+
+    /// Generate a magnet URI for a torrent (BEP 9).
+    ///
+    /// Convenience wrapper around [`metainfo`](Self::metainfo) that
+    /// formats a `magnet:?xt=urn:btih:...` URI.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the info_hash is not
+    /// found or if metadata has not yet been resolved.
+    pub fn magnet_uri(&self, info_hash: &InfoHash) -> Result<String, Error> {
+        let meta = self.metainfo(info_hash)?;
+        let name = match &meta.info.mode {
+            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name,
+        };
+        let hex = hex_encode(meta.info_hash());
+
+        Ok(format!("magnet:?xt=urn:btih:{}&dn={name}", hex))
+    }
 }
 
 /// Extract a human-readable name from a [`TorrentHandle`].
