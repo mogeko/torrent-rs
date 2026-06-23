@@ -243,6 +243,7 @@ impl<'s> SeedBuilder<'s> {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Debug)]
 pub struct PreparedTorrent {
     source: Box<dyn DataSource>,
     metainfo: Metainfo,
