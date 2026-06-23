@@ -37,9 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = SessionConfig::default();
     let session = Session::new(config).await?;
 
-    // ── Step 3: Hash the file and produce a SeededTorrent ──
+    // ── Step 3: Hash the file and produce a PreparedTorrent ──
 
-    let seeded = session
+    let prepared = session
         .seed_from(file_path.clone())
         .piece_length(32) // Small pieces for demo
         .announce("http://tracker.example.com:6969/announce")
@@ -50,19 +50,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Step 4: Export .torrent bytes and magnet URI ──
 
     let torrent_path = dir.path().join("hello.torrent");
-    std::fs::write(&torrent_path, seeded.torrent_bytes())?;
+    std::fs::write(&torrent_path, prepared.torrent_bytes())?;
     println!("\nWritten .torrent file: {}", torrent_path.display());
-    println!("Magnet URI: {}", seeded.magnet_uri());
-    println!("Info hash:  {:02x?}", seeded.info_hash());
+    println!("Magnet URI: {}", prepared.magnet_uri());
+    println!("Info hash:  {:02x?}", prepared.info_hash());
 
     // ── Step 5: Start seeding ──
 
-    let info_hash = session
-        .seed_from(file_path)
-        .piece_length(32)
-        .announce("http://tracker.example.com:6969/announce")
-        .start()
-        .await?;
+    let info_hash = session.start_seeding(prepared).await?;
 
     // ── Step 6: Verify it's registered ──
 

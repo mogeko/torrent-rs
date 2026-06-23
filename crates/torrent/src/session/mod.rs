@@ -19,6 +19,7 @@ mod uni_deque;
 
 pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 pub use self::download::builder::DownloadBuilder;
+pub use self::seed::{DataSource, PreparedTorrent, SeedBuilder};
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -30,9 +31,11 @@ use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{Metainfo, Mode};
+use crate::piece::PieceManager;
 use crate::spec::TorrentSpec;
+use crate::storage::Storage;
 
-use self::seed::{DataSource, SeedBuilder};
+use self::seed::{DataSourceStorage, verify_existing};
 use self::torrent::{TorrentCommand, TorrentHandle};
 
 /// High-level session managing all torrent downloads/uploads.
@@ -231,6 +234,62 @@ impl Session {
     /// ```
     pub fn seed_from(&self, source: impl DataSource + 'static) -> SeedBuilder<'_> {
         SeedBuilder::new(self, source)
+    }
+
+    /// Register and activate a prepared torrent for seeding.
+    ///
+    /// `prepared` must have been produced by [`SeedBuilder::hash`].
+    /// Verifies the on-disk data against the torrent's piece hashes,
+    /// registers the torrent with the session, and activates the
+    /// download loop.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use torrent::session::{Session, SessionConfig};
+    /// let session = Session::new(SessionConfig::default()).await?;
+    ///
+    /// let prepared = session
+    ///     .seed_from(std::path::PathBuf::from("./video.mp4"))
+    ///     .announce("http://tracker.example.com/announce")
+    ///     .hash()
+    ///     .await?;
+    ///
+    /// // Export .torrent before seeding
+    /// std::fs::write("video.torrent", prepared.torrent_bytes())?;
+    ///
+    /// // Start seeding
+    /// let info_hash = session.start_seeding(prepared).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn start_seeding(&self, prepared: PreparedTorrent) -> Result<InfoHash, Error> {
+        let info = prepared.metainfo().info.clone();
+        let metainfo = prepared.metainfo().clone();
+
+        // Verify existing data via the stored source
+        let storage = DataSourceStorage::new(prepared.into_source(), &info);
+        let mut piece_mgr = PieceManager::new(info.num_pieces());
+
+        verify_existing(&storage, &info, &mut piece_mgr).await?;
+
+        let info_hash = self.register_spec(TorrentSpec::Metainfo(metainfo.clone()));
+
+        let mut torrents = self.torrents.write().unwrap();
+        match torrents.get_mut(&info_hash) {
+            Some(handle) => {
+                handle.activate_seed(
+                    metainfo,
+                    Arc::new(storage) as Arc<dyn Storage>,
+                    piece_mgr,
+                    self.config(),
+                );
+            }
+            None => return Err(Error::new(ErrorKind::InvalidInput)),
+        }
+
+        Ok(info_hash)
     }
 
     // ── Accessors (for DownloadBuilder) ──

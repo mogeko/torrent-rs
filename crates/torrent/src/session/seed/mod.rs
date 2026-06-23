@@ -9,7 +9,7 @@
 //!
 //! - [`DataSource`] — trait for reading raw bytes from any backend
 //! - [`SeedBuilder`] — configures and creates a torrent from a data source
-//! - [`SeededTorrent`] — the result of hashing, ready to export or seed
+//! - [`PreparedTorrent`] — the result of hashing, ready to export
 
 mod hash;
 pub mod source;
@@ -20,15 +20,10 @@ pub use self::source::DataSource;
 pub use self::storage_adapter::DataSourceStorage;
 pub(crate) use self::verify::verify_existing;
 
-use std::sync::Arc;
-
 use crate::error::{Error, ErrorKind};
 use crate::magnet::hex_encode;
 use crate::metainfo::{Metainfo, Mode};
-use crate::piece::PieceManager;
 use crate::session::InfoHash;
-use crate::spec::TorrentSpec;
-use crate::storage::Storage;
 
 use super::Session;
 
@@ -65,15 +60,15 @@ use self::hash::{hash_source, resolve_piece_length};
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let session = torrent::session::Session::new(Default::default()).await?;
-/// let seeded = session
+/// let torrent = session
 ///     .seed_from(std::path::PathBuf::from("./my_release/video.mp4"))
 ///     .piece_length(1 << 19)  // 512 KiB
 ///     .announce("http://tracker.example.com/announce")
 ///     .hash()
 ///     .await?;
 ///
-/// std::fs::write("my_release.torrent", seeded.torrent_bytes())?;
-/// println!("magnet: {}", seeded.magnet_uri());
+/// std::fs::write("my_release.torrent", torrent.torrent_bytes())?;
+/// println!("magnet: {}", torrent.magnet_uri());
 /// # Ok(())
 /// # }
 /// ```
@@ -150,13 +145,13 @@ impl<'s> SeedBuilder<'s> {
         self
     }
 
-    /// Hash the data source and produce a [`SeededTorrent`].
+    /// Hash the data source and produce a [`PreparedTorrent`].
     ///
-    /// This reads the **entire data source** sequentially — can be
-    /// slow for large files. Returns a [`SeededTorrent`] that can be
-    /// exported as a `.torrent` file, converted to a magnet URI, or
-    /// passed to [`SeededTorrent::seed`] to start serving.
-    pub async fn hash(&self) -> Result<SeededTorrent, Error> {
+    /// Pure computation — reads the **entire data source**
+    /// sequentially and computes SHA-1 piece hashes. Does not
+    /// interact with the session. Use [`Session::start_seeding`] to
+    /// register and start seeding.
+    pub async fn hash(self) -> Result<PreparedTorrent, Error> {
         // Resolve piece length
         let piece_length = resolve_piece_length(self.source.as_ref(), self.piece_length).await?;
 
@@ -194,7 +189,8 @@ impl<'s> SeedBuilder<'s> {
             .to_bytes()
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
 
-        Ok(SeededTorrent {
+        Ok(PreparedTorrent {
+            source: self.source,
             metainfo,
             torrent_bytes,
         })
@@ -202,21 +198,12 @@ impl<'s> SeedBuilder<'s> {
 
     /// Hash and begin seeding in one step.
     ///
-    /// Consumes the builder. Internally hashes the data source via
-    /// [`hash`](Self::hash), wraps it in a [`Storage`] adapter, verifies
-    /// on-disk data against piece hashes, and activates the download loop.
+    /// Delegates to [`hash`](Self::hash) + [`Session::start_seeding`].
     pub async fn start(self) -> Result<InfoHash, Error> {
         let session = self.session;
-        let seeded = self.hash().await?;
-        let info = seeded.metainfo().info.clone();
+        let prepared = self.hash().await?;
 
-        // Verify existing data via the source
-        let storage = DataSourceStorage::new(self.source, &info);
-        let num_pieces = info.num_pieces();
-        let mut piece_mgr = PieceManager::new(num_pieces);
-        verify_existing(&storage, &info, &mut piece_mgr).await?;
-
-        seeded.seed(session, Arc::new(storage) as Arc<dyn Storage>, piece_mgr)
+        session.start_seeding(prepared).await
     }
 }
 
@@ -224,45 +211,37 @@ impl<'s> SeedBuilder<'s> {
 ///
 /// Returned by [`SeedBuilder::hash`]. Contains the [`Metainfo`] and
 /// pre-serialized `.torrent` bytes. Can be written to disk, converted
-/// to a magnet URI, or passed to [`seed`](Self::seed) to begin serving.
+/// to a magnet URI, or passed to [`Session::start_seeding`] to begin serving.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let session = torrent::session::Session::new(Default::default()).await?;
-/// let seeded = session
+/// let torrent = session
 ///     .seed_from(std::path::PathBuf::from("./video.mp4"))
 ///     .announce("http://tracker.example.com/announce")
 ///     .hash()
 ///     .await?;
 ///
 /// // Write .torrent file
-/// std::fs::write("video.torrent", seeded.torrent_bytes())?;
+/// std::fs::write("video.torrent", torrent.torrent_bytes())?;
 ///
 /// // Print magnet link
-/// println!("{}", seeded.magnet_uri());
+/// println!("{}", torrent.magnet_uri());
 ///
-/// // Start seeding — use DataSourceStorage adapter\n/// // See SeedBuilder::start() for the one-step path
+/// // Start seeding
+/// session.start_seeding(torrent).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub struct SeededTorrent {
+pub struct PreparedTorrent {
+    source: Box<dyn DataSource>,
     metainfo: Metainfo,
     torrent_bytes: Vec<u8>,
 }
 
-impl SeededTorrent {
-    /// The 20-byte info hash.
-    pub fn info_hash(&self) -> InfoHash {
-        self.metainfo.info_hash()
-    }
-
-    /// Reference to the full torrent metadata.
-    pub fn metainfo(&self) -> &Metainfo {
-        &self.metainfo
-    }
-
+impl PreparedTorrent {
     /// Serialized `.torrent` file bytes (for writing to disk).
     pub fn torrent_bytes(&self) -> &[u8] {
         &self.torrent_bytes
@@ -280,28 +259,18 @@ impl SeededTorrent {
         format!("magnet:?xt=urn:btih:{ih}&dn={name}")
     }
 
-    /// Start seeding this torrent in the given session.
-    ///
-    /// `storage` must provide read access to the data that was hashed
-    /// to create this [`SeededTorrent`]. `piece_mgr` should be populated
-    /// via disk verification before calling.
-    pub fn seed(
-        self, session: &Session, storage: Arc<dyn Storage>, piece_mgr: PieceManager,
-    ) -> Result<InfoHash, Error> {
-        let metainfo = self.metainfo;
+    /// The 20-byte info hash.
+    pub fn info_hash(&self) -> InfoHash {
+        self.metainfo.info_hash()
+    }
 
-        // Register directly (no download builder needed)
-        let info_hash = session.register_spec(TorrentSpec::Metainfo(metainfo.clone()));
+    /// Reference to the full torrent metadata.
+    pub fn metainfo(&self) -> &Metainfo {
+        &self.metainfo
+    }
 
-        // Activate synchronously (piece_mgr is already verified)
-        let mut torrents = session.torrents().write().unwrap();
-        match torrents.get_mut(&info_hash) {
-            Some(handle) => {
-                handle.activate_seed(metainfo, storage, piece_mgr, session.config());
-            }
-            None => return Err(Error::new(ErrorKind::InvalidInput)),
-        }
-
-        Ok(info_hash)
+    /// Consume this value and return the underlying [`DataSource`].
+    pub fn into_source(self) -> Box<dyn DataSource> {
+        self.source
     }
 }
