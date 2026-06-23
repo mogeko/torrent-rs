@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "torrent"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "rand 0.10.1",
  "rustls",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "torrent-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bytes",
  "proptest",
