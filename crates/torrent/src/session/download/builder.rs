@@ -243,7 +243,7 @@ impl<'s> DownloadBuilder<'s> {
 /// Spawns parallel connection attempts via [`JoinSet`] and returns
 /// the first successful result. Remaining attempts are cancelled.
 async fn download_metadata_from_peers(
-    info_hash: [u8; 20], addrs: &[SocketAddr], our_peer_id: PeerId,
+    info_hash: InfoHash, addrs: &[SocketAddr], our_peer_id: PeerId,
 ) -> Result<Vec<u8>, Error> {
     let limit = addrs.len().min(MAX_METADATA_PEERS);
     let mut set = JoinSet::new();
@@ -271,7 +271,7 @@ async fn download_metadata_from_peers(
 
 /// Connect to a single peer and download metadata via LTEP (BEP 10) + BEP 9.
 async fn download_metadata_from_peer(
-    addr: SocketAddr, info_hash: [u8; 20], our_peer_id: PeerId,
+    addr: SocketAddr, info_hash: InfoHash, our_peer_id: PeerId,
 ) -> Result<Vec<u8>, Error> {
     // 1. TCP connect + BEP 3 handshake
     let conn = PeerConnection::connect(addr, info_hash, our_peer_id).await?;

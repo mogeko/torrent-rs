@@ -78,7 +78,13 @@ pub trait StorageFactory: Debug + Send + Sync {
 /// remains dyn-compatible.
 #[allow(clippy::type_complexity)]
 pub trait Storage: Send + Sync {
-    /// Read an entire piece into `buf`. The buffer must be exactly the piece length.
+    /// Read an entire piece into `buf`.
+    ///
+    /// The buffer must be at least the piece length for all pieces except
+    /// the last, which may be shorter (BEP 3 allows the final piece to be
+    /// truncated). Callers can use [`Info::num_pieces`] and
+    /// [`Info::total_size`] to compute the actual length of the last
+    /// piece.
     fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()>;
 
     /// Write a block (a portion of a piece) to storage.

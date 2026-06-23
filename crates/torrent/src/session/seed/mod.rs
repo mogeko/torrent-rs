@@ -288,11 +288,10 @@ impl SeededTorrent {
     pub fn seed(
         self, session: &Session, storage: Arc<dyn Storage>, piece_mgr: PieceManager,
     ) -> Result<InfoHash, Error> {
-        let info_hash = self.info_hash();
         let metainfo = self.metainfo;
 
-        // Register with the session
-        let _builder = session.add_torrent(TorrentSpec::Metainfo(metainfo.clone()))?;
+        // Register directly (no download builder needed)
+        let info_hash = session.register_spec(TorrentSpec::Metainfo(metainfo.clone()));
 
         // Activate synchronously (piece_mgr is already verified)
         let mut torrents = session.torrents().write().unwrap();

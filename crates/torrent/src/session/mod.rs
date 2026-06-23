@@ -129,6 +129,18 @@ impl Session {
 
     // ── Torrent registration (sync) ──
 
+    /// Register a torrent handle directly without a builder.
+    ///
+    /// Used by the seed path (which doesn't need `DownloadBuilder`)
+    /// and internally by [`add_torrent`](Self::add_torrent).
+    pub(crate) fn register_spec(&self, spec: impl Into<TorrentSpec>) -> InfoHash {
+        let spec = spec.into();
+        let info_hash = spec.info_hash();
+        let handle = TorrentHandle::register(spec, &self.config);
+        self.torrents.write().unwrap().insert(info_hash, handle);
+        info_hash
+    }
+
     /// Register a torrent. Returns a [`DownloadBuilder`] for optional configuration.
     ///
     /// The torrent is inserted into the session immediately (state = [`TorrentState::Registered`]).
@@ -148,23 +160,25 @@ impl Session {
         };
 
         let metadata_resolved = matches!(spec, TorrentSpec::Metainfo(_));
-        let info_hash = spec.info_hash();
 
-        // Register handle (consumes spec)
-        let handle = TorrentHandle::register(spec, &self.config);
-        let metainfo = handle.metainfo.as_ref();
-        let (name, num_pieces) = metainfo
-            .map(|m| {
-                (
-                    match &m.info.mode {
-                        Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
-                    },
-                    m.info.num_pieces().to_string(),
-                )
-            })
-            .unwrap_or_else(|| ("<unknown>".into(), "?".into()));
+        // Register (consumes spec)
+        let info_hash = self.register_spec(spec);
 
-        self.torrents.write().unwrap().insert(info_hash, handle);
+        let (name, num_pieces) = {
+            let torrents = self.torrents.read().unwrap();
+            torrents
+                .get(&info_hash)
+                .and_then(|h| h.metainfo.as_ref())
+                .map(|m| {
+                    (
+                        match &m.info.mode {
+                            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+                        },
+                        m.info.num_pieces().to_string(),
+                    )
+                })
+                .unwrap_or_else(|| ("<unknown>".into(), "?".into()))
+        };
 
         tracing::info!("torrent registered: {name} ({num_pieces} pieces)");
         tracing::debug!(
