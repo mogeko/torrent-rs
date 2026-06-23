@@ -72,10 +72,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Step 7: Retrieve metadata via Session API ──
 
-    let meta = session.metainfo(&info_hash)?;
+    let meta = session.metainfo(&info_hash).expect("metadata unavailable");
     println!("Retrieved from session: {} pieces", meta.info.num_pieces());
 
-    let magnet = session.magnet_uri(&info_hash)?;
+    let magnet = session
+        .magnet_uri(&info_hash)
+        .expect("metadata unavailable");
     println!("Magnet from session: {magnet}");
 
     Ok(())

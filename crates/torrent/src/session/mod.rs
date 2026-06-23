@@ -358,22 +358,14 @@ impl Session {
 
     /// Get a clone of the torrent's full [`Metainfo`].
     ///
-    /// Works for both downloaded and seeded torrents — any torrent
-    /// whose metadata has been resolved.
+    /// Works for both downloaded and seeded torrents.
     ///
-    /// # Errors
-    ///
-    /// Returns [`ErrorKind::InvalidInput`] if the info_hash is not
-    /// found or if metadata has not yet been resolved (e.g. magnet
-    /// link without downloaded metadata).
-    pub fn metainfo(&self, info_hash: &InfoHash) -> Result<Metainfo, Error> {
+    /// Returns `None` if the info_hash is not found or if metadata
+    /// has not yet been resolved (e.g. magnet link without downloaded
+    /// metadata).
+    pub fn metainfo(&self, info_hash: &InfoHash) -> Option<Metainfo> {
         let torrents = self.torrents.read().unwrap();
-        let handle = torrents
-            .get(info_hash)
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
-        let meta = handle.metainfo.clone();
-
-        meta.ok_or_else(|| Error::new(ErrorKind::InvalidInput))
+        torrents.get(info_hash).and_then(|h| h.metainfo.clone())
     }
 
     /// Get the serialized `.torrent` bytes for a torrent.
@@ -381,14 +373,10 @@ impl Session {
     /// Convenience wrapper around [`metainfo`](Self::metainfo) that
     /// calls [`Metainfo::to_bytes`].
     ///
-    /// # Errors
-    ///
-    /// Returns [`ErrorKind::InvalidInput`] if the info_hash is not
-    /// found or if metadata has not yet been resolved.
-    pub fn torrent_bytes(&self, info_hash: &InfoHash) -> Result<Vec<u8>, Error> {
-        self.metainfo(info_hash)?
-            .to_bytes()
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput))
+    /// Returns `None` if the info_hash is not found or if metadata
+    /// has not yet been resolved.
+    pub fn torrent_bytes(&self, info_hash: &InfoHash) -> Option<Vec<u8>> {
+        self.metainfo(info_hash)?.to_bytes()
     }
 
     /// Generate a magnet URI for a torrent (BEP 9).
@@ -396,18 +384,15 @@ impl Session {
     /// Convenience wrapper around [`metainfo`](Self::metainfo) that
     /// formats a `magnet:?xt=urn:btih:...` URI.
     ///
-    /// # Errors
-    ///
-    /// Returns [`ErrorKind::InvalidInput`] if the info_hash is not
-    /// found or if metadata has not yet been resolved.
-    pub fn magnet_uri(&self, info_hash: &InfoHash) -> Result<String, Error> {
+    /// Returns `None` if the info_hash is not found or if metadata
+    /// has not yet been resolved.
+    pub fn magnet_uri(&self, info_hash: &InfoHash) -> Option<String> {
         let meta = self.metainfo(info_hash)?;
         let name = match &meta.info.mode {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name,
         };
-        let hex = hex_encode(meta.info_hash());
-
-        Ok(format!("magnet:?xt=urn:btih:{}&dn={name}", hex))
+        let ih = hex_encode(meta.info_hash());
+        Some(format!("magnet:?xt=urn:btih:{ih}&dn={name}"))
     }
 }
 
