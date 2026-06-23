@@ -12,20 +12,19 @@
 //! - [`PreparedTorrent`] — the result of hashing, ready to export
 
 mod hash;
-pub mod source;
-mod storage_adapter;
+mod source;
+mod storage;
 mod verify;
 
 pub use self::source::DataSource;
-pub use self::storage_adapter::DataSourceStorage;
+pub(crate) use self::storage::DataSourceStorage;
 pub(crate) use self::verify::verify_existing;
 
 use crate::error::{Error, ErrorKind};
 use crate::magnet::hex_encode;
 use crate::metainfo::{Metainfo, Mode};
-use crate::session::InfoHash;
 
-use super::Session;
+use super::{InfoHash, Session};
 
 use self::hash::{hash_source, resolve_piece_length};
 

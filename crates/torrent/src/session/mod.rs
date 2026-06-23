@@ -13,7 +13,7 @@
 mod config;
 mod download;
 mod peer_manager;
-pub mod seed;
+mod seed;
 mod torrent;
 mod uni_deque;
 

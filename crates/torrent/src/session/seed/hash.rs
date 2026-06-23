@@ -4,7 +4,7 @@
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::MetainfoBuilder;
 
-use super::source::DataSource;
+use super::DataSource;
 
 /// Infer a sensible piece length from the total file size.
 ///
@@ -27,7 +27,7 @@ fn infer_piece_length(total_size: u64) -> u32 {
 /// feeding each to [`MetainfoBuilder::add_data`]. The returned
 /// [`Metainfo`] has [`RawInfo::Bytes`](crate::metainfo::RawInfo::Bytes)
 /// populated, ready for serialization.
-pub(crate) async fn hash_source(
+pub(super) async fn hash_source(
     source: &dyn DataSource, piece_length: u32,
 ) -> Result<MetainfoBuilder, Error> {
     let total = source.total_size().await?;
@@ -54,7 +54,7 @@ pub(crate) async fn hash_source(
 
 /// Determine the piece length to use, either from user override or
 /// inferred from the total size.
-pub(crate) async fn resolve_piece_length(
+pub(super) async fn resolve_piece_length(
     source: &dyn DataSource, user_override: Option<u32>,
 ) -> Result<u32, Error> {
     if let Some(pl) = user_override {

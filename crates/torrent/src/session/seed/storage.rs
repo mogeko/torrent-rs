@@ -7,8 +7,9 @@
 use std::fmt;
 
 use crate::metainfo::Info;
-use crate::session::seed::DataSource;
 use crate::storage::{BoxFuture, Storage};
+
+use super::DataSource;
 
 /// A [`Storage`] backend backed by a [`DataSource`].
 ///
@@ -17,7 +18,7 @@ use crate::storage::{BoxFuture, Storage};
 /// upload requests via the [`Storage`] trait.
 ///
 /// `write_block` and `prepare` are no-ops — the data is read-only.
-pub struct DataSourceStorage {
+pub(crate) struct DataSourceStorage {
     source: Box<dyn DataSource>,
     piece_length: u64,
     num_pieces: usize,
