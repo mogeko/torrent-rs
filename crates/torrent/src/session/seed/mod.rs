@@ -150,6 +150,10 @@ impl<'s> SeedBuilder<'s> {
     /// sequentially and computes SHA-1 piece hashes. Does not
     /// interact with the session. Use [`Session::start_seeding`] to
     /// register and start seeding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if reading from the data source fails.
     pub async fn hash(self) -> Result<PreparedTorrent, Error> {
         // Resolve piece length
         let piece_length = resolve_piece_length(self.source.as_ref(), self.piece_length).await?;
@@ -198,6 +202,11 @@ impl<'s> SeedBuilder<'s> {
     /// Hash and begin seeding in one step.
     ///
     /// Delegates to [`hash`](Self::hash) + [`Session::start_seeding`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if hashing the data source fails or if
+    /// the data on disk does not match the computed piece hashes.
     pub async fn start(self) -> Result<InfoHash, Error> {
         let session = self.session;
         let prepared = self.hash().await?;
@@ -210,7 +219,7 @@ impl<'s> SeedBuilder<'s> {
 ///
 /// Returned by [`SeedBuilder::hash`]. Contains the [`Metainfo`] and
 /// pre-serialized `.torrent` bytes. Can be written to disk, converted
-/// to a magnet URI, or passed to [`Session::start_seeding`] to begin serving.
+/// to a magnet URI, or passed to [`Session::start_seeding`] to begin seeding.
 ///
 /// # Examples
 ///

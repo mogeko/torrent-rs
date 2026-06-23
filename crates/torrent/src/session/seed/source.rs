@@ -29,7 +29,7 @@ use crate::storage::BoxFuture;
 ///
 /// ```
 /// use std::path::PathBuf;
-/// use torrent::session::seed::DataSource;
+/// use torrent::session::DataSource;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let source = PathBuf::from("./my_release/video.mp4");

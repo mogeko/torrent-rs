@@ -243,6 +243,11 @@ impl Session {
     /// registers the torrent with the session, and activates the
     /// download loop.
     ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if reading the data source fails during
+    /// piece verification against the torrent's expected hashes.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -277,17 +282,16 @@ impl Session {
         let info_hash = self.register_spec(TorrentSpec::Metainfo(metainfo.clone()));
 
         let mut torrents = self.torrents.write().unwrap();
-        match torrents.get_mut(&info_hash) {
-            Some(handle) => {
-                handle.activate_seed(
-                    metainfo,
-                    Arc::new(storage) as Arc<dyn Storage>,
-                    piece_mgr,
-                    self.config(),
-                );
-            }
-            None => return Err(Error::new(ErrorKind::InvalidInput)),
-        }
+        let handle = torrents
+            .get_mut(&info_hash)
+            .expect("torrent must be present: inserted by register_spec");
+
+        handle.activate_seed(
+            metainfo,
+            Arc::new(storage) as Arc<dyn Storage>,
+            piece_mgr,
+            self.config(),
+        );
 
         Ok(info_hash)
     }
