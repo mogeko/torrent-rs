@@ -8,7 +8,7 @@ use tokio::fs;
 use crate::error::Error;
 use crate::metainfo::{Info, Mode};
 
-use super::{BoxFuture, Storage, StorageFactory};
+use super::{IoFuture, Storage, StorageFactory};
 
 /// [`StorageFactory`] that creates file-backed storage.
 ///
@@ -43,7 +43,7 @@ impl FileStorageFactory {
 }
 
 impl StorageFactory for FileStorageFactory {
-    fn create<'a>(&'a self, info: &'a Info) -> BoxFuture<'a, Arc<dyn Storage>> {
+    fn create<'a>(&'a self, info: &'a Info) -> IoFuture<'a, Result<Arc<dyn Storage>, Error>> {
         let dir = self.download_dir.clone();
         Box::pin(async move {
             let fs = FileStorage::new(info, &dir);
@@ -248,7 +248,9 @@ impl FileStorage {
 }
 
 impl Storage for FileStorage {
-    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+    fn read_block<'a>(
+        &'a self, piece: u32, offset: u32, buf: &'a mut [u8],
+    ) -> IoFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             tracing::trace!(
                 "reading block: piece {} offset {} ({} bytes)",
@@ -261,7 +263,7 @@ impl Storage for FileStorage {
         })
     }
 
-    fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+    fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> IoFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             tracing::trace!("reading piece {}", index);
             let offset = self.piece_offset(index);
@@ -270,7 +272,9 @@ impl Storage for FileStorage {
         })
     }
 
-    fn write_block<'a>(&'a self, piece: u32, offset: u32, data: &'a [u8]) -> BoxFuture<'a, ()> {
+    fn write_block<'a>(
+        &'a self, piece: u32, offset: u32, data: &'a [u8],
+    ) -> IoFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             tracing::trace!(
                 "writing block: piece {} offset {} ({} bytes)",
@@ -283,14 +287,14 @@ impl Storage for FileStorage {
         })
     }
 
-    fn write_piece<'a>(&'a self, index: u32, data: &'a [u8]) -> BoxFuture<'a, ()> {
+    fn write_piece<'a>(&'a self, index: u32, data: &'a [u8]) -> IoFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             tracing::trace!("writing piece {} ({} bytes)", index, data.len());
             self.write_range(self.piece_offset(index), data).await
         })
     }
 
-    fn prepare(&self) -> BoxFuture<'_, ()> {
+    fn prepare(&self) -> IoFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             match &self.mode {
                 StorageMode::SingleFile { path } => {

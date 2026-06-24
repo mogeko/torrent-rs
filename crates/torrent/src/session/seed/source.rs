@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, SeekFrom};
 
-use crate::storage::BoxFuture;
+use crate::error::Error;
+use crate::storage::IoFuture;
 
 /// A source of raw file data for torrent creation and seeding.
 ///
@@ -68,8 +69,8 @@ pub trait DataSource: Send + Sync + fmt::Debug {
     /// A human-readable name for this data source.
     ///
     /// Becomes the default torrent `name` field (overridable via
-    /// [`SeedBuilder::name`]). For files, return the filename; for
-    /// remote objects, return the object key.
+    /// [`SeedBuilder::name`](super::SeedBuilder::name)). For files, return the
+    /// filename; for remote objects, return the object key.
     fn name(&self) -> &str;
 
     /// Total size of the data in bytes.
@@ -81,7 +82,7 @@ pub trait DataSource: Send + Sync + fmt::Debug {
     ///
     /// For remote backends this maps to HTTP HEAD or S3 HeadObject.
     /// Cache the result if the lookup is expensive.
-    fn total_size(&self) -> BoxFuture<'_, u64>;
+    fn total_size(&self) -> IoFuture<'_, Result<u64, Error>>;
 
     /// Read up to `buf.len()` bytes starting at `offset`.
     ///
@@ -99,7 +100,7 @@ pub trait DataSource: Send + Sync + fmt::Debug {
     ///
     /// Returns an [`I/O error`](std::io::Error) if the underlying
     /// storage fails.
-    fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> BoxFuture<'a, usize>;
+    fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> IoFuture<'a, Result<usize, Error>>;
 }
 
 // ── PathBuf implementation ──
@@ -111,14 +112,14 @@ impl DataSource for PathBuf {
             .unwrap_or("<unknown>")
     }
 
-    fn total_size(&self) -> BoxFuture<'_, u64> {
+    fn total_size(&self) -> IoFuture<'_, Result<u64, Error>> {
         Box::pin(async move {
             let meta = fs::metadata(self).await?;
             Ok(meta.len())
         })
     }
 
-    fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> BoxFuture<'a, usize> {
+    fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> IoFuture<'a, Result<usize, Error>> {
         Box::pin(async move {
             let mut file = fs::File::open(self).await?;
 
@@ -138,11 +139,11 @@ impl DataSource for Vec<u8> {
         "memory"
     }
 
-    fn total_size(&self) -> BoxFuture<'_, u64> {
+    fn total_size(&self) -> IoFuture<'_, Result<u64, Error>> {
         Box::pin(async move { Ok(self.len() as u64) })
     }
 
-    fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> BoxFuture<'a, usize> {
+    fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> IoFuture<'a, Result<usize, Error>> {
         Box::pin(async move {
             let start = offset as usize;
             if start >= self.len() {
@@ -165,12 +166,12 @@ impl DataSource for &Path {
             .unwrap_or("<unknown>")
     }
 
-    fn total_size(&self) -> BoxFuture<'_, u64> {
+    fn total_size(&self) -> IoFuture<'_, Result<u64, Error>> {
         let path = self.to_path_buf();
         Box::pin(async move { path.total_size().await })
     }
 
-    fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> BoxFuture<'a, usize> {
+    fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> IoFuture<'a, Result<usize, Error>> {
         let path = self.to_path_buf();
         Box::pin(async move { path.read_at(offset, buf).await })
     }
