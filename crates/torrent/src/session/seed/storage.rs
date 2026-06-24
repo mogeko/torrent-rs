@@ -112,3 +112,32 @@ impl Storage for DataSourceStorage {
         self.total_size
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metainfo::{Bytes, Mode, RawInfo};
+
+    #[tokio::test]
+    async fn write_piece_is_noop_for_read_only() {
+        let info = Info {
+            piece_length: 64,
+            pieces: vec![[0u8; 20]; 1],
+            mode: Mode::Single {
+                name: "test".into(),
+                length: 64,
+            },
+            raw_info: RawInfo::Bytes(Bytes::new()),
+        };
+        let source: Box<dyn DataSource> = Box::new(vec![0u8; 64]);
+        let storage = DataSourceStorage::new(source, &info);
+
+        // write_piece should succeed (no-op) without touching the source
+        storage.write_piece(0, &[0xFFu8; 64]).await.unwrap();
+
+        // read_piece should still return the original data (zeros)
+        let mut buf = vec![0xFFu8; 64];
+        storage.read_piece(0, &mut buf).await.unwrap();
+        assert_eq!(&buf[..], &[0u8; 64]);
+    }
+}

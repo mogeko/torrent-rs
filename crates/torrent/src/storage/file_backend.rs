@@ -448,4 +448,91 @@ mod tests {
         storage.read_piece(0, &mut buf).await.unwrap();
         assert_eq!(buf, data);
     }
+
+    #[tokio::test]
+    async fn test_write_piece_roundtrip_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = Info {
+            piece_length: 64,
+            pieces: vec![[0u8; 20]; 1],
+            mode: Mode::Single {
+                name: "roundtrip.bin".into(),
+                length: 64,
+            },
+            raw_info: RawInfo::Bytes(Bytes::new()),
+        };
+        let storage = FileStorage::new(&info, dir.path());
+        storage.prepare().await.unwrap();
+
+        // Write the entire piece via write_piece
+        let data = vec![0xABu8; 64];
+        storage.write_piece(0, &data).await.unwrap();
+
+        // Read back via read_piece
+        let mut buf = vec![0u8; 64];
+        storage.read_piece(0, &mut buf).await.unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[tokio::test]
+    async fn test_write_piece_then_read_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = Info {
+            piece_length: 64,
+            pieces: vec![[0u8; 20]; 1],
+            mode: Mode::Single {
+                name: "blocks.bin".into(),
+                length: 64,
+            },
+            raw_info: RawInfo::Bytes(Bytes::new()),
+        };
+        let storage = FileStorage::new(&info, dir.path());
+        storage.prepare().await.unwrap();
+
+        // Write entire piece (4 blocks of 16 bytes)
+        let data: Vec<u8> = (0..64).map(|i| i as u8).collect();
+        storage.write_piece(0, &data).await.unwrap();
+
+        // Read back individual blocks
+        for block_idx in 0..4 {
+            let mut block = vec![0u8; 16];
+            let offset = block_idx * 16;
+            storage.read_block(0, offset, &mut block).await.unwrap();
+            assert_eq!(&block[..], &data[offset as usize..][..16]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_piece_multi_file_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = Info {
+            piece_length: 64,
+            pieces: vec![[0u8; 20]; 1],
+            mode: Mode::Multiple {
+                name: "multi".into(),
+                files: vec![
+                    FileInfo {
+                        length: 32,
+                        path: vec!["a.bin".into()],
+                    },
+                    FileInfo {
+                        length: 32,
+                        path: vec!["b.bin".into()],
+                    },
+                ],
+            },
+            raw_info: RawInfo::Bytes(Bytes::new()),
+        };
+        let storage = FileStorage::new(&info, dir.path());
+        storage.prepare().await.unwrap();
+
+        // Write entires piece via write_piece (spans both files)
+        let data = vec![0xCDu8; 64];
+        storage.write_piece(0, &data).await.unwrap();
+
+        // Read back via read_piece
+        let mut buf = vec![0u8; 64];
+        storage.read_piece(0, &mut buf).await.unwrap();
+        assert_eq!(buf, data);
+    }
 }
