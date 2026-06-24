@@ -10,7 +10,22 @@ use super::DownloadLoop;
 use super::types::BLOCK_SIZE;
 
 impl DownloadLoop {
+    /// Returns `true` when we hold every piece — we are in seeding mode.
+    pub(super) async fn is_seeding(&self) -> bool {
+        let pm = self.piece_mgr.read().await;
+        pm.missing_pieces().is_empty()
+    }
+
     /// Run a choke/unchoke round: select top uploaders + optimistic unchoke.
+    ///
+    /// In download mode (BEP 3 tit-for-tat): unchoke peers that upload the
+    /// most TO us, using `downloaded_this_round` (peer → us).  Peers that
+    /// haven't sent data for >`snub_timeout` are snubbed.
+    ///
+    /// In seeding mode: unchoke peers that download the most FROM us, using
+    /// `uploaded_this_round` (us → peer).  Only peers that have sent
+    /// `Interested` are considered; the snub check is replaced by the
+    /// `peer_interested` flag.
     pub(super) async fn run_choke_unchoke(&mut self) -> Result<(), Error> {
         let max_uploads = {
             let um = self.upload_mgr.read().await;
@@ -20,13 +35,23 @@ impl DownloadLoop {
             return Ok(());
         }
 
-        // Tit-for-tat (BEP 3): unchoke peers that upload the most TO us.
-        // Use downloaded_this_round (bytes peer → us) in this round.
-        let mut peer_stats: Vec<(SocketAddr, u64)> = self
-            .peers
-            .iter()
-            .map(|(addr, info)| (*addr, info.downloaded_this_round))
-            .collect();
+        let seeding = self.is_seeding().await;
+
+        // Build a sorted peer list.
+        //  - Downloading: rank by downloaded_this_round (peer → us, BEP 3 tit-for-tat).
+        //  - Seeding:     rank by uploaded_this_round   (us → peer), only interested peers.
+        let mut peer_stats: Vec<(SocketAddr, u64)> = if seeding {
+            self.peers
+                .iter()
+                .filter(|(_, info)| info.peer_interested)
+                .map(|(addr, info)| (*addr, info.uploaded_this_round))
+                .collect()
+        } else {
+            self.peers
+                .iter()
+                .map(|(addr, info)| (*addr, info.downloaded_this_round))
+                .collect()
+        };
 
         peer_stats.sort_by_key(|(_, u)| std::cmp::Reverse(*u));
 
@@ -41,30 +66,42 @@ impl DownloadLoop {
             to_unchoke.insert(candidates[idx]);
         }
 
-        // Snubbing: remove peers idle for >snub_timeout (BEP 3)
-        let snub_timeout = self.snub_timeout;
-        to_unchoke.retain(|addr| {
-            self.peers.get(addr).is_none_or(|p| {
-                // Snub peers that haven't sent data in >60s.
-                // Never-sent peers (last_data_received = None) are also snubbed.
-                p.last_data_received
-                    .is_some_and(|t| t.elapsed() < snub_timeout)
-            })
-        });
+        if seeding {
+            // Seeding snub: retain only peers that are still interested.
+            to_unchoke.retain(|addr| self.peers.get(addr).is_some_and(|p| p.peer_interested));
 
-        // Fill remaining slots from rate-sorted list, respecting snub filter.
-        // Re-applies the snub check — otherwise a snubbed peer from peer_stats
-        // would be re-added here, undoing the retain above.
-        for (addr, _) in &peer_stats {
-            if to_unchoke.len() >= max_uploads as usize {
-                break;
+            // Refill from the sorted list (respect the same filter).
+            for (addr, _) in &peer_stats {
+                if to_unchoke.len() >= max_uploads as usize {
+                    break;
+                }
+                let interested = self.peers.get(addr).is_some_and(|p| p.peer_interested);
+                if interested {
+                    to_unchoke.insert(*addr);
+                }
             }
-            let is_active = self.peers.get(addr).is_some_and(|p| {
-                p.last_data_received
-                    .is_some_and(|t| t.elapsed() < snub_timeout)
+        } else {
+            // Download-mode snubbing: remove peers idle for >snub_timeout (BEP 3).
+            let snub_timeout = self.snub_timeout;
+            to_unchoke.retain(|addr| {
+                self.peers.get(addr).is_none_or(|p| {
+                    p.last_data_received
+                        .is_some_and(|t| t.elapsed() < snub_timeout)
+                })
             });
-            if is_active {
-                to_unchoke.insert(*addr);
+
+            // Fill remaining slots from rate-sorted list, respecting snub filter.
+            for (addr, _) in &peer_stats {
+                if to_unchoke.len() >= max_uploads as usize {
+                    break;
+                }
+                let is_active = self.peers.get(addr).is_some_and(|p| {
+                    p.last_data_received
+                        .is_some_and(|t| t.elapsed() < snub_timeout)
+                });
+                if is_active {
+                    to_unchoke.insert(*addr);
+                }
             }
         }
 
@@ -180,5 +217,68 @@ mod tests {
         assert!(to_unchoke.contains(&1));
         assert!(to_unchoke.contains(&3));
         assert!(!to_unchoke.contains(&2)); // snubbed peer stays out
+    }
+
+    // ── Seeding-mode choke/unchoke helpers ──
+
+    /// Simulate seeding-mode sort: rank by `uploaded_this_round` (us → peer),
+    /// only peers with `peer_interested = true` appear in the list.
+    fn seeding_peer_stats(
+        peers: &[(u32, bool, u64)], interested: &HashSet<u32>,
+    ) -> Vec<(u32, u64)> {
+        let mut stats: Vec<(u32, u64)> = peers
+            .iter()
+            .filter(|(addr, _, _)| interested.contains(addr))
+            .map(|(addr, _, uploaded)| (*addr, *uploaded))
+            .collect();
+        stats.sort_by_key(|(_, u)| std::cmp::Reverse(*u));
+        stats
+    }
+
+    /// Seeding snub: retain only peers that are still interested.
+    fn seeding_retain_interested(to_unchoke: &mut HashSet<u32>, interested: &HashSet<u32>) {
+        to_unchoke.retain(|addr| interested.contains(addr));
+    }
+
+    #[test]
+    fn seeding_sorts_by_uploaded_to_peer() {
+        // (addr, peer_interested, uploaded_this_round)
+        let peers = vec![(1, true, 100), (2, true, 500), (3, true, 50)];
+        let interested: HashSet<u32> = HashSet::from([1, 2, 3]);
+
+        let stats = seeding_peer_stats(&peers, &interested);
+        // Should be sorted by uploaded (us→peer): 500, 100, 50
+        assert_eq!(stats, vec![(2, 500), (1, 100), (3, 50)]);
+    }
+
+    #[test]
+    fn seeding_excludes_disinterested_peers() {
+        let peers = vec![(1, true, 100), (2, false, 500), (3, true, 50)];
+        let interested: HashSet<u32> = HashSet::from([1, 3]);
+
+        let stats = seeding_peer_stats(&peers, &interested);
+        // Peer 2 (disinterested) should not appear even with high upload.
+        assert_eq!(stats, vec![(1, 100), (3, 50)]);
+        assert!(!stats.iter().any(|(a, _)| *a == 2));
+    }
+
+    #[test]
+    fn seeding_retain_filters_disinterested() {
+        let mut to_unchoke: HashSet<u32> = HashSet::from([1, 2, 3]);
+        let interested: HashSet<u32> = HashSet::from([1, 3]);
+
+        seeding_retain_interested(&mut to_unchoke, &interested);
+        assert!(to_unchoke.contains(&1));
+        assert!(!to_unchoke.contains(&2));
+        assert!(to_unchoke.contains(&3));
+    }
+
+    #[test]
+    fn seeding_empty_peer_stats_when_none_interested() {
+        let peers = vec![(1, false, 100), (2, false, 500)];
+        let interested: HashSet<u32> = HashSet::new();
+
+        let stats = seeding_peer_stats(&peers, &interested);
+        assert!(stats.is_empty());
     }
 }

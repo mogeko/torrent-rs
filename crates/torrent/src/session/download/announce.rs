@@ -48,7 +48,9 @@ impl DownloadLoop {
         let downloaded = self.total_downloaded;
         let left = {
             let total_size = self.metainfo.info.total_size();
-            total_size.saturating_sub(self.total_downloaded)
+            let pm = self.piece_mgr.read().await;
+            let complete_bytes = (pm.progress() * total_size as f64) as u64;
+            total_size.saturating_sub(complete_bytes)
         };
 
         let mut req = AnnounceRequest::new(self.info_hash, self.peer_id, self.listen_port);

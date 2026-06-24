@@ -137,9 +137,9 @@ impl DownloadLoop {
                 }
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
                     self.handle_peer_event(addr, event).await;
-                    if let Err(e) = self.fill_pipelines().await {
-                        tracing::warn!("failed to fill pipelines: {}", e);
-                    }
+                    if !self.is_seeding().await && let Err(e) = self.fill_pipelines().await {
+                            tracing::warn!("failed to fill pipelines: {}", e);
+                        }
                 }
                 _ = status_tick.tick() => {
                     self.update_status().await;
