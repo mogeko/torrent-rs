@@ -213,6 +213,10 @@ impl SwarmLoop {
                 Some(dl) => dl.data[..piece_len].to_vec(),
                 None => return Ok(false),
             };
+
+            // Write the entire verified piece to disk in a single I/O.
+            self.storage.write_piece(index, &data).await?;
+
             {
                 let mut pm = self.piece_mgr.write().await;
                 pm.set_piece(index);

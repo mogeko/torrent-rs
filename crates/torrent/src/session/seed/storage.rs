@@ -68,6 +68,17 @@ impl fmt::Debug for DataSourceStorage {
 }
 
 impl Storage for DataSourceStorage {
+    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let global_offset = self.piece_offset(piece) + offset as u64;
+            let n = self.source.read_at(global_offset, buf).await?;
+            if n < buf.len() {
+                buf[n..].fill(0);
+            }
+            Ok(())
+        })
+    }
+
     fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let offset = self.piece_offset(index);
@@ -84,17 +95,6 @@ impl Storage for DataSourceStorage {
     fn write_block<'a>(&'a self, _piece: u32, _offset: u32, _data: &'a [u8]) -> BoxFuture<'a, ()> {
         // Seeding is read-only — writes are no-ops
         Box::pin(async { Ok(()) })
-    }
-
-    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
-            let global_offset = self.piece_offset(piece) + offset as u64;
-            let n = self.source.read_at(global_offset, buf).await?;
-            if n < buf.len() {
-                buf[n..].fill(0);
-            }
-            Ok(())
-        })
     }
 
     fn num_pieces(&self) -> usize {

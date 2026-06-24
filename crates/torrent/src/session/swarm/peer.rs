@@ -109,7 +109,6 @@ impl SwarmLoop {
                     begin,
                     addr
                 );
-                self.storage.write_block(index, begin, &data).await?;
                 self.total_downloaded += data.len() as u64;
                 if let Some(p) = self.peers.get_mut(&addr) {
                     let len = data.len() as u64;

@@ -78,6 +78,14 @@ pub trait StorageFactory: Debug + Send + Sync {
 /// remains dyn-compatible.
 #[allow(clippy::type_complexity)]
 pub trait Storage: Send + Sync {
+    /// Read a block (partial piece) without reading the entire piece.
+    ///
+    /// Used for serving upload requests. Significantly reduces I/O
+    /// compared to [`read_piece`](Storage::read_piece) when only a
+    /// single 16 KB block is needed rather than the full piece
+    /// (which can be 4 MB or more).
+    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()>;
+
     /// Read an entire piece into `buf`.
     ///
     /// The buffer must be at least the piece length for all pieces except
@@ -92,13 +100,28 @@ pub trait Storage: Send + Sync {
     /// Implements BEP 0003: The BitTorrent Protocol Specification.
     fn write_block<'a>(&'a self, piece: u32, offset: u32, data: &'a [u8]) -> BoxFuture<'a, ()>;
 
-    /// Read a block (partial piece) without reading the entire piece.
+    /// Write an entire verified piece to storage in a single operation.
     ///
-    /// Used for serving upload requests. Significantly reduces I/O
-    /// compared to [`read_piece`](Storage::read_piece) when only a
-    /// single 16 KB block is needed rather than the full piece
-    /// (which can be 4 MB or more).
-    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()>;
+    /// Called after SHA-1 verification succeeds. Implementations may
+    /// override this to use a single I/O operation per piece instead of
+    /// writing block-by-block via [`write_block`](Storage::write_block),
+    /// which can reduce write amplification by up to 256× for a 4 MB
+    /// piece.
+    ///
+    /// The default implementation splits `data` into 16 KB blocks (BEP 3
+    /// default block size) and delegates to [`write_block`](Storage::write_block).
+    /// Custom backends that can write an entire piece at once should
+    /// override this method.
+    fn write_piece<'a>(&'a self, index: u32, data: &'a [u8]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let block_size = 16 * 1024; // BEP 3 default block size
+            for (i, chunk) in data.chunks(block_size).enumerate() {
+                self.write_block(index, (i * block_size) as u32, chunk)
+                    .await?;
+            }
+            Ok(())
+        })
+    }
 
     /// Prepare storage for I/O. Called once before the download loop starts.
     ///
