@@ -18,7 +18,11 @@ async fn main() -> Result<(), torrent::error::Error> {
     let session = Session::new(config).await?;
 
     let data = std::fs::read("ubuntu-24.04.torrent")?;
-    let info_hash = session.add_torrent_bytes(&data, "./downloads").await?;
+    let info_hash = session
+        .add_torrent_bytes(&data)?
+        .download_dir("./downloads")
+        .start()
+        .await?;
 
     loop {
         let status = session.torrent_status(&info_hash).await?;
@@ -50,7 +54,7 @@ See each crate's README for module-level documentation and examples.
 
 ```bash
 cargo build                 # Build all crates
-cargo test                  # Run all 162 tests
+cargo test                  # Run all tests
 cargo clippy -- -D warnings # Lint
 ```
 

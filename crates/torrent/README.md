@@ -1,10 +1,16 @@
 # torrent
 
+[![crates.io](https://img.shields.io/crates/v/torrent)](https://crates.io/crates/torrent)
+[![CI](https://github.com/mogeko/torrent.rs/actions/workflows/build+test.yml/badge.svg)](https://github.com/mogeko/torrent.rs/actions/workflows/build+test.yml)
 [![MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
+
+> **⚠️ Development Status**: This crate is under active development.
+> The public API may change between minor versions. Pin a specific
+> version in your `Cargo.toml` to avoid breakage.
 
 **High-level user-facing BitTorrent library.** Provides async I/O, session
 management, tracker communication, and file storage — built on top of
-[`torrent-core`](../torrent-core).
+[`torrent-core`](https://crates.io/crates/torrent-core).
 
 ## Modules
 
@@ -27,7 +33,11 @@ async fn main() -> Result<(), torrent::error::Error> {
     let session = Session::new(config).await?;
 
     let data = std::fs::read("ubuntu-24.04.torrent")?;
-    let info_hash = session.add_torrent_bytes(&data, "./downloads").await?;
+    let info_hash = session
+        .add_torrent_bytes(&data)?
+        .download_dir("./downloads")
+        .start()
+        .await?;
 
     loop {
         let status = session.torrent_status(&info_hash).await?;
@@ -68,11 +78,16 @@ See the [`examples/`](./examples) directory for runnable scenario guides:
 | [`tracker_announce.rs`](./examples/tracker_announce.rs) | Query HTTP/UDP trackers for peer lists              |
 | [`dht_discovery.rs`](./examples/dht_discovery.rs)       | Discover peers via the DHT (Kademlia)               |
 | [`peer_connect.rs`](./examples/peer_connect.rs)         | Low-level peer wire protocol (handshake + messages) |
+| [`peer_pair.rs`](./examples/peer_pair.rs)               | Handshake and message exchange between two peers    |
+| [`download_torrent.rs`](./examples/download_torrent.rs) | End-to-end torrent download via Session API         |
+| [`magnet_download.rs`](./examples/magnet_download.rs)   | Parse magnet URI and download via Session           |
+| [`seed_torrent.rs`](./examples/seed_torrent.rs)         | Create a torrent from a file and seed it            |
+| [`session_manage.rs`](./examples/session_manage.rs)     | Full Session lifecycle: add, query, list, remove    |
 
 Run with:
 
 ```bash
-cargo run -p torrent --example parse_metainfo
+cargo run -p torrent --example download_torrent
 ```
 
 ## Relationship with `torrent-core`
