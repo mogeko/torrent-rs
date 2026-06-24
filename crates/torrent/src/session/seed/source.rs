@@ -13,17 +13,40 @@ use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, SeekFrom};
 
 use crate::storage::BoxFuture;
 
-/// A source of raw file data for torrent creation.
+/// A source of raw file data for torrent creation and seeding.
 ///
-/// Implementations provide sequential byte access to the data that
-/// will be hashed into pieces. The trait is object-safe and can be
-/// used with custom backends (local files, S3 objects, memory
-/// buffers, etc.).
+/// `DataSource` abstracts over anything that can provide **random
+/// access** to a byte range of known total size — local files, S3
+/// objects, HTTP resources with Range support, in-memory buffers,
+/// etc. The trait is object-safe, so you can implement it for your
+/// own storage backend.
 ///
 /// # Built-in Implementations
 ///
 /// - [`PathBuf`] — a single file on the local filesystem
+/// - `&`[`Path`] — borrowed path, delegates to [`PathBuf`]
 /// - [`Vec<u8>`] — an in-memory buffer (useful for testing)
+///
+/// # Implementing a Custom Backend
+///
+/// The trait's shape mirrors how BitTorrent works. Creating a
+/// torrent requires knowing the total size up front (the info dict
+/// includes `length`), so [`total_size`](DataSource::total_size) is
+/// called before any [`read_at`](DataSource::read_at). Serving
+/// peers requires reading arbitrary piece-aligned offsets on demand
+/// (BEP 3), so `read_at` must support **random access** — not just
+/// sequential iteration.
+///
+/// A one-shot byte stream (e.g. `futures::Stream`) cannot satisfy
+/// this: it cannot seek backwards. Buffer the stream into
+/// [`Vec<u8>`] (small data) or a temp file (large data) instead.
+/// For backends that natively support range requests (HTTP, S3),
+/// implement `read_at` by issuing a ranged GET — this maps directly
+/// to the trait's random-access contract.
+///
+/// The same `DataSource` instance is used for both hashing and
+/// seeding, shared across tokio tasks via `Arc`. Keep it alive and
+/// concurrency-safe.
 ///
 /// # Examples
 ///
@@ -44,20 +67,38 @@ use crate::storage::BoxFuture;
 pub trait DataSource: Send + Sync + fmt::Debug {
     /// A human-readable name for this data source.
     ///
-    /// This becomes the default torrent name if not overridden in
-    /// `SeedBuilder`.
+    /// Becomes the default torrent `name` field (overridable via
+    /// [`SeedBuilder::name`]). For files, return the filename; for
+    /// remote objects, return the object key.
     fn name(&self) -> &str;
 
     /// Total size of the data in bytes.
     ///
-    /// For local files this queries filesystem metadata; for remote
-    /// sources this may involve a network request (e.g. HTTP HEAD).
+    /// Called **once, before any [`read_at`](DataSource::read_at)**.
+    /// Determines the torrent's piece count and `length` field in
+    /// the info dict. Must return the exact byte size — hashing
+    /// fails if the sum of `read_at` bytes does not match.
+    ///
+    /// For remote backends this maps to HTTP HEAD or S3 HeadObject.
+    /// Cache the result if the lookup is expensive.
     fn total_size(&self) -> BoxFuture<'_, u64>;
 
     /// Read up to `buf.len()` bytes starting at `offset`.
     ///
-    /// Returns the number of bytes read. Fewer bytes than `buf.len()`
-    /// indicates EOF was reached. Returns an error on I/O failure.
+    /// Returns the number of bytes read. Fewer bytes than
+    /// `buf.len()` signals EOF; `Ok(0)` means `offset >= total_size`.
+    ///
+    /// Called from multiple tokio tasks concurrently, at arbitrary
+    /// piece-aligned offsets in any order. Do not assume sequential
+    /// iteration. The data must not change between calls.
+    ///
+    /// For backends with native range-request support (HTTP, S3),
+    /// map this directly to a ranged GET.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`I/O error`](std::io::Error) if the underlying
+    /// storage fails.
     fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> BoxFuture<'a, usize>;
 }
 
