@@ -5,10 +5,10 @@ use std::time::Instant;
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerMessage};
 
-use super::DownloadLoop;
+use super::SwarmLoop;
 use super::types::{PeerEvent, parse_bitfield};
 
-impl DownloadLoop {
+impl SwarmLoop {
     /// Handle an event from a peer reader task.
     pub(super) async fn handle_peer_event(&mut self, addr: SocketAddr, event: PeerEvent) {
         match event {

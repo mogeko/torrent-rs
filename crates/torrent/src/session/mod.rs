@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! Each added torrent spawns a [`tokio`] task that runs a download loop.
+//! Each added torrent spawns a [`tokio`] task that runs a swarm loop.
 //! The loop periodically connects to peers, requests blocks, verifies
 //! pieces using SHA-1, and updates the torrent status.
 
@@ -14,11 +14,11 @@ mod config;
 mod download;
 mod peer_manager;
 mod seed;
-mod torrent;
+mod swarm;
 mod uni_deque;
 
 pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
-pub use self::download::builder::DownloadBuilder;
+pub use self::download::DownloadBuilder;
 pub use self::seed::{DataSource, PreparedTorrent, SeedBuilder};
 
 use std::collections::HashMap;
@@ -36,7 +36,7 @@ use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 
 use self::seed::{DataSourceStorage, verify_existing};
-use self::torrent::{TorrentCommand, TorrentHandle};
+use self::swarm::handle::{TorrentCommand, TorrentHandle};
 
 /// High-level session managing all torrent downloads/uploads.
 ///

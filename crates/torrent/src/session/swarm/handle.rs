@@ -12,10 +12,9 @@ use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 use crate::tracker::Tracker;
 
-use super::download::upload::UploadManager;
-use super::download::{DownloadLoop, PeerEvent};
-use super::peer_manager::PeerManager;
-use super::{SessionConfig, TorrentState, TorrentStatus};
+use super::types::PeerEvent;
+use super::upload::UploadManager;
+use super::{PeerManager, SessionConfig, SwarmLoop, TorrentState, TorrentStatus};
 
 /// Commands sent to the download loop.
 pub(crate) enum TorrentCommand {
@@ -124,7 +123,7 @@ impl TorrentHandle {
         let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
         let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
 
-        let mut download_loop = DownloadLoop {
+        let mut swarm_loop = SwarmLoop {
             info_hash: self.info_hash,
             metainfo: metainfo.clone(),
             storage: storage.clone(),
@@ -164,7 +163,7 @@ impl TorrentHandle {
             recently_dropped: Vec::new(),
         };
 
-        let task = tokio::spawn(async move { download_loop.run().await });
+        let task = tokio::spawn(async move { swarm_loop.run().await });
 
         self.storage = Some(storage);
         self.control_tx = Some(control_tx);
@@ -205,7 +204,7 @@ impl TorrentHandle {
         let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
         let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
 
-        let mut download_loop = DownloadLoop {
+        let mut swarm_loop = SwarmLoop {
             info_hash: self.info_hash,
             metainfo,
             storage: storage.clone(),
@@ -245,7 +244,7 @@ impl TorrentHandle {
             recently_dropped: Vec::new(),
         };
 
-        let task = tokio::spawn(async move { download_loop.run().await });
+        let task = tokio::spawn(async move { swarm_loop.run().await });
 
         self.storage = Some(storage);
         self.control_tx = Some(control_tx);

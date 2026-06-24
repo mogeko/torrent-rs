@@ -3,9 +3,9 @@ use std::time::{Duration, Instant};
 use crate::error::Error;
 use crate::tracker::{AnnounceEvent, AnnounceRequest};
 
-use super::DownloadLoop;
+use super::SwarmLoop;
 
-impl DownloadLoop {
+impl SwarmLoop {
     /// Announce to the tracker if it's time.
     pub(super) async fn announce_if_needed(&mut self) {
         if self.tracker.is_none() {

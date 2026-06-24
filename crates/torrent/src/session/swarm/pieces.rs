@@ -9,10 +9,10 @@ use crate::error::Error;
 use crate::peer::PeerMessage;
 use crate::piece::EndGame;
 
-use super::DownloadLoop;
+use super::SwarmLoop;
 use super::types::{ActiveDownload, BLOCK_SIZE};
 
-impl DownloadLoop {
+impl SwarmLoop {
     /// Fill request pipelines for all peers that can accept more requests.
     pub(super) async fn fill_pipelines(&mut self) -> Result<(), Error> {
         let num_pieces = self.metainfo.info.num_pieces();

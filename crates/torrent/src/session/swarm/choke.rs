@@ -6,10 +6,10 @@ use rand::RngExt;
 use crate::error::Error;
 use crate::peer::PeerMessage;
 
-use super::DownloadLoop;
+use super::SwarmLoop;
 use super::types::BLOCK_SIZE;
 
-impl DownloadLoop {
+impl SwarmLoop {
     /// Returns `true` when we hold every piece — we are in seeding mode.
     pub(super) async fn is_seeding(&self) -> bool {
         let pm = self.piece_mgr.read().await;

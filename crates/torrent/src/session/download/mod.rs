@@ -1,289 +1,424 @@
-mod announce;
-pub(super) mod builder;
-mod choke;
-mod peer;
-mod pex;
-mod pieces;
-pub(super) mod types;
-pub(super) mod upload;
+//! Download builder — configures and activates a registered torrent.
+//!
+//! Created by [`Session::add_torrent`] (or its convenience wrappers).
+//! The torrent is registered immediately; call [`start`](DownloadBuilder::start)
+//! to create storage and begin downloading.
+//!
+//! This module is the counterpart to [`seed`](super::seed): both configure
+//! a torrent before handing it off to the shared runtime in
+//! [`swarm`](super::swarm).
 
-pub(crate) use types::{ActiveDownload, PeerEvent, PeerInfo};
-
-use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use tokio::sync::{RwLock, mpsc};
+use tokio::task::JoinSet;
 
-use crate::bencode::encode as bencode_encode;
-use crate::error::Error;
+use crate::bencode::{decode as bencode_decode, encode as bencode_encode};
+use crate::error::{Error, ErrorKind};
 use crate::metainfo::Metainfo;
-use crate::peer::{ExtensionNegotiation, PeerId, PeerMessage};
-use crate::piece::{PieceManager, PieceSelector};
-use crate::storage::Storage;
-use crate::tracker::{AnnounceEvent, Tracker};
+use crate::peer::metadata::{
+    METADATA_PIECE_SIZE, Metadata, MetadataRequest, UT_METADATA_EXT, UT_METADATA_ID,
+};
+use crate::peer::{ExtensionNegotiation, PeerConnection, PeerId, PeerMessage};
+use crate::storage::{FileStorageFactory, StorageFactory};
 
-use super::InfoHash;
-use super::peer_manager::PeerManager;
-use super::torrent::TorrentCommand;
-use super::{TorrentState, TorrentStatus};
+use super::{InfoHash, Session};
 
-use self::types::{UT_PEX, UT_PEX_ID};
-use self::upload::UploadManager;
+/// Maximum number of peer connection attempts for metadata download.
+const MAX_METADATA_PEERS: usize = 8;
 
-/// The core download engine for a single torrent.
-pub(crate) struct DownloadLoop {
-    pub info_hash: InfoHash,
-    pub metainfo: Metainfo,
-    pub storage: Arc<dyn Storage>,
-    pub piece_mgr: Arc<RwLock<PieceManager>>,
-    pub peer_mgr: Arc<RwLock<PeerManager>>,
-    pub status: Arc<RwLock<TorrentStatus>>,
-    pub control_rx: mpsc::Receiver<TorrentCommand>,
-    /// Our peer ID.
-    pub(crate) peer_id: PeerId,
-    /// TCP listen port.
-    pub(crate) listen_port: u16,
-    /// Explicit IPv4 address to announce (BEP 7).
-    pub(crate) announce_ip: Option<Ipv4Addr>,
-    /// Explicit IPv6 address to announce (BEP 7).
-    pub(crate) announce_ipv6: Option<Ipv6Addr>,
-    /// Timeout for a single block request.
-    pub(crate) request_timeout: Duration,
-    /// Maximum concurrent piece downloads.
-    pub(crate) max_concurrent_pieces: usize,
-    /// How many completed pieces to cache for upload serving.
-    pub(crate) piece_cache_size: usize,
-    /// EndGame threshold (switch when fewer pieces remain).
-    pub(crate) endgame_threshold: usize,
-    /// Choke/unchoke interval.
-    pub(crate) choke_interval: Duration,
-    /// Snub timeout for idle peers.
-    pub(crate) snub_timeout: Duration,
-    /// Corrupt block ban threshold.
-    pub(crate) corrupt_ban_threshold: u32,
-    /// Re-announce fallback interval on tracker error.
-    pub(crate) announce_fallback_interval: Duration,
-    /// Tracker client for peer discovery.
-    pub(crate) tracker: Option<Tracker>,
-    /// Next announce time.
-    pub(crate) next_announce: Option<Instant>,
-    /// Have we sent the first announce?
-    pub(crate) has_announced: bool,
-    /// Have we sent the Completed event?
-    pub(crate) announced_completed: bool,
-    /// Per-peer protocol state.
-    pub(crate) peers: HashMap<SocketAddr, PeerInfo>,
-    /// Currently active piece downloads.
-    pub(crate) active_downloads: HashMap<u32, ActiveDownload>,
-    /// Piece selection strategy (default: rarest-first).
-    pub(crate) selector: Box<dyn PieceSelector>,
-    /// Receive peer messages from reader tasks.
-    pub(crate) peer_msg_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
-    /// Clone for spawning new reader tasks.
-    pub(crate) peer_msg_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    /// Upload slot manager.
-    pub(crate) upload_mgr: Arc<RwLock<UploadManager>>,
-    /// Total bytes downloaded.
-    pub(crate) total_downloaded: u64,
-    /// Total bytes uploaded.
-    pub(crate) total_uploaded: u64,
-    /// Previous downloaded count for rate calc.
-    pub(crate) last_downloaded: u64,
-    /// Previous uploaded count for rate calc.
-    pub(crate) last_uploaded: u64,
-    /// Cached completed pieces for upload serving (avoid repeated disk reads).
-    /// Ordered by insertion time — oldest first for LRU eviction.
-    pub(crate) piece_cache: Vec<(u32, Arc<Vec<u8>>)>,
-    /// Recently disconnected peers to announce in PEX dropped field.
-    pub(crate) recently_dropped: Vec<SocketAddr>,
-    /// Enable Peer Exchange (BEP 11).
-    pub(crate) pex_enabled: bool,
-    /// PEX broadcast interval.
-    pub(crate) pex_interval: Duration,
+/// Builder for configuring and activating a registered torrent.
+///
+/// Returned by [`Session::add_torrent`](super::Session::add_torrent) and its
+/// convenience wrappers ([`Session::add_torrent_bytes`](super::Session::add_torrent_bytes)).
+/// The torrent is registered immediately upon creation; call [`start`](Self::start) to
+/// create storage and begin downloading.
+///
+/// # Lifecycle
+///
+/// ```text
+/// Session::add_torrent*  →  DownloadBuilder  →  download_dir / storage  →  start  →  swarm loop
+///                                              resolve_metadata (optional for magnet links)
+/// ```
+///
+/// # Examples
+///
+/// ```no_run
+/// # use torrent::session::{Session, SessionConfig};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let session = Session::new(SessionConfig::default()).await?;
+///
+/// let data = std::fs::read("my.torrent")?;
+/// let _info_hash = session
+///     .add_torrent_bytes(&data)?
+///     .download_dir("./downloads")
+///     .start()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Holds a reference to the [`Session`] — cannot outlive it.
+pub struct DownloadBuilder<'s> {
+    session: &'s Session,
+    pub(crate) info_hash: InfoHash,
+    storage_factory: Option<Arc<dyn StorageFactory>>,
+    metadata_resolved: bool,
+    /// Peers extracted from magnet URI x.pe (BEP 9). Injected in [`start`](Self::start).
+    magnet_peers: Vec<SocketAddr>,
 }
 
-impl DownloadLoop {
-    /// Run the main download loop — event-driven with periodic maintenance.
-    pub async fn run(&mut self) {
-        {
-            let mut status = self.status.write().await;
-            status.state = TorrentState::Downloading;
-        }
-
-        let mut status_tick = tokio::time::interval(Duration::from_secs(1));
-        let mut choke_tick = tokio::time::interval(self.choke_interval);
-        let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
-        let mut pex_tick = tokio::time::interval(self.pex_interval);
-
-        loop {
-            tokio::select! {
-                cmd = self.control_rx.recv() => {
-                    match cmd {
-                        Some(TorrentCommand::Pause) => {
-                            let mut status = self.status.write().await;
-                            status.state = TorrentState::Paused;
-                        }
-                        Some(TorrentCommand::Resume) => {
-                            let mut status = self.status.write().await;
-                            status.state = TorrentState::Downloading;
-                        }
-                        Some(TorrentCommand::Cancel) | None => {
-                            let _ = self.announce_to_tracker(AnnounceEvent::Stopped).await;
-                            break;
-                        }
-                    }
-                }
-                Some((addr, event)) = self.peer_msg_rx.recv() => {
-                    self.handle_peer_event(addr, event).await;
-                    if !self.is_seeding().await && let Err(e) = self.fill_pipelines().await {
-                            tracing::warn!("failed to fill pipelines: {}", e);
-                        }
-                }
-                _ = status_tick.tick() => {
-                    self.update_status().await;
-                    self.announce_if_needed().await;
-                    if let Err(e) = self.connect_pending().await {
-                        tracing::warn!("failed to connect pending peers: {}", e);
-                    }
-                }
-                _ = choke_tick.tick() => {
-                    if let Err(e) = self.run_choke_unchoke().await {
-                        tracing::warn!("failed to run choke/unchoke: {}", e);
-                    }
-                }
-                _ = stale_tick.tick() => {
-                    self.expire_stale_requests().await;
-                }
-                _ = pex_tick.tick() => {
-                    if self.pex_enabled {
-                        if let Err(e) = self.broadcast_pex().await {
-                            tracing::warn!("failed to broadcast PEX: {}", e);
-                        }
-                    }
-                }
-            }
+impl<'s> DownloadBuilder<'s> {
+    /// Create a new builder. Called by [`Session::add_torrent`].
+    pub(crate) fn new(
+        session: &'s Session, info_hash: InfoHash, metadata_resolved: bool,
+        magnet_peers: Vec<SocketAddr>,
+    ) -> Self {
+        DownloadBuilder {
+            session,
+            info_hash,
+            storage_factory: None,
+            metadata_resolved,
+            magnet_peers,
         }
     }
 
-    /// Update TorrentStatus with rate, progress, peers, seeding state.
-    async fn update_status(&mut self) {
-        let (progress, num_peers, download_rate, upload_rate) = {
-            let pm = self.piece_mgr.read().await;
-            let progress = pm.progress();
-            let num_peers = self.peer_mgr.read().await.num_connections();
-            let download_rate = (self.total_downloaded - self.last_downloaded) as f64;
-            let upload_rate = (self.total_uploaded - self.last_uploaded) as f64;
-            self.last_downloaded = self.total_downloaded;
-            self.last_uploaded = self.total_uploaded;
-            (progress, num_peers, download_rate, upload_rate)
-        };
-
-        let num_seeds = {
-            let num_pieces = self.metainfo.info.num_pieces();
-            self.peers
-                .values()
-                .filter(|p| {
-                    !p.bitfield.is_empty()
-                        && p.bitfield.len() >= num_pieces
-                        && p.bitfield.iter().all(|&b| b)
-                })
-                .count()
-        };
-
-        let is_complete = {
-            let pm = self.piece_mgr.read().await;
-            pm.missing_pieces().is_empty()
-        };
-
-        {
-            let mut status = self.status.write().await;
-            status.progress = progress;
-            status.num_peers = num_peers;
-            status.num_seeds = num_seeds;
-            status.download_rate = download_rate;
-            status.upload_rate = upload_rate;
-            if is_complete && status.state != TorrentState::Seeding {
-                tracing::info!(
-                    "download complete, transitioning to seeding ({} pieces)",
-                    self.metainfo.info.num_pieces(),
-                );
-                status.state = TorrentState::Seeding;
-            }
-        }
-
-        if is_complete && !self.announced_completed {
-            let _ = self.announce_to_tracker(AnnounceEvent::Completed).await;
-            self.announced_completed = true;
-        }
+    /// The 20-byte info hash of this torrent.
+    pub fn info_hash(&self) -> InfoHash {
+        self.info_hash
     }
 
-    /// Connect to pending peers (called from status tick).
-    async fn connect_pending(&mut self) -> Result<(), Error> {
-        let newly_connected = {
-            let mut pm = self.peer_mgr.write().await;
-            pm.connect_pending().await
-        };
+    // ── Metadata resolution ──
 
-        for addr in &newly_connected {
-            let conn_arc = {
-                let pm = self.peer_mgr.read().await;
-                pm.connection(addr)
+    /// Ensure full metadata is available.
+    ///
+    /// For [`Metainfo`](crate::metainfo::Metainfo) torrents this is a no-op.
+    /// For magnet links (BEP 9), downloads metadata from peers via
+    /// the LTEP extension protocol (BEP 10).
+    ///
+    /// Idempotent: safe to call multiple times.
+    pub async fn resolve_metadata(mut self) -> Result<Self, Error> {
+        if self.metadata_resolved {
+            return Ok(self);
+        }
+
+        let needs_resolve = {
+            let torrents = self.session.torrents().read().unwrap();
+            let Some(handle) = torrents.get(&self.info_hash) else {
+                return Err(Error::new(ErrorKind::InvalidInput));
             };
-            if let Some(conn_arc) = conn_arc {
-                let mut pi = PeerInfo::new();
+            // Magnet torrents have no metainfo until downloaded from peers
+            handle.metainfo.is_none()
+        };
 
-                // BEP 10: register our enabled extensions.
-                if self.pex_enabled {
-                    pi.our_extension_ids.insert(UT_PEX.to_string(), UT_PEX_ID);
-                }
+        if needs_resolve {
+            let addrs: Vec<SocketAddr> = std::mem::take(&mut self.magnet_peers);
 
-                // Send the LTEP handshake if we have any extensions to
-                // offer and the remote peer supports the protocol.
-                if !pi.our_extension_ids.is_empty() {
-                    let remote_ltep = conn_arc.remote_reserved()[5] & 0x10 != 0
-                        || conn_arc.remote_has_extension(63);
-                    if remote_ltep {
-                        self.send_extended_handshake(*addr, &pi.our_extension_ids)
-                            .await;
+            // If no peer addresses are available, skip resolution.
+            // The download loop will discover peers via DHT/tracker
+            // and can download metadata once connected.
+            if !addrs.is_empty() {
+                // Download metadata from the first reachable peer
+                let meta_bytes =
+                    download_metadata_from_peers(self.info_hash, &addrs, PeerId::random()).await?;
+
+                // Parse and update the handle
+                let new_meta = Metainfo::try_from(&meta_bytes[..])?;
+                {
+                    let mut torrents = self.session.torrents().write().unwrap();
+
+                    match torrents.get_mut(&self.info_hash) {
+                        Some(handle) => handle.metainfo = Some(new_meta),
+                        None => {
+                            return Err(Error::new(ErrorKind::InvalidInput));
+                        }
                     }
                 }
-
-                self.spawn_peer_reader(*addr, conn_arc);
-                self.peers.insert(*addr, pi);
-                self.send_bitfield(*addr).await?;
-
-                // PEX is deferred: remote_extension_ids are not known yet.
-                // They will be populated when the remote's LTEP handshake
-                // arrives via handle_ltep_handshake, which then sends the
-                // initial PEX message.
             }
         }
-        Ok(())
+
+        self.metadata_resolved = true;
+        Ok(self)
     }
 
-    /// Send our BEP 10 LTEP extension negotiation handshake.
-    async fn send_extended_handshake(&self, addr: SocketAddr, our_ids: &HashMap<String, u8>) {
-        let mut neg = ExtensionNegotiation::new();
-        for (name, &id) in our_ids {
-            neg.add_extension(name, id);
-        }
-        neg.v = Some(crate::CLIENT_VERSION.to_string());
-        let payload = bencode_encode(&neg.to_bencode());
-        let peer_mgr = self.peer_mgr.read().await;
+    // ── Storage configuration ──
 
-        if let Err(e) = peer_mgr
-            .send_to(
-                &addr,
-                &PeerMessage::Extended {
-                    ext_id: 0,
-                    data: payload,
-                },
-            )
-            .await
-        {
-            tracing::warn!("failed to send LTEP handshake to {}: {}", addr, e);
+    /// Bind a download directory. Internally creates
+    /// [`FileStorageFactory::new(dir)`](FileStorageFactory::new).
+    pub fn download_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.storage_factory = Some(Arc::new(FileStorageFactory::new(dir)));
+        self
+    }
+
+    /// Inject a custom storage factory. Overrides any previous
+    /// [`download_dir`](Self::download_dir) or [`storage`](Self::storage) call.
+    pub fn storage(mut self, factory: Arc<dyn StorageFactory>) -> Self {
+        self.storage_factory = Some(factory);
+        self
+    }
+
+    // ── Activation ──
+
+    /// Create storage and start the download/upload loop.
+    pub async fn start(mut self) -> Result<InfoHash, Error> {
+        // 0. Auto-resolve metadata if not already done
+        if !self.metadata_resolved {
+            self = self.resolve_metadata().await?;
         }
+
+        // 0b. Inject magnet x.pe addresses into peer_mgr
+        if !self.magnet_peers.is_empty() {
+            let peer_mgr = {
+                let torrents = self.session.torrents().read().unwrap();
+                torrents.get(&self.info_hash).map(|h| h.peer_mgr.clone())
+            };
+            if let Some(peer_mgr) = peer_mgr {
+                peer_mgr
+                    .write()
+                    .await
+                    .add_peers(std::mem::take(&mut self.magnet_peers));
+            }
+        }
+
+        // 1. Check active capacity (only counts torrents with running swarm loop)
+        {
+            let torrents = self.session.torrents().read().unwrap();
+            let active_count = torrents.values().filter(|h| h.task.is_some()).count();
+            let limit = self.session.config().max_active_torrents;
+            if limit > 0 && active_count >= limit {
+                return Err(Error::new(ErrorKind::InvalidInput));
+            }
+        }
+
+        // 2. Resolve factory
+        let factory = match &self.storage_factory {
+            Some(f) => f.clone(),
+            None => return Ok(self.info_hash), // Stay Registered
+        };
+
+        // 2b. If metadata is still unavailable (magnet + no peers),
+        //     stay Registered — the swarm loop will download metadata
+        //     once peers are discovered via DHT/tracker.
+        {
+            let torrents = self.session.torrents().read().unwrap();
+            match torrents.get(&self.info_hash) {
+                Some(handle) if handle.metainfo.is_none() => return Ok(self.info_hash),
+                Some(_) => {} // metainfo is available, proceed
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        }
+
+        // 3. Get Info from registered handle (metadata must be resolved by now)
+        let info = {
+            let torrents = self.session.torrents().read().unwrap();
+
+            match torrents.get(&self.info_hash) {
+                Some(handle) => handle.metainfo.as_ref().unwrap().info.clone(),
+                None => {
+                    return Err(Error::new(ErrorKind::InvalidInput));
+                }
+            }
+        };
+
+        // 4. Create storage
+        let storage = factory.create(&info).await?;
+
+        // 5. Prepare (factory-defined resource allocation)
+        storage.prepare().await?;
+
+        // 6. Activate swarm loop
+        {
+            let mut torrents = self.session.torrents().write().unwrap();
+
+            match torrents.get_mut(&self.info_hash) {
+                Some(handle) => handle.activate(storage, self.session.config()),
+                None => {
+                    return Err(Error::new(ErrorKind::InvalidInput));
+                }
+            }
+        }
+
+        Ok(self.info_hash)
+    }
+}
+
+/// Download full metainfo bytes from a magnet link peer (BEP 9/10).
+///
+/// Spawns parallel connection attempts via [`JoinSet`] and returns
+/// the first successful result. Remaining attempts are cancelled.
+async fn download_metadata_from_peers(
+    info_hash: InfoHash, addrs: &[SocketAddr], our_peer_id: PeerId,
+) -> Result<Vec<u8>, Error> {
+    let limit = addrs.len().min(MAX_METADATA_PEERS);
+    let mut set = JoinSet::new();
+
+    for &addr in &addrs[..limit] {
+        set.spawn(download_metadata_from_peer(addr, info_hash, our_peer_id));
+    }
+
+    while let Some(result) = set.join_next().await {
+        match result {
+            Ok(Ok(bytes)) => return Ok(bytes),
+            Ok(Err(e)) => {
+                tracing::debug!("peer metadata download attempt failed: {}", e);
+                continue;
+            }
+            Err(join_err) => {
+                tracing::warn!("metadata download task panicked: {}", join_err);
+                continue;
+            }
+        }
+    }
+
+    Err(Error::new(ErrorKind::PeerConnectionClosed))
+}
+
+/// Connect to a single peer and download metadata via LTEP (BEP 10) + BEP 9.
+async fn download_metadata_from_peer(
+    addr: SocketAddr, info_hash: InfoHash, our_peer_id: PeerId,
+) -> Result<Vec<u8>, Error> {
+    // 1. TCP connect + BEP 3 handshake
+    let conn = PeerConnection::connect(addr, info_hash, our_peer_id).await?;
+
+    // 2. Send LTEP handshake (ext_id 0) with ut_metadata extension
+    let mut our_neg = ExtensionNegotiation::new();
+    our_neg.add_extension(UT_METADATA_EXT, UT_METADATA_ID);
+    let handshake_data = our_neg.to_bencode();
+    let handshake_bytes = bencode_encode(&handshake_data);
+    conn.send(&PeerMessage::Extended {
+        ext_id: 0,
+        data: handshake_bytes,
+    })
+    .await?;
+
+    // 3. Receive remote LTEP handshake (skip intermediate messages)
+    let (remote_ext_id, metadata_size) = loop {
+        match conn.recv().await? {
+            PeerMessage::Extended { ext_id: 0, data } => {
+                let (ben, _) = bencode_decode(&data)
+                    .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+                let neg = ExtensionNegotiation::from_bencode(&ben)
+                    .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+                let ext_id = neg.m.get(UT_METADATA_EXT).copied();
+                let size = neg.metadata_size.map(|s| s as u64);
+                tracing::debug!(
+                    "LTEP handshake with {}: v={:?}, metadata_size={:?}",
+                    addr,
+                    neg.v,
+                    size,
+                );
+                break (ext_id, size);
+            }
+            PeerMessage::KeepAlive
+            | PeerMessage::Bitfield(_)
+            | PeerMessage::Unchoke
+            | PeerMessage::Have(_) => continue,
+            _ => return Err(Error::new(ErrorKind::PeerInvalidExtendedMessage)),
+        }
+    };
+
+    let ext_id = remote_ext_id.ok_or_else(|| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+    let total_size =
+        metadata_size.ok_or_else(|| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+
+    // 4. Calculate number of pieces
+    let num_pieces = total_size.div_ceil(METADATA_PIECE_SIZE);
+
+    // 5. Request and collect all pieces
+    let piece_size = METADATA_PIECE_SIZE as usize;
+    let mut buf = vec![0u8; total_size as usize];
+    for piece_idx in 0..num_pieces as u32 {
+        let req = MetadataRequest { piece: piece_idx };
+        let req_ben = req.to_bencode();
+        conn.send(&PeerMessage::Extended {
+            ext_id,
+            data: bencode_encode(&req_ben),
+        })
+        .await?;
+
+        let resp = conn.recv().await?;
+        match resp {
+            PeerMessage::Extended {
+                ext_id: resp_id,
+                data,
+            } if resp_id == ext_id => {
+                let (dict, raw_data) = split_bep9_data(&data)?;
+                let (ben, _) = bencode_decode(&dict)
+                    .map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+
+                if Metadata::is_reject(&ben) {
+                    return Err(Error::new(ErrorKind::PeerInvalidExtendedMessage));
+                }
+
+                let piece = Metadata::from_bencode(&ben, raw_data)?;
+                let offset = piece.piece as usize * piece_size;
+                let end = (offset + piece.data.len()).min(buf.len());
+                buf[offset..end].copy_from_slice(&piece.data);
+            }
+            _ => return Err(Error::new(ErrorKind::PeerInvalidExtendedMessage)),
+        }
+    }
+
+    Ok(buf)
+}
+
+/// Split BEP 9 extended message data into bencoded dict prefix and raw data.
+///
+/// Uses the existing bencode decoder to find the dict boundary.
+/// The remainder after the bencoded dictionary is the raw piece data.
+fn split_bep9_data(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    let (_, rest) =
+        bencode_decode(data).map_err(|_| Error::new(ErrorKind::PeerInvalidExtendedMessage))?;
+    let dict_len = data.len() - rest.len();
+    Ok((data[..dict_len].to_vec(), rest.to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_dict_with_data() {
+        // Use real MetadataData to produce valid bencoded dict
+        let piece = Metadata {
+            piece: 0,
+            total_size: 42,
+            data: b"hello".to_vec(),
+        };
+        let ben = piece.to_bencode_with_data();
+        let mut data = bencode_encode(&ben);
+        data.extend_from_slice(&piece.data);
+
+        let (parsed_dict, parsed_raw) = split_bep9_data(&data).unwrap();
+        assert_eq!(parsed_dict, bencode_encode(&ben));
+        assert_eq!(parsed_raw, piece.data);
+    }
+
+    #[test]
+    fn split_empty_raw_data() {
+        let piece = Metadata {
+            piece: 0,
+            total_size: 0,
+            data: vec![],
+        };
+        let ben = piece.to_bencode_with_data();
+        let data = bencode_encode(&ben);
+
+        let (parsed_dict, parsed_raw) = split_bep9_data(&data).unwrap();
+        assert_eq!(parsed_dict, data);
+        assert!(parsed_raw.is_empty());
+    }
+
+    #[test]
+    fn split_truncated_dict_errors() {
+        // Unterminated bencoded dict
+        let data = b"d8:msg_typei1e5:piecei0e"; // missing closing 'e'
+        assert!(split_bep9_data(data).is_err());
+    }
+
+    #[test]
+    fn split_plain_bytes_errors() {
+        assert!(split_bep9_data(b"not a dict").is_err());
     }
 }
