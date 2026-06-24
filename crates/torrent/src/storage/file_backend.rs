@@ -1,6 +1,4 @@
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::fs;
@@ -8,14 +6,14 @@ use tokio::fs;
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::{Info, Mode};
 
-use super::{Storage, StorageFactory};
+use super::{BoxFuture, Storage, StorageFactory};
 
 /// [`StorageFactory`] that creates file-backed storage.
 ///
 /// Construct with [`FileStorageFactory::new`], passing the download
-/// directory. Use with [`TorrentBuilder::download_dir`].
+/// directory. Use with [`DownloadBuilder::download_dir`].
 ///
-/// [`TorrentBuilder::download_dir`]: crate::session::TorrentBuilder::download_dir
+/// [`DownloadBuilder::download_dir`]: crate::session::DownloadBuilder::download_dir
 ///
 /// # Examples
 ///
@@ -43,9 +41,7 @@ impl FileStorageFactory {
 }
 
 impl StorageFactory for FileStorageFactory {
-    fn create<'a>(
-        &'a self, info: &'a Info,
-    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Storage>, Error>> + Send + 'a>> {
+    fn create<'a>(&'a self, info: &'a Info) -> BoxFuture<'a, Arc<dyn Storage>> {
         let dir = self.download_dir.clone();
         Box::pin(async move {
             let fs = FileStorage::new(info, &dir);
@@ -130,89 +126,7 @@ impl FileStorage {
     fn piece_offset(&self, index: u32) -> u64 {
         index as u64 * self.piece_length
     }
-}
 
-impl Storage for FileStorage {
-    fn read_piece<'a>(
-        &'a self, index: u32, buf: &'a mut [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
-        Box::pin(async move {
-            tracing::trace!("reading piece {}", index);
-            let offset = self.piece_offset(index);
-            let read_len = self.piece_len_for_index(index);
-            self.read_range(offset, read_len as usize, buf).await
-        })
-    }
-
-    fn write_block<'a>(
-        &'a self, piece: u32, offset: u32, data: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
-        Box::pin(async move {
-            tracing::trace!(
-                "writing block: piece {} offset {} ({} bytes)",
-                piece,
-                offset,
-                data.len()
-            );
-            let global_offset = self.piece_offset(piece) + offset as u64;
-            self.write_range(global_offset, data).await
-        })
-    }
-
-    fn read_block<'a>(
-        &'a self, piece: u32, offset: u32, buf: &'a mut [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
-        Box::pin(async move {
-            tracing::trace!(
-                "reading block: piece {} offset {} ({} bytes)",
-                piece,
-                offset,
-                buf.len()
-            );
-            let global_offset = self.piece_offset(piece) + offset as u64;
-            self.read_range(global_offset, buf.len(), buf).await
-        })
-    }
-
-    fn prepare<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
-        Box::pin(async move {
-            match &self.mode {
-                StorageMode::SingleFile { path } => {
-                    if let Some(parent) = path.parent() {
-                        fs::create_dir_all(parent).await?;
-                    }
-                    let f = fs::File::create_new(path).await?;
-                    f.set_len(self.total_size).await?;
-                }
-                StorageMode::MultiFile { files } => {
-                    for file in files {
-                        if let Some(parent) = file.path.parent() {
-                            fs::create_dir_all(parent).await?;
-                        }
-                        let f = fs::File::create_new(&file.path).await?;
-                        f.set_len(file.length).await?;
-                    }
-                }
-            }
-            tracing::info!(
-                "storage prepared: {} pieces, {} total bytes",
-                self.num_pieces,
-                self.total_size
-            );
-            Ok(())
-        })
-    }
-
-    fn num_pieces(&self) -> usize {
-        self.num_pieces
-    }
-
-    fn total_size(&self) -> u64 {
-        self.total_size
-    }
-}
-
-impl FileStorage {
     /// Length of the last piece may be shorter.
     fn piece_len_for_index(&self, index: u32) -> u64 {
         let idx = index as u64;
@@ -334,6 +248,80 @@ impl FileStorage {
                 Ok(())
             }
         }
+    }
+}
+
+impl Storage for FileStorage {
+    fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            tracing::trace!("reading piece {}", index);
+            let offset = self.piece_offset(index);
+            let read_len = self.piece_len_for_index(index);
+            self.read_range(offset, read_len as usize, buf).await
+        })
+    }
+
+    fn write_block<'a>(&'a self, piece: u32, offset: u32, data: &'a [u8]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            tracing::trace!(
+                "writing block: piece {} offset {} ({} bytes)",
+                piece,
+                offset,
+                data.len()
+            );
+            let global_offset = self.piece_offset(piece) + offset as u64;
+            self.write_range(global_offset, data).await
+        })
+    }
+
+    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            tracing::trace!(
+                "reading block: piece {} offset {} ({} bytes)",
+                piece,
+                offset,
+                buf.len()
+            );
+            let global_offset = self.piece_offset(piece) + offset as u64;
+            self.read_range(global_offset, buf.len(), buf).await
+        })
+    }
+
+    fn prepare(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            match &self.mode {
+                StorageMode::SingleFile { path } => {
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent).await?;
+                    }
+                    let f = fs::File::create_new(path).await?;
+                    f.set_len(self.total_size).await?;
+                }
+                StorageMode::MultiFile { files } => {
+                    for file in files {
+                        if let Some(parent) = file.path.parent() {
+                            fs::create_dir_all(parent).await?;
+                        }
+                        let f = fs::File::create_new(&file.path).await?;
+                        f.set_len(file.length).await?;
+                    }
+                }
+            }
+            tracing::info!(
+                "storage prepared: {} pieces, {} total bytes",
+                self.num_pieces,
+                self.total_size
+            );
+            Ok(())
+        })
+    }
+
+    fn num_pieces(&self) -> usize {
+        self.num_pieces
+    }
+
+    fn total_size(&self) -> u64 {
+        self.total_size
     }
 }
 

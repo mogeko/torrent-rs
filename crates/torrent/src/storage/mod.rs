@@ -14,6 +14,6 @@
 
 mod file_backend;
 
-pub use torrent_core::storage::{Storage, StorageFactory};
+pub use torrent_core::storage::{BoxFuture, Storage, StorageFactory};
 
 pub use self::file_backend::{FileStorage, FileStorageFactory};

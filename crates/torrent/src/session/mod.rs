@@ -6,20 +6,20 @@
 //!
 //! # Architecture
 //!
-//! Each added torrent spawns a [`tokio`] task that runs a download loop.
+//! Each added torrent spawns a [`tokio`] task that runs a swarm loop.
 //! The loop periodically connects to peers, requests blocks, verifies
 //! pieces using SHA-1, and updates the torrent status.
 
-mod builder;
 mod config;
 mod download;
 mod peer_manager;
-mod torrent;
+mod seed;
+mod swarm;
 mod uni_deque;
-mod upload;
 
-pub use self::builder::TorrentBuilder;
 pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
+pub use self::download::DownloadBuilder;
+pub use self::seed::{DataSource, PreparedTorrent, SeedBuilder};
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -31,9 +31,12 @@ use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{Metainfo, Mode};
+use crate::piece::PieceManager;
 use crate::spec::TorrentSpec;
+use crate::storage::Storage;
 
-use self::torrent::{TorrentCommand, TorrentHandle};
+use self::seed::{DataSourceStorage, verify_existing};
+use self::swarm::handle::{TorrentCommand, TorrentHandle};
 
 /// High-level session managing all torrent downloads/uploads.
 ///
@@ -129,14 +132,26 @@ impl Session {
 
     // ── Torrent registration (sync) ──
 
-    /// Register a torrent. Returns a [`TorrentBuilder`] for optional configuration.
+    /// Register a torrent handle directly without a builder.
+    ///
+    /// Used by the seed path (which doesn't need `DownloadBuilder`)
+    /// and internally by [`add_torrent`](Self::add_torrent).
+    pub(crate) fn register_spec(&self, spec: impl Into<TorrentSpec>) -> InfoHash {
+        let spec = spec.into();
+        let info_hash = spec.info_hash();
+        let handle = TorrentHandle::register(spec, &self.config);
+        self.torrents.write().unwrap().insert(info_hash, handle);
+        info_hash
+    }
+
+    /// Register a torrent. Returns a [`DownloadBuilder`] for optional configuration.
     ///
     /// The torrent is inserted into the session immediately (state = [`TorrentState::Registered`]).
-    /// Call [`.start()`](TorrentBuilder::start) on the builder to activate download.
+    /// Call [`.start()`](DownloadBuilder::start) on the builder to activate download.
     ///
-    /// For magnet links, call [`.resolve_metadata()`](TorrentBuilder::resolve_metadata)
+    /// For magnet links, call [`.resolve_metadata()`](DownloadBuilder::resolve_metadata)
     /// before `.start()` to inspect metadata, or let `.start()` resolve automatically.
-    pub fn add_torrent(&self, spec: impl Into<TorrentSpec>) -> Result<TorrentBuilder<'_>, Error> {
+    pub fn add_torrent(&self, spec: impl Into<TorrentSpec>) -> Result<DownloadBuilder<'_>, Error> {
         let spec = spec.into();
 
         // Extract magnet peers (BEP 9 x.pe) before consuming spec
@@ -148,23 +163,25 @@ impl Session {
         };
 
         let metadata_resolved = matches!(spec, TorrentSpec::Metainfo(_));
-        let info_hash = spec.info_hash();
 
-        // Register handle (consumes spec)
-        let handle = TorrentHandle::register(spec, &self.config);
-        let metainfo = handle.metainfo.as_ref();
-        let (name, num_pieces) = metainfo
-            .map(|m| {
-                (
-                    match &m.info.mode {
-                        Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
-                    },
-                    m.info.num_pieces().to_string(),
-                )
-            })
-            .unwrap_or_else(|| ("<unknown>".into(), "?".into()));
+        // Register (consumes spec)
+        let info_hash = self.register_spec(spec);
 
-        self.torrents.write().unwrap().insert(info_hash, handle);
+        let (name, num_pieces) = {
+            let torrents = self.torrents.read().unwrap();
+            torrents
+                .get(&info_hash)
+                .and_then(|h| h.metainfo.as_ref())
+                .map(|m| {
+                    (
+                        match &m.info.mode {
+                            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+                        },
+                        m.info.num_pieces().to_string(),
+                    )
+                })
+                .unwrap_or_else(|| ("<unknown>".into(), "?".into()))
+        };
 
         tracing::info!("torrent registered: {name} ({num_pieces} pieces)");
         tracing::debug!(
@@ -172,7 +189,7 @@ impl Session {
             hex_encode(info_hash)
         );
 
-        Ok(TorrentBuilder::new(
+        Ok(DownloadBuilder::new(
             self,
             info_hash,
             metadata_resolved,
@@ -181,17 +198,105 @@ impl Session {
     }
 
     /// Register a torrent from raw bencoded bytes (a `.torrent` file).
-    pub fn add_torrent_bytes(&self, data: &[u8]) -> Result<TorrentBuilder<'_>, Error> {
+    pub fn add_torrent_bytes(&self, data: &[u8]) -> Result<DownloadBuilder<'_>, Error> {
         self.add_torrent(Metainfo::try_from(data)?)
     }
 
     /// Register a torrent from a magnet URI string (BEP 9).
-    pub fn add_magnet_str(&self, uri: impl AsRef<str>) -> Result<TorrentBuilder<'_>, Error> {
+    pub fn add_magnet_str(&self, uri: impl AsRef<str>) -> Result<DownloadBuilder<'_>, Error> {
         let magnet: MagnetUri = uri.as_ref().parse()?;
         self.add_torrent(magnet)
     }
 
-    // ── Accessors (for TorrentBuilder) ──
+    // ── Seeding ──
+
+    /// Prepare to seed from a data source.
+    ///
+    /// Returns a [`SeedBuilder`] that configures metadata parameters
+    /// (piece length, tracker URL, etc.) and can either produce
+    /// a `.torrent` file via [`.hash()`](SeedBuilder::hash) or begin seeding
+    /// immediately via [`.start()`](SeedBuilder::start).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use torrent::session::{Session, SessionConfig};
+    /// let session = Session::new(SessionConfig::default()).await?;
+    ///
+    /// let info_hash = session
+    ///     .seed_from(std::path::PathBuf::from("./my_release/video.mp4"))
+    ///     .announce("http://tracker.example.com/announce")
+    ///     .start()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn seed_from(&self, source: impl DataSource + 'static) -> SeedBuilder<'_> {
+        SeedBuilder::new(self, source)
+    }
+
+    /// Register and activate a prepared torrent for seeding.
+    ///
+    /// `prepared` must have been produced by [`SeedBuilder::hash`].
+    /// Verifies the on-disk data against the torrent's piece hashes,
+    /// registers the torrent with the session, and activates the
+    /// download loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if reading the data source fails during
+    /// piece verification against the torrent's expected hashes.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use torrent::session::{Session, SessionConfig};
+    /// let session = Session::new(SessionConfig::default()).await?;
+    ///
+    /// let prepared = session
+    ///     .seed_from(std::path::PathBuf::from("./video.mp4"))
+    ///     .announce("http://tracker.example.com/announce")
+    ///     .hash()
+    ///     .await?;
+    ///
+    /// // Export .torrent before seeding
+    /// std::fs::write("video.torrent", prepared.torrent_bytes())?;
+    ///
+    /// // Start seeding
+    /// let info_hash = session.start_seeding(prepared).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn start_seeding(&self, prepared: PreparedTorrent) -> Result<InfoHash, Error> {
+        let info = prepared.metainfo().info.clone();
+        let metainfo = prepared.metainfo().clone();
+
+        // Verify existing data via the stored source
+        let storage = DataSourceStorage::new(prepared.into_source(), &info);
+        let mut piece_mgr = PieceManager::new(info.num_pieces());
+
+        verify_existing(&storage, &info, &mut piece_mgr).await?;
+
+        let info_hash = self.register_spec(TorrentSpec::Metainfo(metainfo.clone()));
+
+        let mut torrents = self.torrents.write().unwrap();
+        let handle = torrents
+            .get_mut(&info_hash)
+            .expect("torrent must be present: inserted by register_spec");
+
+        handle.activate_seed(
+            metainfo,
+            Arc::new(storage) as Arc<dyn Storage>,
+            piece_mgr,
+            self.config(),
+        );
+
+        Ok(info_hash)
+    }
+
+    // ── Accessors (for DownloadBuilder) ──
 
     pub(crate) fn config(&self) -> &SessionConfig {
         &self.config
@@ -310,6 +415,47 @@ impl Session {
     /// List all active info_hashes.
     pub fn active_torrents(&self) -> Vec<InfoHash> {
         self.torrents.read().unwrap().keys().copied().collect()
+    }
+
+    // ── Metadata export ──
+
+    /// Get a clone of the torrent's full [`Metainfo`].
+    ///
+    /// Works for both downloaded and seeded torrents.
+    ///
+    /// Returns `None` if the info_hash is not found or if metadata
+    /// has not yet been resolved (e.g. magnet link without downloaded
+    /// metadata).
+    pub fn metainfo(&self, info_hash: &InfoHash) -> Option<Metainfo> {
+        let torrents = self.torrents.read().unwrap();
+        torrents.get(info_hash).and_then(|h| h.metainfo.clone())
+    }
+
+    /// Get the serialized `.torrent` bytes for a torrent.
+    ///
+    /// Convenience wrapper around [`metainfo`](Self::metainfo) that
+    /// calls [`Metainfo::to_bytes`].
+    ///
+    /// Returns `None` if the info_hash is not found or if metadata
+    /// has not yet been resolved.
+    pub fn torrent_bytes(&self, info_hash: &InfoHash) -> Option<Vec<u8>> {
+        self.metainfo(info_hash)?.to_bytes()
+    }
+
+    /// Generate a magnet URI for a torrent (BEP 9).
+    ///
+    /// Convenience wrapper around [`metainfo`](Self::metainfo) that
+    /// formats a `magnet:?xt=urn:btih:...` URI.
+    ///
+    /// Returns `None` if the info_hash is not found or if metadata
+    /// has not yet been resolved.
+    pub fn magnet_uri(&self, info_hash: &InfoHash) -> Option<String> {
+        let meta = self.metainfo(info_hash)?;
+        let name = match &meta.info.mode {
+            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name,
+        };
+        let ih = hex_encode(meta.info_hash());
+        Some(format!("magnet:?xt=urn:btih:{ih}&dn={name}"))
     }
 }
 

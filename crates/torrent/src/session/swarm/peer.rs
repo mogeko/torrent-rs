@@ -5,10 +5,10 @@ use std::time::Instant;
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerMessage};
 
-use super::DownloadLoop;
+use super::SwarmLoop;
 use super::types::{PeerEvent, parse_bitfield};
 
-impl DownloadLoop {
+impl SwarmLoop {
     /// Handle an event from a peer reader task.
     pub(super) async fn handle_peer_event(&mut self, addr: SocketAddr, event: PeerEvent) {
         match event {
@@ -102,6 +102,13 @@ impl DownloadLoop {
                 peer.bitfield = parse_bitfield(&bytes, num_pieces);
             }
             PeerMessage::Piece { index, begin, data } => {
+                tracing::trace!(
+                    "received {} bytes (piece {} offset {}) from {}",
+                    data.len(),
+                    index,
+                    begin,
+                    addr
+                );
                 self.storage.write_block(index, begin, &data).await?;
                 self.total_downloaded += data.len() as u64;
                 if let Some(p) = self.peers.get_mut(&addr) {
@@ -153,6 +160,13 @@ impl DownloadLoop {
 
                 if !block_data.is_empty() {
                     let uploaded = block_data.len() as u64;
+                    tracing::trace!(
+                        "sending {} bytes (piece {} offset {}) to {}",
+                        uploaded,
+                        index,
+                        begin,
+                        addr
+                    );
                     let msg = PeerMessage::Piece {
                         index,
                         begin,
@@ -212,14 +226,17 @@ impl DownloadLoop {
         });
     }
 
-    /// Send our bitfield and Interested to a newly connected peer.
+    /// Send our bitfield (and Interested if we don't yet have all pieces)
+    /// to a newly connected peer.
     pub(super) async fn send_bitfield(&self, addr: SocketAddr) -> Result<(), Error> {
         let piece_mgr = self.piece_mgr.clone();
         let peer_mgr = self.peer_mgr.clone();
 
-        let bf_bytes = {
+        let (bf_bytes, have_all) = {
             let pm = piece_mgr.read().await;
-            pm.to_bitfield()
+            let bf = pm.to_bitfield();
+            let have_all = pm.missing_pieces().is_empty();
+            (bf, have_all)
         };
         let pm = peer_mgr.read().await;
         // BEP 3: the bitfield message is optional and SHOULD NOT be sent
@@ -227,7 +244,10 @@ impl DownloadLoop {
         if bf_bytes.iter().any(|&b| b != 0) {
             pm.send_to(&addr, &PeerMessage::Bitfield(bf_bytes)).await?;
         }
-        pm.send_to(&addr, &PeerMessage::Interested).await?;
+        // BEP 3: only send Interested when we actually need pieces.
+        if !have_all {
+            pm.send_to(&addr, &PeerMessage::Interested).await?;
+        }
         Ok(())
     }
 }

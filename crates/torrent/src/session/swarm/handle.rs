@@ -12,10 +12,9 @@ use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 use crate::tracker::Tracker;
 
-use super::download::{DownloadLoop, PeerEvent};
-use super::peer_manager::PeerManager;
+use super::types::PeerEvent;
 use super::upload::UploadManager;
-use super::{SessionConfig, TorrentState, TorrentStatus};
+use super::{PeerManager, SessionConfig, SwarmLoop, TorrentState, TorrentStatus};
 
 /// Commands sent to the download loop.
 pub(crate) enum TorrentCommand {
@@ -28,7 +27,7 @@ pub(crate) enum TorrentCommand {
 pub(crate) struct TorrentHandle {
     pub info_hash: [u8; 20],
     /// Full torrent metadata — `None` for magnet links until
-    /// [`TorrentBuilder::resolve_metadata`] downloads it from peers (BEP 9/10).
+    /// [`DownloadBuilder::resolve_metadata`] downloads it from peers (BEP 9/10).
     pub metainfo: Option<Metainfo>,
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
@@ -124,7 +123,7 @@ impl TorrentHandle {
         let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
         let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
 
-        let mut download_loop = DownloadLoop {
+        let mut swarm_loop = SwarmLoop {
             info_hash: self.info_hash,
             metainfo: metainfo.clone(),
             storage: storage.clone(),
@@ -164,7 +163,88 @@ impl TorrentHandle {
             recently_dropped: Vec::new(),
         };
 
-        let task = tokio::spawn(async move { download_loop.run().await });
+        let task = tokio::spawn(async move { swarm_loop.run().await });
+
+        self.storage = Some(storage);
+        self.control_tx = Some(control_tx);
+        self.task = Some(task);
+    }
+
+    /// Activate for seeding — accept pre-verified piece state.
+    ///
+    /// Unlike [`activate`](Self::activate), this does NOT call
+    /// [`Storage::prepare`] — the files must already exist on disk.
+    /// The caller must have already verified on-disk data and populated
+    /// `piece_mgr`.
+    pub(crate) fn activate_seed(
+        &mut self, metainfo: Metainfo, storage: Arc<dyn Storage>, piece_mgr: PieceManager,
+        config: &SessionConfig,
+    ) {
+        let name = match &metainfo.info.mode {
+            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+        };
+
+        assert_eq!(
+            metainfo.info_hash(),
+            self.info_hash,
+            "metainfo info_hash mismatch"
+        );
+
+        self.metainfo = Some(metainfo.clone());
+        self.piece_mgr = Arc::new(RwLock::new(piece_mgr));
+
+        let num_pieces = metainfo.info.num_pieces();
+        tracing::info!("torrent activated for seeding: {name} ({num_pieces} pieces)");
+
+        let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
+        let (peer_msg_tx, peer_msg_rx) =
+            mpsc::channel::<(SocketAddr, PeerEvent)>(config.peer_msg_buffer_size);
+
+        let peer_id = PeerId::random();
+        let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
+        let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
+
+        let mut swarm_loop = SwarmLoop {
+            info_hash: self.info_hash,
+            metainfo,
+            storage: storage.clone(),
+            piece_mgr: self.piece_mgr.clone(),
+            peer_mgr: self.peer_mgr.clone(),
+            status: self.status.clone(),
+            control_rx,
+            peer_id,
+            listen_port: config.listen_port,
+            announce_ip: config.announce_ip,
+            announce_ipv6: config.announce_ipv6,
+            request_timeout: config.request_timeout,
+            max_concurrent_pieces: config.max_concurrent_pieces,
+            piece_cache_size: config.piece_cache_size,
+            endgame_threshold: config.endgame_threshold,
+            choke_interval: config.choke_interval,
+            snub_timeout: config.snub_timeout,
+            corrupt_ban_threshold: config.corrupt_ban_threshold,
+            announce_fallback_interval: config.announce_fallback_interval,
+            pex_enabled: config.pex_enabled,
+            pex_interval: config.pex_interval,
+            tracker,
+            next_announce: None,
+            has_announced: false,
+            announced_completed: false,
+            peers: HashMap::new(),
+            active_downloads: HashMap::new(),
+            selector: Box::new(RarestFirst),
+            peer_msg_rx,
+            peer_msg_tx,
+            upload_mgr,
+            total_downloaded: 0,
+            total_uploaded: 0,
+            last_downloaded: 0,
+            last_uploaded: 0,
+            piece_cache: Vec::new(),
+            recently_dropped: Vec::new(),
+        };
+
+        let task = tokio::spawn(async move { swarm_loop.run().await });
 
         self.storage = Some(storage);
         self.control_tx = Some(control_tx);

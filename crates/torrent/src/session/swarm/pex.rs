@@ -6,10 +6,10 @@ use crate::error::{Error, ErrorKind};
 use crate::peer::pex::PexMessage;
 use crate::peer::{ExtensionNegotiation, PeerMessage};
 
-use super::DownloadLoop;
+use super::SwarmLoop;
 use super::types::{PIPELINE_SIZE, UT_PEX};
 
-impl DownloadLoop {
+impl SwarmLoop {
     /// Handle the remote peer's BEP 10 LTEP extension negotiation handshake.
     ///
     /// Parses the remote's [`ExtensionNegotiation`] dictionary, stores the

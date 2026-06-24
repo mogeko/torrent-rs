@@ -24,11 +24,14 @@
 //! println!("Pieces: {}", meta.info.num_pieces());
 //! ```
 
+pub mod builder;
 mod parse;
 
 // Re-export Bytes so callers can construct `RawInfo::Bytes(...)` without
 // adding `bytes` as a direct dependency.
 pub use crate::bencode::Bytes;
+
+pub use self::builder::MetainfoBuilder;
 
 use sha1::{Digest, Sha1};
 
