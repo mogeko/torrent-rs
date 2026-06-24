@@ -1,9 +1,11 @@
+use std::fs::{File, OpenOptions};
+use std::io::{Error as IoError, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::fs;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::Error;
 use crate::metainfo::{Info, Mode};
 
 use super::{BoxFuture, Storage, StorageFactory};
@@ -143,26 +145,25 @@ impl FileStorage {
 
     /// Read a byte range from the file(s).
     ///
-    /// Uses `tokio::task::spawn_blocking` to keep POSIX `pread` syscalls
-    /// off the tokio worker threads. Data is first read into a heap-allocated
-    /// buffer inside the blocking pool, then copied into the caller's `buf`.
+    /// Uses `tokio::task::spawn_blocking` to keep blocking I/O off the
+    /// tokio worker threads. Opens the file, seeks to the offset, then
+    /// reads the data. Data is first read into a heap-allocated buffer
+    /// inside the blocking pool, then copied into the caller's `buf`.
     async fn read_range(&self, offset: u64, len: usize, buf: &mut [u8]) -> Result<(), Error> {
         match &self.mode {
             StorageMode::SingleFile { path } => {
                 let path = path.clone();
                 let data = tokio::task::spawn_blocking(move || {
-                    let f = std::fs::File::open(&path)?;
+                    let mut f = File::open(&path)?;
                     let mut local = vec![0u8; len];
-                    std::os::unix::fs::FileExt::read_exact_at(&f, &mut local, offset)?;
-                    Ok::<Vec<u8>, std::io::Error>(local)
+
+                    f.seek(SeekFrom::Start(offset))?;
+                    f.read_exact(&mut local)?;
+
+                    Ok::<Vec<u8>, IoError>(local)
                 })
                 .await
-                .map_err(|e| {
-                    Error::with_source(
-                        ErrorKind::Io,
-                        std::io::Error::other(format!("storage read task panicked: {}", e)),
-                    )
-                })??;
+                .map_err(|e| Error::io(format!("storage read task panicked: {}", e)))??;
                 buf[..data.len()].copy_from_slice(&data);
                 Ok(())
             }
@@ -177,18 +178,16 @@ impl FileStorage {
                     }
                     let path = path.clone();
                     let data = tokio::task::spawn_blocking(move || {
-                        let f = std::fs::File::open(&path)?;
+                        let mut f = File::open(&path)?;
                         let mut local = vec![0u8; actual_len];
-                        std::os::unix::fs::FileExt::read_exact_at(&f, &mut local, file_offset)?;
-                        Ok::<Vec<u8>, std::io::Error>(local)
+
+                        f.seek(SeekFrom::Start(file_offset))?;
+                        f.read_exact(&mut local)?;
+
+                        Ok::<Vec<u8>, IoError>(local)
                     })
                     .await
-                    .map_err(|e| {
-                        Error::with_source(
-                            ErrorKind::Io,
-                            std::io::Error::other(format!("storage read task panicked: {}", e)),
-                        )
-                    })??;
+                    .map_err(|e| Error::io(format!("storage read task panicked: {}", e)))??;
                     buf[buf_offset..end].copy_from_slice(&data);
                     buf_offset += read_len as usize;
                 }
@@ -199,26 +198,25 @@ impl FileStorage {
 
     /// Write a byte range to the file(s).
     ///
-    /// Uses `tokio::task::spawn_blocking` to keep POSIX `pwrite` syscalls
-    /// off the tokio worker threads. Data is first copied into a heap-allocated
-    /// buffer, then written inside the blocking pool.
+    /// Uses `tokio::task::spawn_blocking` to keep blocking I/O off the
+    /// tokio worker threads. Opens the file, seeks to the offset, then
+    /// writes the data. Data is first copied into a heap-allocated buffer,
+    /// then written inside the blocking pool.
     async fn write_range(&self, offset: u64, data: &[u8]) -> Result<(), Error> {
         match &self.mode {
             StorageMode::SingleFile { path } => {
                 let path = path.clone();
                 let data = data.to_vec();
                 tokio::task::spawn_blocking(move || {
-                    let f = std::fs::OpenOptions::new().write(true).open(&path)?;
-                    std::os::unix::fs::FileExt::write_all_at(&f, &data, offset)?;
-                    Ok::<(), std::io::Error>(())
+                    let mut f = OpenOptions::new().write(true).open(&path)?;
+
+                    f.seek(SeekFrom::Start(offset))?;
+                    f.write_all(&data)?;
+
+                    Ok::<(), IoError>(())
                 })
                 .await
-                .map_err(|e| {
-                    Error::with_source(
-                        ErrorKind::Io,
-                        std::io::Error::other(format!("storage write task panicked: {}", e)),
-                    )
-                })??;
+                .map_err(|e| Error::io(format!("storage write task panicked: {}", e)))??;
                 Ok(())
             }
             StorageMode::MultiFile { files } => {
@@ -232,17 +230,15 @@ impl FileStorage {
                     let path = path.clone();
                     let chunk = data[data_offset..end].to_vec();
                     tokio::task::spawn_blocking(move || {
-                        let f = std::fs::OpenOptions::new().write(true).open(&path)?;
-                        std::os::unix::fs::FileExt::write_all_at(&f, &chunk, file_offset)?;
-                        Ok::<(), std::io::Error>(())
+                        let mut f = OpenOptions::new().write(true).open(&path)?;
+
+                        f.seek(SeekFrom::Start(file_offset))?;
+                        f.write_all(&chunk)?;
+
+                        Ok::<(), IoError>(())
                     })
                     .await
-                    .map_err(|e| {
-                        Error::with_source(
-                            ErrorKind::Io,
-                            std::io::Error::other(format!("storage write task panicked: {}", e)),
-                        )
-                    })??;
+                    .map_err(|e| Error::io(format!("storage write task panicked: {}", e)))??;
                     data_offset += write_len as usize;
                 }
                 Ok(())
@@ -252,6 +248,19 @@ impl FileStorage {
 }
 
 impl Storage for FileStorage {
+    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            tracing::trace!(
+                "reading block: piece {} offset {} ({} bytes)",
+                piece,
+                offset,
+                buf.len()
+            );
+            let global_offset = self.piece_offset(piece) + offset as u64;
+            self.read_range(global_offset, buf.len(), buf).await
+        })
+    }
+
     fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             tracing::trace!("reading piece {}", index);
@@ -274,16 +283,10 @@ impl Storage for FileStorage {
         })
     }
 
-    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+    fn write_piece<'a>(&'a self, index: u32, data: &'a [u8]) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            tracing::trace!(
-                "reading block: piece {} offset {} ({} bytes)",
-                piece,
-                offset,
-                buf.len()
-            );
-            let global_offset = self.piece_offset(piece) + offset as u64;
-            self.read_range(global_offset, buf.len(), buf).await
+            tracing::trace!("writing piece {} ({} bytes)", index, data.len());
+            self.write_range(self.piece_offset(index), data).await
         })
     }
 
@@ -441,6 +444,93 @@ mod tests {
         let data = vec![0xFFu8; 64];
         storage.write_block(0, 0, &data).await.unwrap();
 
+        let mut buf = vec![0u8; 64];
+        storage.read_piece(0, &mut buf).await.unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[tokio::test]
+    async fn test_write_piece_roundtrip_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = Info {
+            piece_length: 64,
+            pieces: vec![[0u8; 20]; 1],
+            mode: Mode::Single {
+                name: "roundtrip.bin".into(),
+                length: 64,
+            },
+            raw_info: RawInfo::Bytes(Bytes::new()),
+        };
+        let storage = FileStorage::new(&info, dir.path());
+        storage.prepare().await.unwrap();
+
+        // Write the entire piece via write_piece
+        let data = vec![0xABu8; 64];
+        storage.write_piece(0, &data).await.unwrap();
+
+        // Read back via read_piece
+        let mut buf = vec![0u8; 64];
+        storage.read_piece(0, &mut buf).await.unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[tokio::test]
+    async fn test_write_piece_then_read_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = Info {
+            piece_length: 64,
+            pieces: vec![[0u8; 20]; 1],
+            mode: Mode::Single {
+                name: "blocks.bin".into(),
+                length: 64,
+            },
+            raw_info: RawInfo::Bytes(Bytes::new()),
+        };
+        let storage = FileStorage::new(&info, dir.path());
+        storage.prepare().await.unwrap();
+
+        // Write entire piece (4 blocks of 16 bytes)
+        let data: Vec<u8> = (0..64).map(|i| i as u8).collect();
+        storage.write_piece(0, &data).await.unwrap();
+
+        // Read back individual blocks
+        for block_idx in 0..4 {
+            let mut block = vec![0u8; 16];
+            let offset = block_idx * 16;
+            storage.read_block(0, offset, &mut block).await.unwrap();
+            assert_eq!(&block[..], &data[offset as usize..][..16]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_piece_multi_file_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = Info {
+            piece_length: 64,
+            pieces: vec![[0u8; 20]; 1],
+            mode: Mode::Multiple {
+                name: "multi".into(),
+                files: vec![
+                    FileInfo {
+                        length: 32,
+                        path: vec!["a.bin".into()],
+                    },
+                    FileInfo {
+                        length: 32,
+                        path: vec!["b.bin".into()],
+                    },
+                ],
+            },
+            raw_info: RawInfo::Bytes(Bytes::new()),
+        };
+        let storage = FileStorage::new(&info, dir.path());
+        storage.prepare().await.unwrap();
+
+        // Write entires piece via write_piece (spans both files)
+        let data = vec![0xCDu8; 64];
+        storage.write_piece(0, &data).await.unwrap();
+
+        // Read back via read_piece
         let mut buf = vec![0u8; 64];
         storage.read_piece(0, &mut buf).await.unwrap();
         assert_eq!(buf, data);

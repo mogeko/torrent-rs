@@ -68,6 +68,17 @@ impl fmt::Debug for DataSourceStorage {
 }
 
 impl Storage for DataSourceStorage {
+    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let global_offset = self.piece_offset(piece) + offset as u64;
+            let n = self.source.read_at(global_offset, buf).await?;
+            if n < buf.len() {
+                buf[n..].fill(0);
+            }
+            Ok(())
+        })
+    }
+
     fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let offset = self.piece_offset(index);
@@ -86,15 +97,11 @@ impl Storage for DataSourceStorage {
         Box::pin(async { Ok(()) })
     }
 
-    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
-            let global_offset = self.piece_offset(piece) + offset as u64;
-            let n = self.source.read_at(global_offset, buf).await?;
-            if n < buf.len() {
-                buf[n..].fill(0);
-            }
-            Ok(())
-        })
+    fn write_piece<'a>(&'a self, _index: u32, _data: &'a [u8]) -> BoxFuture<'a, ()> {
+        // Seeding is read-only — inherit the no-op behavior explicitly rather
+        // than through the default implementation which would loop over no-op
+        // write_block calls.
+        Box::pin(async { Ok(()) })
     }
 
     fn num_pieces(&self) -> usize {
@@ -103,5 +110,34 @@ impl Storage for DataSourceStorage {
 
     fn total_size(&self) -> u64 {
         self.total_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metainfo::{Bytes, Mode, RawInfo};
+
+    #[tokio::test]
+    async fn write_piece_is_noop_for_read_only() {
+        let info = Info {
+            piece_length: 64,
+            pieces: vec![[0u8; 20]; 1],
+            mode: Mode::Single {
+                name: "test".into(),
+                length: 64,
+            },
+            raw_info: RawInfo::Bytes(Bytes::new()),
+        };
+        let source: Box<dyn DataSource> = Box::new(vec![0u8; 64]);
+        let storage = DataSourceStorage::new(source, &info);
+
+        // write_piece should succeed (no-op) without touching the source
+        storage.write_piece(0, &[0xFFu8; 64]).await.unwrap();
+
+        // read_piece should still return the original data (zeros)
+        let mut buf = vec![0xFFu8; 64];
+        storage.read_piece(0, &mut buf).await.unwrap();
+        assert_eq!(&buf[..], &[0u8; 64]);
     }
 }

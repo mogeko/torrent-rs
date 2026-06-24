@@ -1,27 +1,34 @@
 # torrent-core
 
+[![crates.io](https://img.shields.io/crates/v/torrent-core)](https://crates.io/crates/torrent-core)
+[![CI](https://github.com/mogeko/torrent.rs/actions/workflows/build+test.yml/badge.svg)](https://github.com/mogeko/torrent.rs/actions/workflows/build+test.yml)
 [![MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
+
+> **⚠️ Development Status**: This crate is under active development.
+> The public API may change between minor versions. Pin a specific
+> version in your `Cargo.toml` to avoid breakage.
 
 **Low-level core abstractions for the BitTorrent protocol.** Zero async runtime
 dependency — all types are fully synchronous.
 
-This crate provides the fundamental data types and algorithms needed for
-BitTorrent communication. It is a dependency of [`torrent`](../torrent) and can
-also be used standalone when only low-level parsing or encoding is needed.
+This crate provides the fundamental data types and algorithms needed for BitTorrent
+communication. It is a dependency of [`torrent`](https://crates.io/crates/torrent)
+and can also be used standalone when only low-level parsing or encoding is needed.
 
 ## Modules
 
-| Module                       | Description                                           | BEP           |
-| ---------------------------- | ----------------------------------------------------- | ------------- |
-| [`bencode`](./src/bencode)   | Bencode encoding/decoding with strict validation      | BEP 3         |
-| [`error`](./src/error.rs)    | Error + ErrorKind (kind + source pattern)             | —             |
-| [`metainfo`](./src/metainfo) | `.torrent` file parsing, `info_hash()`                | BEP 3, 12, 52 |
-| [`magnet`](./src/magnet)     | Magnet URI parsing (hex + base32)                     | BEP 9         |
-| [`peer`](./src/peer)         | Handshake, 11 wire message types, PeerId              | BEP 3         |
-| [`dht`](./src/dht)           | KRPC message format, Kademlia RoutingTable            | BEP 5         |
-| [`tracker`](./src/tracker)   | Announce request/response data types                  | BEP 3, 15, 23 |
-| [`piece`](./src/piece)       | PieceManager (bitfield), PieceSelector + 4 strategies | BEP 3         |
-| [`storage`](./src/storage)   | Storage trait for piece read/write                    | BEP 3         |
+| Module                       | Description                                           | BEP              |
+| ---------------------------- | ----------------------------------------------------- | ---------------- |
+| [`bencode`](./src/bencode)   | Bencode encoding/decoding with strict validation      | BEP 3            |
+| [`error`](./src/error.rs)    | Error + ErrorKind (kind + source pattern)             | —                |
+| [`metainfo`](./src/metainfo) | `.torrent` file parsing, `info_hash()`                | BEP 3, 12, 52    |
+| [`magnet`](./src/magnet)     | Magnet URI parsing (hex + base32)                     | BEP 9            |
+| [`peer`](./src/peer)         | Handshake, 12 message types, PeerId, PEX, metadata    | BEP 3, 9, 10, 11 |
+| [`dht`](./src/dht)           | KRPC message format, Kademlia RoutingTable            | BEP 5            |
+| [`tracker`](./src/tracker)   | Announce request/response data types                  | BEP 3, 15, 23    |
+| [`piece`](./src/piece)       | PieceManager (bitfield), PieceSelector + 4 strategies | BEP 3            |
+| [`spec`](./src/spec.rs)      | Unified torrent spec (metainfo or magnet)             | —                |
+| [`storage`](./src/storage)   | Storage trait for piece read/write                    | BEP 3            |
 
 ## Quick Start
 
