@@ -97,6 +97,13 @@ impl Storage for DataSourceStorage {
         Box::pin(async { Ok(()) })
     }
 
+    fn write_piece<'a>(&'a self, _index: u32, _data: &'a [u8]) -> BoxFuture<'a, ()> {
+        // Seeding is read-only — inherit the no-op behavior explicitly rather
+        // than through the default implementation which would loop over no-op
+        // write_block calls.
+        Box::pin(async { Ok(()) })
+    }
+
     fn num_pieces(&self) -> usize {
         self.num_pieces
     }
