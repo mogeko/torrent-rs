@@ -5,8 +5,9 @@
 //! Run with: `cargo run -p torrent --example seed_torrent`
 
 use std::io::Write as _;
+use std::time::Duration;
 
-use torrent::session::{Session, SessionConfig};
+use torrent::session::{Session, SessionConfig, TorrentState};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "current_thread")]
@@ -75,5 +76,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("metadata unavailable");
     println!("Magnet from session: {magnet}");
 
-    Ok(())
+    // ── Step 8: Keep seeding until Ctrl+C ──
+
+    println!("\nSeeding... (Ctrl+C to stop)\n");
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let status = match session.torrent_status(&info_hash).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Status error: {}", e);
+                continue;
+            }
+        };
+
+        let state = if status.state == TorrentState::Seeding {
+            "Seeding"
+        } else {
+            "Waiting"
+        };
+        println!(
+            "  {state} | peers: {} | up: {:.1} KB/s",
+            status.num_peers,
+            status.upload_rate / 1024.0
+        );
+    }
 }
