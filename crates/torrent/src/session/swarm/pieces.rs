@@ -297,17 +297,16 @@ impl SwarmLoop {
     /// Picks a piece that no peer in the swarm has (`availability == 0`),
     /// then assigns it to a single unchoked, interested peer for exclusive
     /// upload. The piece remains unrevealed until that peer sends HAVE.
-    pub(super) async fn super_seed_select_piece(&mut self) {
+    ///
+    /// This is a pure-computation method — the caller must have already
+    /// verified that we are seeding and acquired `our_bitfield` from
+    /// [`PieceManager`]. No locks or I/O are performed here.
+    ///
+    /// Only one piece is assigned per call (the first suitable candidate)
+    /// to avoid flooding. Called from the 1-second status tick in
+    /// [`SwarmLoop::run`].
+    pub(super) fn super_seed_select_piece(&mut self, our_bitfield: &[bool]) {
         if !self.super_seed {
-            return;
-        }
-
-        // Only activate when we are the sole seeder.
-        let is_seeding = {
-            let pm = self.piece_mgr.read().await;
-            pm.missing_pieces().is_empty()
-        };
-        if !is_seeding {
             return;
         }
 
@@ -329,14 +328,8 @@ impl SwarmLoop {
             }
         }
 
-        // We need our own bitfield to know which pieces we have.
-        let our_bf = {
-            let pm = self.piece_mgr.read().await;
-            pm.bitfield().to_vec()
-        };
-
         // Find a piece that: we have, no peer has, and not already assigned.
-        for (i, &has) in our_bf.iter().enumerate() {
+        for (i, &has) in our_bitfield.iter().enumerate() {
             let idx = i as u32;
             if !has {
                 continue;
@@ -364,7 +357,7 @@ impl SwarmLoop {
             if let Some(addr) = target {
                 self.super_seed_assignments.insert(idx, addr);
                 self.super_seed_unrevealed.insert(idx);
-                tracing::debug!("super seed: assigned piece {} to peer {}", idx, addr,);
+                tracing::debug!("super seed: assigned piece {} to peer {}", idx, addr);
             }
             // Only assign one piece per tick to avoid flooding.
             break;

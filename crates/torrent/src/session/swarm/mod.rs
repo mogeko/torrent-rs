@@ -231,7 +231,8 @@ impl TorrentHandle {
 }
 
 /// The core swarm engine for a single torrent — manages peer connections,
-/// piece downloads/uploads, choke/unchoke, tracker announces, and PEX.
+/// piece downloads/uploads, choke/unchoke, tracker announces, PEX, and
+/// super seeding (BEP 16).
 ///
 /// # Lock Ordering
 ///
@@ -366,7 +367,16 @@ impl SwarmLoop {
                 _ = status_tick.tick() => {
                     self.update_status().await;
                     self.announce_if_needed().await;
-                    self.super_seed_select_piece().await;
+                    // BEP 16: acquire piece_mgr once for both the seeding
+                    // check and the bitfield needed by the selector.
+                    if self.super_seed {
+                        let pm = self.piece_mgr.read().await;
+                        if pm.missing_pieces().is_empty() {
+                            let our_bf = pm.bitfield().to_vec();
+                            drop(pm);
+                            self.super_seed_select_piece(&our_bf);
+                        }
+                    }
                     if let Err(e) = self.connect_pending().await {
                         tracing::warn!("failed to connect pending peers: {}", e);
                     }
