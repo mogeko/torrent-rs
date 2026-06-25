@@ -136,7 +136,6 @@ impl TorrentHandle {
 
         let peer_id = PeerId::random();
         let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
-        let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
 
         let mut swarm_loop = SwarmLoop {
             info_hash: self.info_hash,
@@ -169,7 +168,7 @@ impl TorrentHandle {
             selector: Box::new(RarestFirst),
             peer_msg_rx,
             peer_msg_tx,
-            upload_mgr,
+            upload_mgr: UploadManager::new(config.max_uploads),
             total_downloaded: 0,
             total_uploaded: 0,
             last_downloaded: 0,
@@ -217,7 +216,6 @@ impl TorrentHandle {
 
         let peer_id = PeerId::random();
         let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
-        let upload_mgr = Arc::new(RwLock::new(UploadManager::new(config.max_uploads)));
 
         let mut swarm_loop = SwarmLoop {
             info_hash: self.info_hash,
@@ -250,7 +248,7 @@ impl TorrentHandle {
             selector: Box::new(RarestFirst),
             peer_msg_rx,
             peer_msg_tx,
-            upload_mgr,
+            upload_mgr: UploadManager::new(config.max_uploads),
             total_downloaded: 0,
             total_uploaded: 0,
             last_downloaded: 0,
@@ -320,7 +318,7 @@ pub(crate) struct SwarmLoop {
     /// Clone for spawning new reader tasks.
     pub(crate) peer_msg_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     /// Upload slot manager.
-    pub(crate) upload_mgr: Arc<RwLock<UploadManager>>,
+    pub(crate) upload_mgr: UploadManager,
     /// Total bytes downloaded.
     pub(crate) total_downloaded: u64,
     /// Total bytes uploaded.

@@ -141,11 +141,7 @@ impl SwarmLoop {
                 begin,
                 length,
             } => {
-                let is_unchoked = {
-                    let um = self.upload_mgr.read().await;
-                    um.is_unchoked(&addr)
-                };
-                if !is_unchoked {
+                if !self.upload_mgr.is_unchoked(&addr) {
                     return Ok(());
                 }
 

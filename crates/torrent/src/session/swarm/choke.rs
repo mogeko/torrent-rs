@@ -27,10 +27,8 @@ impl SwarmLoop {
     /// `Interested` are considered; the snub check is replaced by the
     /// `peer_interested` flag.
     pub(super) async fn run_choke_unchoke(&mut self) -> Result<(), Error> {
-        let max_uploads = {
-            let um = self.upload_mgr.read().await;
-            um.max_uploads()
-        };
+        let max_uploads = self.upload_mgr.max_uploads();
+
         if max_uploads == 0 {
             return Ok(());
         }
@@ -105,17 +103,17 @@ impl SwarmLoop {
             }
         }
 
-        let mut um = self.upload_mgr.write().await;
         let pm = self.peer_mgr.read().await;
 
         for addr in &to_unchoke {
-            if !um.is_unchoked(addr) {
-                um.unchoke(*addr);
+            if !self.upload_mgr.is_unchoked(addr) {
+                self.upload_mgr.unchoke(*addr);
                 let _ = pm.send_to(addr, &PeerMessage::Unchoke).await;
             }
         }
 
-        let previously_unchoked: Vec<SocketAddr> = um.unchoked_peers().copied().collect();
+        let previously_unchoked: Vec<SocketAddr> =
+            self.upload_mgr.unchoked_peers().copied().collect();
         let choked_count = previously_unchoked.len();
         for addr in previously_unchoked {
             if !to_unchoke.contains(&addr) {
@@ -149,7 +147,7 @@ impl SwarmLoop {
                         *slot = None;
                     }
                 }
-                um.choke(&addr);
+                self.upload_mgr.choke(&addr);
                 let _ = pm.send_to(&addr, &PeerMessage::Choke).await;
             }
         }
