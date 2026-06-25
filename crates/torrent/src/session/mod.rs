@@ -273,6 +273,7 @@ impl Session {
     pub async fn start_seeding(&self, prepared: PreparedTorrent) -> Result<InfoHash, Error> {
         let info = prepared.metainfo().info.clone();
         let metainfo = prepared.metainfo().clone();
+        let super_seed = prepared.super_seed();
 
         // Verify existing data via the stored source
         let storage = DataSourceStorage::new(prepared.into_source(), &info);
@@ -292,6 +293,7 @@ impl Session {
             Arc::new(storage) as Arc<dyn Storage>,
             piece_mgr,
             self.config(),
+            super_seed,
         );
 
         Ok(info_hash)

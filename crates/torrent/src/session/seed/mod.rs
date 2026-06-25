@@ -81,6 +81,7 @@ pub struct SeedBuilder<'s> {
     comment: Option<String>,
     created_by: Option<String>,
     is_private: bool,
+    super_seed: bool,
 }
 
 impl<'s> SeedBuilder<'s> {
@@ -96,6 +97,7 @@ impl<'s> SeedBuilder<'s> {
             comment: None,
             created_by: None,
             is_private: false,
+            super_seed: false,
         }
     }
 
@@ -141,6 +143,19 @@ impl<'s> SeedBuilder<'s> {
     /// this torrent when seeded.
     pub fn private(mut self) -> Self {
         self.is_private = true;
+        self
+    }
+
+    /// Enable super seeding mode for this torrent (BEP 16).
+    ///
+    /// When enabled, the session uses the super seeding algorithm
+    /// to minimize upload bandwidth during initial seeding. Only
+    /// effective when this torrent is an initial seed (no other
+    /// peers in the swarm have any pieces).
+    ///
+    /// Default: `false`.
+    pub fn super_seed(mut self, enabled: bool) -> Self {
+        self.super_seed = enabled;
         self
     }
 
@@ -196,6 +211,7 @@ impl<'s> SeedBuilder<'s> {
             source: self.source,
             metainfo,
             torrent_bytes,
+            super_seed: self.super_seed,
         })
     }
 
@@ -248,6 +264,8 @@ pub struct PreparedTorrent {
     source: Box<dyn DataSource>,
     metainfo: Metainfo,
     torrent_bytes: Vec<u8>,
+    /// Whether to use super seeding (BEP 16) when this torrent is seeded.
+    super_seed: bool,
 }
 
 impl PreparedTorrent {
@@ -281,5 +299,10 @@ impl PreparedTorrent {
     /// Consume this value and return the underlying [`DataSource`].
     pub fn into_source(self) -> Box<dyn DataSource> {
         self.source
+    }
+
+    /// Whether super seeding is enabled for this torrent (BEP 16).
+    pub fn super_seed(&self) -> bool {
+        self.super_seed
     }
 }
