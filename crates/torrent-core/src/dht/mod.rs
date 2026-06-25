@@ -268,6 +268,23 @@ pub fn generate_node_id() -> [u8; 20] {
     id
 }
 
+/// Generate a random 20-byte secret for DHT token generation (BEP 5).
+///
+/// Uses a distinct domain separator from [`generate_node_id`] so that
+/// a node ID and a secret derived from the same seed produce different
+/// outputs. The secret must be kept private; it is the key for the
+/// stateless `SHA-1(secret || ip)` token MAC.
+pub fn generate_secret() -> [u8; 20] {
+    let seed: u64 = rand::rng().random();
+    let mut hasher = Sha1::new();
+    hasher.update(seed.to_be_bytes());
+    hasher.update(b"torrent-rs-dht-secret");
+    let result = hasher.finalize();
+    let mut buf = [0u8; 20];
+    buf.copy_from_slice(&result);
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
