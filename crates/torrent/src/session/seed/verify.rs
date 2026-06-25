@@ -7,6 +7,8 @@ use crate::metainfo::Info;
 use crate::piece::PieceManager;
 use crate::storage::Storage;
 
+use super::InfoHash;
+
 /// Verify existing data against the torrent's piece hashes.
 ///
 /// For each piece, reads from `storage`, computes SHA-1, and compares
@@ -30,7 +32,7 @@ pub(crate) async fn verify_existing(
         };
         let read_buf = &mut buf[..actual_len];
         storage.read_piece(idx, read_buf).await?;
-        let actual_hash: [u8; 20] = Sha1::digest(read_buf).into();
+        let actual_hash: InfoHash = Sha1::digest(read_buf).into();
         if actual_hash == info.pieces[i] {
             piece_mgr.set_piece(idx);
             verified += 1;

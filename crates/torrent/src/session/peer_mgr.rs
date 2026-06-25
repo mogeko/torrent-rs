@@ -8,6 +8,7 @@ use tokio::task::JoinSet;
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerId, PeerMessage};
 
+use super::InfoHash;
 use super::uni_deque::UniDeque;
 
 /// Per-peer backoff state tracking connection retries.
@@ -36,7 +37,7 @@ pub(crate) struct PeerManager {
     /// Our peer ID.
     peer_id: PeerId,
     /// Info hash of the torrent.
-    info_hash: [u8; 20],
+    info_hash: InfoHash,
     /// Active connections by remote address.
     connections: HashMap<SocketAddr, Arc<PeerConnection>>,
     /// Pending connection attempts (O(1) contains via internal HashSet).
@@ -56,7 +57,7 @@ pub(crate) struct PeerManager {
 impl PeerManager {
     /// Create a new PeerManager.
     pub fn new(
-        info_hash: [u8; 20], peer_id: PeerId, max_connections: u32, connect_timeout: Duration,
+        info_hash: InfoHash, peer_id: PeerId, max_connections: u32, connect_timeout: Duration,
         max_retries: u32, cooldown: Duration,
     ) -> Self {
         PeerManager {

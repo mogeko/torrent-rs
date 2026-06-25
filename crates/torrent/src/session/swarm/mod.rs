@@ -39,7 +39,7 @@ pub(crate) enum TorrentCommand {
 
 /// Internal handle for a single torrent.
 pub(crate) struct TorrentHandle {
-    pub info_hash: [u8; 20],
+    pub info_hash: InfoHash,
     /// Full torrent metadata — `None` for magnet links until
     /// [`DownloadBuilder::resolve_metadata`] downloads it from peers (BEP 9/10).
     pub metainfo: Option<Metainfo>,
