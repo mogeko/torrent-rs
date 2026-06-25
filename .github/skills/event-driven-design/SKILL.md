@@ -157,7 +157,7 @@ tokio::select! {
                          │
                          ▼
                     ┌─────────┐
-                    │ Queued  │──── tokio::spawn(SwarmLoop) ────┐
+                    │ Queued  │──── tokio::spawn(SwarmLoop) ───────┐
                     └─────────┘                                    │
                          ▲                                         ▼
                          │                                    ┌─────────────┐
