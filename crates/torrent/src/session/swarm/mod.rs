@@ -131,58 +131,7 @@ impl TorrentHandle {
             metainfo.info.num_pieces()
         );
 
-        let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
-        let (peer_msg_tx, peer_msg_rx) =
-            mpsc::channel::<(SocketAddr, PeerEvent)>(config.peer_msg_buffer_size);
-
-        let peer_id = PeerId::random();
-        let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
-
-        let mut swarm_loop = SwarmLoop {
-            info_hash: self.info_hash,
-            metainfo: metainfo.clone(),
-            storage: storage.clone(),
-            piece_mgr: self.piece_mgr.clone(),
-            peer_mgr: self.peer_mgr.clone(),
-            status: self.status.clone(),
-            control_rx,
-            peer_id,
-            listen_port: config.listen_port,
-            announce_ip: config.announce_ip,
-            announce_ipv6: config.announce_ipv6,
-            request_timeout: config.request_timeout,
-            max_concurrent_pieces: config.max_concurrent_pieces,
-            piece_cache_size: config.piece_cache_size,
-            endgame_threshold: config.endgame_threshold,
-            choke_interval: config.choke_interval,
-            snub_timeout: config.snub_timeout,
-            corrupt_ban_threshold: config.corrupt_ban_threshold,
-            announce_fallback_interval: config.announce_fallback_interval,
-            pex_enabled: config.pex_enabled,
-            pex_interval: config.pex_interval,
-            tracker,
-            next_announce: None,
-            has_announced: false,
-            announced_completed: false,
-            peers: HashMap::new(),
-            active_downloads: HashMap::new(),
-            selector: Box::new(RarestFirst),
-            peer_msg_rx,
-            peer_msg_tx,
-            upload_mgr: UploadManager::new(config.max_uploads),
-            total_downloaded: 0,
-            total_uploaded: 0,
-            last_downloaded: 0,
-            last_uploaded: 0,
-            piece_cache: Vec::new(),
-            recently_dropped: Vec::new(),
-        };
-
-        let task = tokio::spawn(async move { swarm_loop.run().await });
-
-        self.storage = Some(storage);
-        self.control_tx = Some(control_tx);
-        self.task = Some(task);
+        self.spawn_swarm_loop(metainfo.clone(), storage, config);
     }
 
     /// Activate for seeding — accept pre-verified piece state.
@@ -208,9 +157,20 @@ impl TorrentHandle {
         self.metainfo = Some(metainfo.clone());
         self.piece_mgr = Arc::new(RwLock::new(piece_mgr));
 
-        let num_pieces = metainfo.info.num_pieces();
-        tracing::info!("torrent activated for seeding: {name} ({num_pieces} pieces)");
+        tracing::info!(
+            "torrent activated for seeding: {} ({} pieces)",
+            name,
+            metainfo.info.num_pieces()
+        );
 
+        self.spawn_swarm_loop(metainfo, storage, config);
+    }
+
+    /// Build a [`SwarmLoop`], spawn its event loop, and store the
+    /// channel + join handle in [`TorrentHandle`].
+    fn spawn_swarm_loop(
+        &mut self, metainfo: Metainfo, storage: Arc<dyn Storage>, config: &SessionConfig,
+    ) {
         let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
         let (peer_msg_tx, peer_msg_rx) =
             mpsc::channel::<(SocketAddr, PeerEvent)>(config.peer_msg_buffer_size);
