@@ -8,7 +8,7 @@ argument-hint: "[event source or concurrency pattern to implement]"
 
 ## When to Use
 
-- Adding a new event source to the `DownloadLoop::select!` multiplexer
+- Adding a new event source to the `SwarmLoop::select!` multiplexer
 - Spawning a new background task (peer reader, DHT poller, periodic tick)
 - Introducing a new `tokio::sync::mpsc` channel between components
 - Modifying the torrent lifecycle state transitions (Queued → Downloading → Seeding)
@@ -19,7 +19,7 @@ argument-hint: "[event source or concurrency pattern to implement]"
 
 ## Core Design Rules
 
-1. **Per-entity tasks, not global loops**. Each torrent gets its own `DownloadLoop`. Each peer gets its own reader task. The DHT gets one background task. Never put unrelated entities in the same task.
+1. **Per-entity tasks, not global loops**. Each torrent gets its own `SwarmLoop`. Each peer gets its own reader task. The DHT gets one background task. Never put unrelated entities in the same task.
 
 2. **`mpsc` fan-in, not shared mutable state for events**. All peer messages fan into the download loop via a bounded `mpsc` channel. Never use `Arc<RwLock<Vec<Event>>>` as an event queue — it requires polling and has no backpressure.
 
@@ -45,7 +45,7 @@ graph TD
     subgraph "Per-Torrent"
         CTRL_TX[control_tx<br/>mpsc::Sender]
         CTRL_RX[control_rx]
-        DL[DownloadLoop task<br/>tokio::spawn]
+        DL[SwarmLoop task<br/>tokio::spawn]
         PMGR[PieceManager<br/>Arc RwLock]
         PM[PeerManager<br/>Arc RwLock]
         UM[UploadManager<br/>Arc RwLock]
@@ -75,15 +75,15 @@ graph TD
     DHT_TASK -->|add_peers| PM
 ```
 
-**Three task levels**: Session (DHT), Torrent (DownloadLoop), Peer (reader tasks). Communication flows downward via `tokio::spawn` and upward via `mpsc` channels.
+**Three task levels**: Session (DHT), Torrent (SwarmLoop), Peer (reader tasks). Communication flows downward via `tokio::spawn` and upward via `mpsc` channels.
 
 ## Channel Catalog
 
-| Channel     | Type      | Capacity                     | Producer                   | Consumer               | Payload                   |
-| ----------- | --------- | ---------------------------- | -------------------------- | ---------------------- | ------------------------- |
-| `peer_msg`  | `mpsc`    | `peer_msg_buffer_size` (256) | N × peer reader tasks      | DownloadLoop `select!` | `(SocketAddr, PeerEvent)` |
-| `control`   | `mpsc`    | 16                           | `TorrentHandle` public API | DownloadLoop `select!` | `TorrentCommand`          |
-| DHT oneshot | `oneshot` | 1 per query                  | DHT RPC dispatch loop      | `send_query()` caller  | KRPC response             |
+| Channel     | Type      | Capacity                     | Producer                   | Consumer              | Payload                   |
+| ----------- | --------- | ---------------------------- | -------------------------- | --------------------- | ------------------------- |
+| `peer_msg`  | `mpsc`    | `peer_msg_buffer_size` (256) | N × peer reader tasks      | SwarmLoop `select!`   | `(SocketAddr, PeerEvent)` |
+| `control`   | `mpsc`    | 16                           | `TorrentHandle` public API | SwarmLoop `select!`   | `TorrentCommand`          |
+| DHT oneshot | `oneshot` | 1 per query                  | DHT RPC dispatch loop      | `send_query()` caller | KRPC response             |
 
 **Backpressure behavior**: `peer_msg` is bounded to 256. When the download loop is slower than N peer readers, `send()` returns an error and the peer reader task exits gracefully (logged at `warn` level). This is intentional — it prevents unbounded memory growth.
 
@@ -91,19 +91,19 @@ graph TD
 
 All shared state uses `Arc<RwLock<T>>` for concurrent read/write access:
 
-| State                                        | Lock     | Writers                                        | Readers                            |
-| -------------------------------------------- | -------- | ---------------------------------------------- | ---------------------------------- |
-| `torrents: HashMap<InfoHash, TorrentHandle>` | `RwLock` | `add_torrent`, `remove_torrent`                | DHT poller, status queries         |
-| `peer_mgr: PeerManager`                      | `RwLock` | DownloadLoop (connect/remove), DHT (add_peers) | DownloadLoop (pending count)       |
-| `piece_mgr: PieceManager`                    | `RwLock` | DownloadLoop (set_piece)                       | DownloadLoop (bitfield, selection) |
-| `status: TorrentStatus`                      | `RwLock` | DownloadLoop every 1s                          | `torrent_status()` public API      |
-| `upload_mgr: UploadManager`                  | `RwLock` | DownloadLoop (choke round)                     | Per-request (choke check)          |
+| State                                        | Lock     | Writers                                     | Readers                         |
+| -------------------------------------------- | -------- | ------------------------------------------- | ------------------------------- |
+| `torrents: HashMap<InfoHash, TorrentHandle>` | `RwLock` | `add_torrent`, `remove_torrent`             | DHT poller, status queries      |
+| `peer_mgr: PeerManager`                      | `RwLock` | SwarmLoop (connect/remove), DHT (add_peers) | SwarmLoop (pending count)       |
+| `piece_mgr: PieceManager`                    | `RwLock` | SwarmLoop (set_piece)                       | SwarmLoop (bitfield, selection) |
+| `status: TorrentStatus`                      | `RwLock` | SwarmLoop every 1s                          | `torrent_status()` public API   |
+| `upload_mgr: UploadManager`                  | `RwLock` | SwarmLoop (choke round)                     | Per-request (choke check)       |
 
 **Rule**: Never hold an `RwLock` write guard across an `.await` point. Write guards are always scoped to a `{ ... }` block or dropped before any async call.
 
-## DownloadLoop `select!` Branches
+## SwarmLoop `select!` Branches
 
-The central event multiplexer in `crates/torrent/src/session/download/mod.rs`:
+The central event multiplexer in `crates/torrent/src/session/swarm/mod.rs`:
 
 ```
 tokio::select! {
@@ -127,27 +127,27 @@ tokio::select! {
 ### Adding a New `select!` Branch
 
 1. Add a config field in `SessionConfig` (e.g., `new_interval: Duration`)
-2. Create the interval in `DownloadLoop::new()`: `let new_tick = tokio::time::interval(config.new_interval);`
+2. Create the interval in `SwarmLoop::new()`: `let new_tick = tokio::time::interval(config.new_interval);`
 3. Add the branch to `select!` with a handler method
 4. Ensure the branch is cancellation-safe (no `.await` on non-cancellation-safe resources inside the handler without proper guards)
 
 ## All `tokio::spawn` Sites
 
-| #   | Location                   | What It Manages                      | Lifetime                         | Config                         |
-| --- | -------------------------- | ------------------------------------ | -------------------------------- | ------------------------------ |
-| 1   | `session/mod.rs`           | DHT background peer discovery poller | Session lifetime                 | `dht_poll_interval` (30s)      |
-| 2   | `session/torrent.rs`       | DownloadLoop (one per torrent)       | `add_torrent` → `remove_torrent` | All `SessionConfig`            |
-| 3   | `session/download/peer.rs` | Peer reader (one per connection)     | Connection lifetime              | —                              |
-| 4   | `session/peer_manager.rs`  | Peer TCP connections (JoinSet batch) | Per connect batch                | `peer_connect_timeout` (500ms) |
-| 5   | `dht/rpc.rs`               | DHT UDP receive loop                 | DhtNode lifetime                 | —                              |
-| 6   | `dht/node.rs`              | DHT periodic bootstrap               | DhtNode lifetime                 | `BOOTSTRAP_INTERVAL`           |
-| 7   | `dht/node.rs`              | DHT get_peers parallel queries       | Per lookup                       | —                              |
+| #   | Location                  | What It Manages                      | Lifetime                         | Config                         |
+| --- | ------------------------- | ------------------------------------ | -------------------------------- | ------------------------------ |
+| 1   | `session/mod.rs`          | DHT background peer discovery poller | Session lifetime                 | `dht_poll_interval` (30s)      |
+| 2   | `session/swarm/mod.rs`    | SwarmLoop (one per torrent)          | `add_torrent` → `remove_torrent` | All `SessionConfig`            |
+| 3   | `session/swarm/peer.rs`   | Peer reader (one per connection)     | Connection lifetime              | —                              |
+| 4   | `session/peer_manager.rs` | Peer TCP connections (JoinSet batch) | Per connect batch                | `peer_connect_timeout` (500ms) |
+| 5   | `dht/rpc.rs`              | DHT UDP receive loop                 | DhtNode lifetime                 | —                              |
+| 6   | `dht/node.rs`             | DHT periodic bootstrap               | DhtNode lifetime                 | `BOOTSTRAP_INTERVAL`           |
+| 7   | `dht/node.rs`             | DHT get_peers parallel queries       | Per lookup                       | —                              |
 
 ### Spawning Rules
 
-- **Use `tokio::spawn`** for fire-and-forget long-lived tasks (reader loops, DHT poller, DownloadLoop).
+- **Use `tokio::spawn`** for fire-and-forget long-lived tasks (reader loops, DHT poller, SwarmLoop).
 - **Use `JoinSet`** for bounded parallel operations where you need results (peer connections, DHT lookups, tracker announces).
-- **Always `.await` spawned task handles** when the owner is dropped (e.g., `Session::remove_torrent` awaits the DownloadLoop `JoinHandle`).
+- **Always `.await` spawned task handles** when the owner is dropped (e.g., `Session::remove_torrent` awaits the SwarmLoop `JoinHandle`).
 - **Never `tokio::spawn` inside `torrent-core`** — that crate is sync-only by hard rule.
 
 ## Torrent Lifecycle State Machine
@@ -157,7 +157,7 @@ tokio::select! {
                          │
                          ▼
                     ┌─────────┐
-                    │ Queued  │──── tokio::spawn(DownloadLoop) ────┐
+                    │ Queued  │──── tokio::spawn(SwarmLoop) ────┐
                     └─────────┘                                    │
                          ▲                                         ▼
                          │                                    ┌─────────────┐
@@ -182,7 +182,7 @@ tokio::select! {
 
 **Key transitions:**
 
-- `Queued → Downloading`: On `DownloadLoop::run()` entry
+- `Queued → Downloading`: On `SwarmLoop::run()` entry
 - `Downloading → Paused`: On `TorrentCommand::Pause`
 - `Paused → Downloading`: On `TorrentCommand::Resume`
 - `Downloading → Seeding`: When `missing_pieces().is_empty()` (continues to upload)
@@ -284,9 +284,9 @@ When the user calls `Session::remove_torrent()`:
    └─ Sends TorrentCommand::Cancel via control_tx
 
 2. let _ = handle.task.await
-   └─ Awaits DownloadLoop JoinHandle
+   └─ Awaits SwarmLoop JoinHandle
 
-3. DownloadLoop::run() exits
+3. SwarmLoop::run() exits
    └─ select! branches all drop
 
 4. peer_msg_tx is dropped

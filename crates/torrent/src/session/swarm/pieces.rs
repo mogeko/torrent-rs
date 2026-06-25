@@ -291,6 +291,78 @@ impl SwarmLoop {
             piece_length
         }
     }
+
+    /// Select a piece for super seeding and assign it to a peer (BEP 16).
+    ///
+    /// Picks a piece that no peer in the swarm has (`availability == 0`),
+    /// then assigns it to a single unchoked, interested peer for exclusive
+    /// upload. The piece remains unrevealed until that peer sends HAVE.
+    ///
+    /// This is a pure-computation method — the caller must have already
+    /// verified that we are seeding and acquired `our_bitfield` from
+    /// [`PieceManager`]. No locks or I/O are performed here.
+    ///
+    /// Only one piece is assigned per call (the first suitable candidate)
+    /// to avoid flooding. Called from the 1-second status tick in
+    /// [`SwarmLoop::run`].
+    pub(super) fn super_seed_select_piece(&mut self, our_bitfield: &[bool]) {
+        if !self.super_seed {
+            return;
+        }
+
+        let num_pieces = self.metainfo.info.num_pieces();
+
+        // Compute per-piece availability across the swarm.
+        let mut availability = vec![0usize; num_pieces];
+        for peer in self.peers.values() {
+            if peer.bitfield.is_empty() {
+                continue;
+            }
+            for (i, &has) in peer.bitfield.iter().enumerate() {
+                if i >= num_pieces {
+                    break;
+                }
+                if has {
+                    availability[i] += 1;
+                }
+            }
+        }
+
+        // Find a piece that: we have, no peer has, and not already assigned.
+        for (i, &has) in our_bitfield.iter().enumerate() {
+            let idx = i as u32;
+            if !has {
+                continue;
+            }
+            if availability[i] > 0 {
+                continue; // some peer already has it
+            }
+            if self.super_seed_assignments.contains_key(&idx)
+                || self.super_seed_unrevealed.contains(&idx)
+            {
+                continue; // already assigned or in progress
+            }
+
+            // Pick a target: an unchoked, interested peer not already assigned.
+            let target = self
+                .peers
+                .iter()
+                .find(|(addr, p)| {
+                    p.peer_interested
+                        && self.upload_mgr.is_unchoked(addr)
+                        && !self.super_seed_assignments.values().any(|a| a == *addr)
+                })
+                .map(|(addr, _)| *addr);
+
+            if let Some(addr) = target {
+                self.super_seed_assignments.insert(idx, addr);
+                self.super_seed_unrevealed.insert(idx);
+                tracing::debug!("super seed: assigned piece {} to peer {}", idx, addr);
+            }
+            // Only assign one piece per tick to avoid flooding.
+            break;
+        }
+    }
 }
 
 /// Compute SHA-1 of `data` and compare with `expected`.

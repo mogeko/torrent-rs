@@ -7,7 +7,7 @@ mod types;
 
 pub(crate) use types::{ActiveDownload, PeerEvent, PeerInfo};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -131,7 +131,7 @@ impl TorrentHandle {
             metainfo.info.num_pieces()
         );
 
-        self.spawn_swarm_loop(metainfo.clone(), storage, config);
+        self.spawn_swarm_loop(metainfo.clone(), storage, config, false);
     }
 
     /// Activate for seeding — accept pre-verified piece state.
@@ -142,7 +142,7 @@ impl TorrentHandle {
     /// `piece_mgr`.
     pub(crate) fn activate_seed(
         &mut self, metainfo: Metainfo, storage: Arc<dyn Storage>, piece_mgr: PieceManager,
-        config: &SessionConfig,
+        config: &SessionConfig, super_seed: bool,
     ) {
         let name = match &metainfo.info.mode {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
@@ -163,13 +163,14 @@ impl TorrentHandle {
             metainfo.info.num_pieces()
         );
 
-        self.spawn_swarm_loop(metainfo, storage, config);
+        self.spawn_swarm_loop(metainfo, storage, config, super_seed);
     }
 
     /// Build a [`SwarmLoop`], spawn its event loop, and store the
     /// channel + join handle in [`TorrentHandle`].
     fn spawn_swarm_loop(
         &mut self, metainfo: Metainfo, storage: Arc<dyn Storage>, config: &SessionConfig,
+        super_seed: bool,
     ) {
         let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
         let (peer_msg_tx, peer_msg_rx) =
@@ -216,6 +217,9 @@ impl TorrentHandle {
             last_uploaded: 0,
             piece_cache: Vec::new(),
             recently_dropped: Vec::new(),
+            super_seed,
+            super_seed_assignments: HashMap::new(),
+            super_seed_unrevealed: HashSet::new(),
         };
 
         let task = tokio::spawn(async move { swarm_loop.run().await });
@@ -227,7 +231,8 @@ impl TorrentHandle {
 }
 
 /// The core swarm engine for a single torrent — manages peer connections,
-/// piece downloads/uploads, choke/unchoke, tracker announces, and PEX.
+/// piece downloads/uploads, choke/unchoke, tracker announces, PEX, and
+/// super seeding (BEP 16).
 ///
 /// # Lock Ordering
 ///
@@ -310,6 +315,16 @@ pub(crate) struct SwarmLoop {
     pub(crate) pex_enabled: bool,
     /// PEX broadcast interval.
     pub(crate) pex_interval: Duration,
+    /// Enable super seeding mode (BEP 16). When enabled, pieces are
+    /// uploaded to one peer at a time to minimize redundant uploads
+    /// during initial seeding.
+    pub(crate) super_seed: bool,
+    /// Piece → peer assignments for super seeding. Each key is a
+    /// piece index being exclusively uploaded to the given peer.
+    pub(crate) super_seed_assignments: HashMap<u32, SocketAddr>,
+    /// Unrevealed piece indices. These pieces have been uploaded to
+    /// the assigned peer but not yet confirmed (no HAVE received).
+    pub(crate) super_seed_unrevealed: HashSet<u32>,
 }
 
 impl SwarmLoop {
@@ -352,6 +367,16 @@ impl SwarmLoop {
                 _ = status_tick.tick() => {
                     self.update_status().await;
                     self.announce_if_needed().await;
+                    // BEP 16: acquire piece_mgr once for both the seeding
+                    // check and the bitfield needed by the selector.
+                    if self.super_seed {
+                        let pm = self.piece_mgr.read().await;
+                        if pm.missing_pieces().is_empty() {
+                            let our_bf = pm.bitfield().to_vec();
+                            drop(pm);
+                            self.super_seed_select_piece(&our_bf);
+                        }
+                    }
                     if let Err(e) = self.connect_pending().await {
                         tracing::warn!("failed to connect pending peers: {}", e);
                     }

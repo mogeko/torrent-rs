@@ -16,12 +16,12 @@ impl SwarmLoop {
                 // Clear this peer's pipeline, mark its blocks as unrequested
                 if let Some(peer) = self.peers.get(&addr) {
                     for slot in &peer.pipeline {
-                        if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b)) {
-                            if let Some(dl) = self.active_downloads.get_mut(&index) {
-                                let block_idx = (begin / dl.block_size) as usize;
-                                if block_idx < dl.requested.len() {
-                                    dl.requested[block_idx] = None;
-                                }
+                        if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b))
+                            && let Some(dl) = self.active_downloads.get_mut(&index)
+                        {
+                            let block_idx = (begin / dl.block_size) as usize;
+                            if block_idx < dl.requested.len() {
+                                dl.requested[block_idx] = None;
                             }
                         }
                     }
@@ -31,18 +31,29 @@ impl SwarmLoop {
                 if self.pex_enabled {
                     self.recently_dropped.push(addr);
                 }
+                // BEP 16: release super seed assignments for the disconnected peer.
+                // Pieces that were unrevealed and assigned to this peer go back
+                // to the pool so they can be reassigned on the next tick.
+                if self.super_seed {
+                    let ssa = self.super_seed_assignments.iter();
+                    let orphaned = ssa.filter(|(_, a)| *a == &addr).map(|(&i, _)| i);
+                    for idx in orphaned {
+                        self.super_seed_unrevealed.remove(&idx);
+                    }
+                    self.super_seed_assignments.retain(|_, a| a != &addr);
+                }
             }
             PeerEvent::Message(msg) => {
                 if let Err(_e) = self.handle_peer_message(addr, msg).await {
                     // Clear pipeline for dead peer
                     if let Some(peer) = self.peers.get(&addr) {
                         for slot in &peer.pipeline {
-                            if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b)) {
-                                if let Some(dl) = self.active_downloads.get_mut(&index) {
-                                    let block_idx = (begin / dl.block_size) as usize;
-                                    if block_idx < dl.requested.len() {
-                                        dl.requested[block_idx] = None;
-                                    }
+                            if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b))
+                                && let Some(dl) = self.active_downloads.get_mut(&index)
+                            {
+                                let block_idx = (begin / dl.block_size) as usize;
+                                if block_idx < dl.requested.len() {
+                                    dl.requested[block_idx] = None;
                                 }
                             }
                         }
@@ -51,6 +62,15 @@ impl SwarmLoop {
                     self.peer_mgr.write().await.remove_peer(&addr);
                     if self.pex_enabled {
                         self.recently_dropped.push(addr);
+                    }
+                    // BEP 16: release super seed assignments for the dead peer.
+                    if self.super_seed {
+                        let ssa = self.super_seed_assignments.iter();
+                        let orphaned = ssa.filter(|(_, a)| *a == &addr).map(|(&i, _)| i);
+                        for idx in orphaned {
+                            self.super_seed_unrevealed.remove(&idx);
+                        }
+                        self.super_seed_assignments.retain(|_, a| a != &addr);
                     }
                 }
             }
@@ -71,12 +91,12 @@ impl SwarmLoop {
             PeerMessage::Choke => {
                 peer.am_choked = true;
                 for slot in &mut peer.pipeline {
-                    if let Some((index, begin, _)) = *slot {
-                        if let Some(dl) = self.active_downloads.get_mut(&index) {
-                            let block_idx = (begin / dl.block_size) as usize;
-                            if block_idx < dl.requested.len() {
-                                dl.requested[block_idx] = None;
-                            }
+                    if let Some((index, begin, _)) = *slot
+                        && let Some(dl) = self.active_downloads.get_mut(&index)
+                    {
+                        let block_idx = (begin / dl.block_size) as usize;
+                        if block_idx < dl.requested.len() {
+                            dl.requested[block_idx] = None;
                         }
                     }
                     *slot = None;
@@ -95,6 +115,19 @@ impl SwarmLoop {
                 let idx = index as usize;
                 if idx < peer.bitfield.len() {
                     peer.bitfield[idx] = true;
+                }
+
+                // BEP 16: if the assigned peer confirms they have
+                // the piece, reveal it to the entire swarm.
+                if self.super_seed && self.super_seed_assignments.get(&index) == Some(&addr) {
+                    self.super_seed_unrevealed.remove(&index);
+                    self.super_seed_assignments.remove(&index);
+                    tracing::debug!(
+                        "super seed: peer {} confirmed piece {}, revealing",
+                        addr,
+                        index,
+                    );
+                    self.broadcast_have(index).await?;
                 }
             }
             PeerMessage::Bitfield(bytes) => {
@@ -142,6 +175,16 @@ impl SwarmLoop {
                 length,
             } => {
                 if !self.upload_mgr.is_unchoked(&addr) {
+                    return Ok(());
+                }
+
+                // BEP 16: only serve unrevealed pieces to the assigned peer.
+                // Revealed pieces (not in super_seed_unrevealed) are served
+                // to anyone, same as normal seeding mode.
+                if self.super_seed
+                    && self.super_seed_unrevealed.contains(&index)
+                    && self.super_seed_assignments.get(&index) != Some(&addr)
+                {
                     return Ok(());
                 }
 
@@ -228,13 +271,28 @@ impl SwarmLoop {
 
     /// Send our bitfield (and Interested if we don't yet have all pieces)
     /// to a newly connected peer.
+    ///
+    /// In super seeding mode (BEP 16), unrevealed pieces are excluded
+    /// from the bitfield so peers don't request them until we reveal.
     pub(super) async fn send_bitfield(&self, addr: SocketAddr) -> Result<(), Error> {
         let piece_mgr = self.piece_mgr.clone();
         let peer_mgr = self.peer_mgr.clone();
 
         let (bf_bytes, have_all) = {
             let pm = piece_mgr.read().await;
-            let bf = pm.to_bitfield();
+            let mut bf = pm.to_bitfield();
+
+            // BEP 16: hide unrevealed pieces from the bitfield
+            if self.super_seed {
+                for &idx in &self.super_seed_unrevealed {
+                    let byte = idx as usize / 8;
+                    let bit = 7 - (idx as usize % 8);
+                    if byte < bf.len() {
+                        bf[byte] &= !(1 << bit);
+                    }
+                }
+            }
+
             let have_all = pm.missing_pieces().is_empty();
             (bf, have_all)
         };

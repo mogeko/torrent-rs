@@ -24,9 +24,10 @@ argument-hint: "[BEP number or protocol feature to implement]"
 | BEP 7  | IPv6 Tracker Extension                   | `tracker` (AnnounceRequest ip/ipv6, compact peers6, UDP IPv6)  |
 | BEP 9  | Extension for Peers to Send Metadata     | `magnet`                                                       |
 | BEP 10 | Extension Protocol (LTEP)                | `peer::extension`, `peer::message` (Extended), `peer::stream`  |
-| BEP 11 | Peer Exchange (PEX)                      | `peer::pex`, `session::download::pex`                          |
+| BEP 11 | Peer Exchange (PEX)                      | `peer::pex`, `session::swarm::pex`                             |
 | BEP 12 | Multitracker Metadata Extension          | `metainfo` (announce-list)                                     |
 | BEP 15 | UDP Tracker Protocol                     | `tracker::udp`                                                 |
+| BEP 16 | Superseeding                             | `session` (seed builder, swarm super seed state)               |
 | BEP 19 | WebSeed — HTTP/FTP Seeding               | `magnet` (ws parameter parsing only; download not implemented) |
 | BEP 23 | Tracker Returns Compact Peer Lists       | `tracker` (compact response)                                   |
 | BEP 32 | DHT Extensions for IPv6                  | `dht` (nodes6, want, dual routing tables, dual DHT nodes)      |
@@ -102,6 +103,39 @@ Extension bits are numbered per BEP conventions: bit 0 = MSB of byte 0. Common e
 - Bit 63 (byte 7, `0x01`): DHT (BEP 5) / Extension Protocol / LTEP (BEP 10)
 
 Defined in [`crates/torrent-core/src/peer/handshake.rs`](../../../crates/torrent-core/src/peer/handshake.rs).
+
+## Superseeding (BEP 16)
+
+Super seeding minimizes upload bandwidth during initial seeding by
+uploading each piece to only one peer at a time. Instead of responding
+to any peer's request, the super seeder:
+
+1. **Hides** unrevealed pieces from its advertised bitfield
+2. **Assigns** each piece exclusively to one unchoked, interested peer
+3. **Reveals** the piece to the swarm after the assigned peer confirms
+   receipt via a `HAVE` message
+
+The algorithm uses only standard BEP 3 wire messages — no new protocol
+types are needed.
+
+### Per-torrent Configuration
+
+| Method                          | Crate     | Purpose                                  |
+| ------------------------------- | --------- | ---------------------------------------- |
+| `SeedBuilder::super_seed(bool)` | `torrent` | Enable/disable super seeding per torrent |
+| `PreparedTorrent::super_seed()` | `torrent` | Read the super seed flag                 |
+
+### Core State (SwarmLoop)
+
+| Field                    | Type                       | Purpose                              |
+| ------------------------ | -------------------------- | ------------------------------------ |
+| `super_seed`             | `bool`                     | Whether super seeding is active      |
+| `super_seed_assignments` | `HashMap<u32, SocketAddr>` | Piece index → assigned peer          |
+| `super_seed_unrevealed`  | `HashSet<u32>`             | Pieces not yet revealed to the swarm |
+
+Defined in [`crates/torrent/src/session/swarm/mod.rs`](../../../crates/torrent/src/session/swarm/mod.rs).
+Implementation in [`crates/torrent/src/session/swarm/peer.rs`](../../../crates/torrent/src/session/swarm/peer.rs)
+and [`crates/torrent/src/session/swarm/pieces.rs`](../../../crates/torrent/src/session/swarm/pieces.rs).
 
 ## DHT / KRPC (BEP 5)
 
