@@ -27,7 +27,7 @@ These MUST be followed. Apply them before consulting the reference architecture 
     cargo clippy -p torrent-core -- -D warnings
     cargo clippy -p torrent -- -D warnings
     cargo fmt -- --check
-    RUSTDOCFLAGS="-D warnings" cargo doc
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
     ```
 
     - Tests must never require network access.
@@ -64,14 +64,14 @@ torrent.rs/                  ← workspace root
 │   │   ├── Cargo.toml
 │   │   ├── src/
 │   │   │   ├── bencode/     ← BEP 3 encode/decode
-│   │   │   ├── error.rs     ← Error + ErrorKind
 │   │   │   ├── metainfo/    ← .torrent parsing (BEP 3/12/52)
 │   │   │   ├── magnet/      ← Magnet URI (BEP 9)
 │   │   │   ├── peer/        ← handshake, message types, PeerId (sync only)
 │   │   │   ├── dht/         ← krpc, RoutingTable (sync only)
 │   │   │   ├── tracker/     ← Announce data types (sync only)
 │   │   │   ├── piece/       ← PieceManager, piece selection strategies
-│   │   │   └── storage/     ← Storage trait
+│   │   │   ├── storage/     ← Storage trait
+│   │   │   └── error.rs     ← Error + ErrorKind
 │   │   └── tests/           ← integration + property tests + test vectors
 │   │
 │   └── torrent/             ← high-level user-facing API (async, tokio)
@@ -95,25 +95,37 @@ torrent.rs/                  ← workspace root
 
 **torrent-core**
 
-| Crate   | Purpose                                |
-| ------- | -------------------------------------- |
-| `bytes` | Zero-copy byte buffers                 |
-| `sha1`  | Info hash, node ID, piece verification |
-| `rand`  | Peer/transaction/node ID generation    |
+| Crate     | Purpose                                |
+| --------- | -------------------------------------- |
+| `bytes`   | Zero-copy byte buffers                 |
+| `rand`    | Peer/transaction/node ID generation    |
+| `serde`   | Optional serialization                 |
+| `sha1`    | Info hash, node ID, piece verification |
+| `tracing` | Structured logging and instrumentation |
 
 **torrent**
 
-| Crate          | Feature                                  | Purpose    |
-| -------------- | ---------------------------------------- | ---------- |
-| `torrent-core` | —                                        | Core types |
-| `tokio`        | net, rt, macros, time, io-util, fs, sync | Async I/O  |
+| Crate                 | Feature                                  | Purpose                             |
+| --------------------- | ---------------------------------------- | ----------------------------------- |
+| `torrent-core`        | —                                        | Core types                          |
+| `rand`                | —                                        | Peer/transaction/node ID generation |
+| `rustls`              | —                                        | TLS for HTTPS trackers              |
+| `rustls-native-certs` | —                                        | Native trust store for TLS          |
+| `serde`               | `serde` (optional)                       | Session config serialization        |
+| `sha1`                | —                                        | Info hash computation               |
+| `tokio`               | net, rt, macros, time, io-util, fs, sync | Async I/O runtime                   |
+| `tokio-rustls`        | —                                        | TLS streams over tokio              |
+| `tracing`             | —                                        | Structured logging                  |
+| `url`                 | —                                        | Tracker URL and magnet URI parsing  |
 
 **dev-dependencies (workspace)**
 
-| Crate      | Purpose                     |
-| ---------- | --------------------------- |
-| `proptest` | Property-based testing      |
-| `tempfile` | Temp dirs for storage tests |
+| Crate                | Purpose                           |
+| -------------------- | --------------------------------- |
+| `proptest`           | Property-based testing            |
+| `serde_json`         | Test-only JSON serialization      |
+| `tempfile`           | Temp dirs for storage tests       |
+| `tracing-subscriber` | Log output for tests and examples |
 
 ### Module Architecture
 
@@ -132,7 +144,7 @@ bencode ─── metainfo             session
                 ├── peer/pex         │
                 │   (BEP 11 PEX)     ├── piece (manager + selector)
                 │                    │
-                ├── dht/types        └── session/download/pex
+                ├── dht/types        └── session/swarm/pex
                 │                        (PEX handler)
                 └── storage/trait
 
@@ -148,10 +160,11 @@ bencode ─── metainfo             session
 - **Magnet**: Parses `magnet:?xt=urn:btih:<hex\|base32>`. Hex and base32 decoding implemented manually.
 - **Peer**: 12 message types (`KeepAlive`–`Port` + `Extended`). 68-byte handshake with reserved extension bits. Types in `torrent-core`, async `PeerConnection` in `torrent`.
 - **LTEP (BEP 10)**: `ExtensionNegotiation` in `torrent-core` for handshake dict encode/decode. Async LTEP negotiation during `PeerConnection::connect()` in `torrent`.
-- **PEX (BEP 11)**: `PexMessage` in `torrent-core` for peer list encode/decode. `DownloadLoop` handler in `torrent` dispatches incoming PEX, broadcasts periodically with `pex_interval`.
+- **PEX (BEP 11)**: `PexMessage` in `torrent-core` for peer list encode/decode. `SwarmLoop` handler in `torrent` dispatches incoming PEX, broadcasts periodically with `pex_interval`.
 - **Tracker**: `HttpTracker` uses manual HTTP/1.1 (no `reqwest`). `UdpTracker` implements BEP 15 connection protocol + announce + retry. Both in `torrent`.
   - `HttpTracker` supports both `http://` (plain TCP) and `https://` (TLS via `tokio-rustls`).
 - **Piece**: `PieceManager` (bitfield, progress tracking) + 4 selection strategies (`RarestFirst`, `RandomFirst`, `Sequential`, `EndGame`) in `torrent-core`.
 - **Storage**: `Storage` trait in `torrent-core`. `FileStorage` implementation in `torrent`.
 - **DHT**: 160 K-buckets (K=8), XOR distance, KRPC bencode-based messages in `torrent-core`. Async RPC + 4 query types (`ping`, `find_node`, `get_peers`, `announce_peer`) in `torrent`.
-- **Session**: `Session::new(config)` → `add_torrent()` / `remove_torrent()` / `torrent_status()`. Per-torrent `DownloadLoop` (tokio::spawn). `PeerManager` connection pool. `UploadManager` choke/unchoke logic. All in `torrent`.
+- **Session**: `Session::new(config)` → `add_torrent()` / `remove_torrent()` / `torrent_status()`. Per-torrent `SwarmLoop` (tokio::spawn). `PeerManager` connection pool. `UploadManager` choke/unchoke logic. All in `torrent`.
+- **Superseeding (BEP 16)**: `SeedBuilder::super_seed(bool)` enables per-torrent super seeding. `SwarmLoop` manages assignments (`HashMap<u32, SocketAddr>`) and unrevealed pieces (`HashSet<u32>`). Bitfield is masked to hide unrevealed pieces. HAVE from the assigned peer triggers `broadcast_have` to reveal the piece. All in `torrent`.
