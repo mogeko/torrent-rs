@@ -6,8 +6,9 @@
 
 use std::fmt;
 
+use crate::error::Error;
 use crate::metainfo::Info;
-use crate::storage::{BoxFuture, Storage};
+use crate::storage::{IoFuture, Storage};
 
 use super::DataSource;
 
@@ -68,7 +69,9 @@ impl fmt::Debug for DataSourceStorage {
 }
 
 impl Storage for DataSourceStorage {
-    fn read_block<'a>(&'a self, piece: u32, offset: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+    fn read_block<'a>(
+        &'a self, piece: u32, offset: u32, buf: &'a mut [u8],
+    ) -> IoFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             let global_offset = self.piece_offset(piece) + offset as u64;
             let n = self.source.read_at(global_offset, buf).await?;
@@ -79,7 +82,7 @@ impl Storage for DataSourceStorage {
         })
     }
 
-    fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> BoxFuture<'a, ()> {
+    fn read_piece<'a>(&'a self, index: u32, buf: &'a mut [u8]) -> IoFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             let offset = self.piece_offset(index);
             let len = self.piece_len_for_index(index) as usize;
@@ -92,12 +95,14 @@ impl Storage for DataSourceStorage {
         })
     }
 
-    fn write_block<'a>(&'a self, _piece: u32, _offset: u32, _data: &'a [u8]) -> BoxFuture<'a, ()> {
+    fn write_block<'a>(
+        &'a self, _piece: u32, _offset: u32, _data: &'a [u8],
+    ) -> IoFuture<'a, Result<(), Error>> {
         // Seeding is read-only — writes are no-ops
         Box::pin(async { Ok(()) })
     }
 
-    fn write_piece<'a>(&'a self, _index: u32, _data: &'a [u8]) -> BoxFuture<'a, ()> {
+    fn write_piece<'a>(&'a self, _index: u32, _data: &'a [u8]) -> IoFuture<'a, Result<(), Error>> {
         // Seeding is read-only — inherit the no-op behavior explicitly rather
         // than through the default implementation which would loop over no-op
         // write_block calls.

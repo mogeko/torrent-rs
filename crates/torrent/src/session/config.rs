@@ -159,7 +159,7 @@ pub struct SessionConfig {
     /// across restarts (BEP 5 recommends persisting the node ID).
     ///
     /// Default: `None`.
-    pub node_id: Option<[u8; 20]>,
+    pub node_id: Option<InfoHash>,
 }
 
 impl Default for SessionConfig {

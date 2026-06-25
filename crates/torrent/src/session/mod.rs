@@ -12,10 +12,11 @@
 
 mod config;
 mod download;
-mod peer_manager;
+mod peer_mgr;
 mod seed;
 mod swarm;
 mod uni_deque;
+mod upload_mgr;
 
 pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 pub use self::download::DownloadBuilder;
@@ -36,7 +37,7 @@ use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 
 use self::seed::{DataSourceStorage, verify_existing};
-use self::swarm::handle::{TorrentCommand, TorrentHandle};
+use self::swarm::{TorrentCommand, TorrentHandle};
 
 /// High-level session managing all torrent downloads/uploads.
 ///

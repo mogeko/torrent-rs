@@ -1,11 +1,9 @@
 mod announce;
 mod choke;
-pub(super) mod handle;
 mod peer;
 mod pex;
 mod pieces;
-pub(super) mod types;
-pub(super) mod upload;
+mod types;
 
 pub(crate) use types::{ActiveDownload, PeerEvent, PeerInfo};
 
@@ -15,24 +13,234 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{RwLock, mpsc};
+use tokio::task::JoinSet;
 
 use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
-use crate::metainfo::Metainfo;
-use crate::peer::{ExtensionNegotiation, PeerId, PeerMessage};
-use crate::piece::{PieceManager, PieceSelector};
+use crate::magnet::hex_encode;
+use crate::metainfo::{Metainfo, Mode};
+use crate::peer::{ExtensionNegotiation, PeerConnection, PeerId, PeerMessage};
+use crate::piece::{PieceManager, PieceSelector, RarestFirst};
+use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
-use super::peer_manager::PeerManager;
+use super::peer_mgr::PeerManager;
+use super::upload_mgr::UploadManager;
 use super::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 
-use self::handle::TorrentCommand;
 use self::types::{UT_PEX, UT_PEX_ID};
-use self::upload::UploadManager;
+
+/// Commands sent to the download loop.
+pub(crate) enum TorrentCommand {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+/// Internal handle for a single torrent.
+pub(crate) struct TorrentHandle {
+    pub info_hash: InfoHash,
+    /// Full torrent metadata — `None` for magnet links until
+    /// [`DownloadBuilder::resolve_metadata`] downloads it from peers (BEP 9/10).
+    pub metainfo: Option<Metainfo>,
+    pub peer_mgr: Arc<RwLock<PeerManager>>,
+    pub piece_mgr: Arc<RwLock<PieceManager>>,
+    pub status: Arc<RwLock<TorrentStatus>>,
+    /// Set by [`activate`](TorrentHandle::activate).
+    pub storage: Option<Arc<dyn Storage>>,
+    /// Set by [`activate`](TorrentHandle::activate).
+    pub control_tx: Option<mpsc::Sender<TorrentCommand>>,
+    /// Set by [`activate`](TorrentHandle::activate).
+    pub task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TorrentHandle {
+    /// Register a torrent without storage or download loop.
+    /// State = [`TorrentState::Registered`].
+    ///
+    /// For magnet links, `metainfo` is `None` and `num_pieces` is 0 —
+    /// metainfo must be downloaded from peers before activation.
+    pub(crate) fn register(spec: TorrentSpec, config: &SessionConfig) -> Self {
+        let (metainfo, info_hash, name, num_pieces) = match spec {
+            TorrentSpec::Metainfo(meta) => {
+                let ih = meta.info_hash();
+                let num = meta.info.num_pieces();
+                let name = match &meta.info.mode {
+                    Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+                };
+                (Some(meta), ih, name, num)
+            }
+            TorrentSpec::Magnet(uri) => {
+                let ih = *uri.primary_info_hash();
+                let name = uri.display_name.unwrap_or_else(|| hex_encode(ih));
+                (None, ih, name, 0)
+            }
+        };
+
+        let piece_mgr = Arc::new(RwLock::new(PieceManager::new(num_pieces)));
+        let peer_id = PeerId::random();
+        let peer_mgr = Arc::new(RwLock::new(PeerManager::new(
+            info_hash,
+            peer_id,
+            config.max_connections,
+            config.peer_connect_timeout,
+            config.peer_max_retries,
+            config.peer_cooldown,
+        )));
+
+        let status = Arc::new(RwLock::new(TorrentStatus {
+            info_hash,
+            name,
+            progress: 0.0,
+            download_rate: 0.0,
+            upload_rate: 0.0,
+            num_peers: 0,
+            num_seeds: 0,
+            state: TorrentState::Registered,
+        }));
+
+        TorrentHandle {
+            info_hash,
+            metainfo,
+            peer_mgr,
+            piece_mgr,
+            status,
+            storage: None,
+            control_tx: None,
+            task: None,
+        }
+    }
+
+    /// Attach storage and spawn the download loop.
+    /// Transitions from [`TorrentState::Registered`] to downloading.
+    ///
+    /// # Panics
+    ///
+    /// Panics if metainfo has not been resolved (i.e. `self.metainfo` is `None`).
+    pub(crate) fn activate(&mut self, storage: Arc<dyn Storage>, config: &SessionConfig) {
+        let metainfo = self.metainfo.as_ref();
+        let metainfo = metainfo.expect("metainfo must be resolved before activate");
+        let name = match &metainfo.info.mode {
+            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+        };
+
+        tracing::info!(
+            "torrent activated: {} ({} pieces)",
+            name,
+            metainfo.info.num_pieces()
+        );
+
+        self.spawn_swarm_loop(metainfo.clone(), storage, config);
+    }
+
+    /// Activate for seeding — accept pre-verified piece state.
+    ///
+    /// Unlike [`activate`](Self::activate), this does NOT call
+    /// [`Storage::prepare`] — the files must already exist on disk.
+    /// The caller must have already verified on-disk data and populated
+    /// `piece_mgr`.
+    pub(crate) fn activate_seed(
+        &mut self, metainfo: Metainfo, storage: Arc<dyn Storage>, piece_mgr: PieceManager,
+        config: &SessionConfig,
+    ) {
+        let name = match &metainfo.info.mode {
+            Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
+        };
+
+        assert_eq!(
+            metainfo.info_hash(),
+            self.info_hash,
+            "metainfo info_hash mismatch"
+        );
+
+        self.metainfo = Some(metainfo.clone());
+        self.piece_mgr = Arc::new(RwLock::new(piece_mgr));
+
+        tracing::info!(
+            "torrent activated for seeding: {} ({} pieces)",
+            name,
+            metainfo.info.num_pieces()
+        );
+
+        self.spawn_swarm_loop(metainfo, storage, config);
+    }
+
+    /// Build a [`SwarmLoop`], spawn its event loop, and store the
+    /// channel + join handle in [`TorrentHandle`].
+    fn spawn_swarm_loop(
+        &mut self, metainfo: Metainfo, storage: Arc<dyn Storage>, config: &SessionConfig,
+    ) {
+        let (control_tx, control_rx) = mpsc::channel::<TorrentCommand>(16);
+        let (peer_msg_tx, peer_msg_rx) =
+            mpsc::channel::<(SocketAddr, PeerEvent)>(config.peer_msg_buffer_size);
+
+        let peer_id = PeerId::random();
+        let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
+
+        let mut swarm_loop = SwarmLoop {
+            info_hash: self.info_hash,
+            metainfo,
+            storage: storage.clone(),
+            piece_mgr: self.piece_mgr.clone(),
+            peer_mgr: self.peer_mgr.clone(),
+            status: self.status.clone(),
+            control_rx,
+            peer_id,
+            listen_port: config.listen_port,
+            announce_ip: config.announce_ip,
+            announce_ipv6: config.announce_ipv6,
+            request_timeout: config.request_timeout,
+            max_concurrent_pieces: config.max_concurrent_pieces,
+            piece_cache_size: config.piece_cache_size,
+            endgame_threshold: config.endgame_threshold,
+            choke_interval: config.choke_interval,
+            snub_timeout: config.snub_timeout,
+            corrupt_ban_threshold: config.corrupt_ban_threshold,
+            announce_fallback_interval: config.announce_fallback_interval,
+            pex_enabled: config.pex_enabled,
+            pex_interval: config.pex_interval,
+            tracker,
+            next_announce: None,
+            has_announced: false,
+            announced_completed: false,
+            peers: HashMap::new(),
+            active_downloads: HashMap::new(),
+            selector: Box::new(RarestFirst),
+            peer_msg_rx,
+            peer_msg_tx,
+            upload_mgr: UploadManager::new(config.max_uploads),
+            total_downloaded: 0,
+            total_uploaded: 0,
+            last_downloaded: 0,
+            last_uploaded: 0,
+            piece_cache: Vec::new(),
+            recently_dropped: Vec::new(),
+        };
+
+        let task = tokio::spawn(async move { swarm_loop.run().await });
+
+        self.storage = Some(storage);
+        self.control_tx = Some(control_tx);
+        self.task = Some(task);
+    }
+}
 
 /// The core swarm engine for a single torrent — manages peer connections,
 /// piece downloads/uploads, choke/unchoke, tracker announces, and PEX.
+///
+/// # Lock Ordering
+///
+/// When acquiring multiple locks, follow this order to prevent deadlocks:
+///
+/// 1. `piece_mgr` (if needed)
+/// 2. `peer_mgr`
+/// 3. `status`
+///
+/// `peer_mgr` is the most contended lock.  To minimize contention:
+/// - `connect_pending()` releases the write lock between draining the
+///   pending queue and awaiting connection results (three-phase approach).
+/// - `send_to()` takes only a read lock on the hot path.
 pub(crate) struct SwarmLoop {
     pub info_hash: InfoHash,
     pub metainfo: Metainfo,
@@ -84,7 +292,7 @@ pub(crate) struct SwarmLoop {
     /// Clone for spawning new reader tasks.
     pub(crate) peer_msg_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     /// Upload slot manager.
-    pub(crate) upload_mgr: Arc<RwLock<UploadManager>>,
+    pub(crate) upload_mgr: UploadManager,
     /// Total bytes downloaded.
     pub(crate) total_downloaded: u64,
     /// Total bytes uploaded.
@@ -220,11 +428,53 @@ impl SwarmLoop {
     }
 
     /// Connect to pending peers (called from status tick).
+    ///
+    /// Uses a three-phase approach to avoid holding the write lock during
+    /// network I/O:
+    /// 1. Drain pending batch under write lock
+    /// 2. Await connection results WITHOUT the lock
+    /// 3. Apply results under write lock
     async fn connect_pending(&mut self) -> Result<(), Error> {
+        // Phase 1: Drain pending batch under write lock
+        let (batch, connect_timeout) = {
+            let mut pm = self.peer_mgr.write().await;
+            (pm.drain_pending_batch(), pm.connect_timeout())
+        };
+        // Write lock RELEASED here
+
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        // Phase 2: Spawn connection tasks and collect results WITHOUT lock
+        let mut joinset = JoinSet::new();
+        for &addr in &batch {
+            let info_hash = self.info_hash;
+            let peer_id = self.peer_id;
+            joinset.spawn(async move {
+                let result = PeerConnection::connect(addr, info_hash, peer_id).await;
+                (addr, result)
+            });
+        }
+
+        let mut outcomes: Vec<(SocketAddr, Result<PeerConnection, Error>)> = Vec::new();
+        loop {
+            match tokio::time::timeout(connect_timeout, joinset.join_next()).await {
+                Ok(Some(Ok(result))) => outcomes.push(result),
+                Ok(Some(Err(e))) => {
+                    tracing::error!("peer connection task panicked: {}", e);
+                }
+                Ok(None) => break, // all tasks completed
+                Err(_) => break,   // per-call timeout — remaining still running
+            }
+        }
+
+        // Phase 3: Apply results under write lock
         let newly_connected = {
             let mut pm = self.peer_mgr.write().await;
-            pm.connect_pending().await
+            pm.apply_connect_results(outcomes, &batch)
         };
+        // Write lock RELEASED here
 
         for addr in &newly_connected {
             let conn_arc = {
@@ -285,5 +535,22 @@ impl SwarmLoop {
         {
             tracing::warn!("failed to send LTEP handshake to {}: {}", addr, e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn torrent_command_variants() {
+        // Verify all enum variants are constructible
+        let pause = TorrentCommand::Pause;
+        let resume = TorrentCommand::Resume;
+        let cancel = TorrentCommand::Cancel;
+        match pause {
+            TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Cancel => {}
+        }
+        let _ = (pause, resume, cancel);
     }
 }

@@ -9,8 +9,8 @@ use crate::error::Error;
 use crate::peer::PeerMessage;
 use crate::piece::EndGame;
 
-use super::SwarmLoop;
 use super::types::{ActiveDownload, BLOCK_SIZE};
+use super::{InfoHash, SwarmLoop};
 
 impl SwarmLoop {
     /// Fill request pipelines for all peers that can accept more requests.
@@ -294,10 +294,10 @@ impl SwarmLoop {
 }
 
 /// Compute SHA-1 of `data` and compare with `expected`.
-pub(super) fn verify_piece_hash(data: &[u8], expected: [u8; 20]) -> bool {
+pub(super) fn verify_piece_hash(data: &[u8], expected: InfoHash) -> bool {
     let mut hasher = Sha1::new();
     hasher.update(data);
-    let computed: [u8; 20] = hasher.finalize().into();
+    let computed: InfoHash = hasher.finalize().into();
     computed == expected
 }
 
