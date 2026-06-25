@@ -32,8 +32,14 @@ impl SwarmLoop {
                     self.recently_dropped.push(addr);
                 }
                 // BEP 16: release super seed assignments for the disconnected peer.
-                // The unrevealed piece stays unrevealed — it will be reassigned.
+                // Pieces that were unrevealed and assigned to this peer go back
+                // to the pool so they can be reassigned on the next tick.
                 if self.super_seed {
+                    let ssa = self.super_seed_assignments.iter();
+                    let orphaned = ssa.filter(|(_, a)| *a == &addr).map(|(&i, _)| i);
+                    for idx in orphaned {
+                        self.super_seed_unrevealed.remove(&idx);
+                    }
                     self.super_seed_assignments.retain(|_, a| a != &addr);
                 }
             }
@@ -59,6 +65,11 @@ impl SwarmLoop {
                     }
                     // BEP 16: release super seed assignments for the dead peer.
                     if self.super_seed {
+                        let ssa = self.super_seed_assignments.iter();
+                        let orphaned = ssa.filter(|(_, a)| *a == &addr).map(|(&i, _)| i);
+                        for idx in orphaned {
+                            self.super_seed_unrevealed.remove(&idx);
+                        }
                         self.super_seed_assignments.retain(|_, a| a != &addr);
                     }
                 }
