@@ -3,8 +3,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::task::JoinSet;
-
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerId, PeerMessage};
 
@@ -34,9 +32,11 @@ impl BackoffState {
 
 /// Manages peer connections for a single torrent.
 pub(crate) struct PeerManager {
-    /// Our peer ID.
+    /// Our peer ID (reserved for future use, e.g. outbound connection spawning).
+    #[allow(dead_code)]
     peer_id: PeerId,
-    /// Info hash of the torrent.
+    /// Info hash of the torrent (reserved for future use).
+    #[allow(dead_code)]
     info_hash: InfoHash,
     /// Active connections by remote address.
     connections: HashMap<SocketAddr, Arc<PeerConnection>>,
@@ -106,20 +106,15 @@ impl PeerManager {
         self.connections.len()
     }
 
-    /// Connect to multiple pending peers in parallel.
+    /// Drain a batch of pending peers for connection attempts.
     ///
-    /// Drains a batch of pending peers (up to available slots), spawns
-    /// concurrent connection attempts via [`JoinSet`], and collects
-    /// results as they complete — fast peers are not delayed by slow ones.
+    /// Returns up to `max_connections - current_connections` peers from the
+    /// pending queue. Peers still in cooldown are skipped and re-enqueued.
     ///
-    /// Each individual `join_next` call is wrapped in a 500 ms timeout so
-    /// that the overall method never blocks the download loop for long.
-    /// Peers whose connection attempt is still in-flight when the timeout
-    /// fires are re-enqueued into [`Self::pending`] for the next tick.
-    ///
-    /// Peers still in cooldown are skipped.  Failed peers are re-enqueued
-    /// with a per-peer cooldown, up to [`MAX_RETRIES`] times.
-    pub async fn connect_pending(&mut self) -> Vec<SocketAddr> {
+    /// The caller should spawn connection tasks and collect results WITHOUT
+    /// holding the write lock, then call [`apply_connect_results`](Self::apply_connect_results)
+    /// to insert successful connections and update backoff state.
+    pub fn drain_pending_batch(&mut self) -> Vec<SocketAddr> {
         let batch_size = (self.max_connections as usize).saturating_sub(self.connections.len());
         let raw_batch: Vec<SocketAddr> = self.pending.drain_first_n(batch_size);
 
@@ -144,36 +139,37 @@ impl PeerManager {
             batch.push(addr);
         }
 
-        if batch.is_empty() {
-            return vec![];
-        }
+        batch
+    }
 
-        // Spawn all connection attempts concurrently via JoinSet.
-        let mut joinset = JoinSet::new();
-        for &addr in &batch {
-            let info_hash = self.info_hash;
-            let peer_id = self.peer_id;
-            joinset.spawn(async move {
-                let result = PeerConnection::connect(addr, info_hash, peer_id).await;
-                (addr, result)
-            });
-        }
+    /// Return the configured TCP connect timeout.
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
 
-        let per_call_timeout = self.connect_timeout;
+    /// Apply connection results from a batch of connection attempts.
+    ///
+    /// Successful connections are inserted into [`Self::connections`].
+    /// Failed connections update per-peer backoff state (re-enqueue with
+    /// cooldown, or discard after max retries).  Peers from `batch` that
+    /// are not in `outcomes` (timed out) are re-enqueued for the next tick.
+    ///
+    /// Returns the list of newly-connected peer addresses.
+    pub fn apply_connect_results(
+        &mut self, outcomes: Vec<(SocketAddr, Result<PeerConnection, Error>)>, batch: &[SocketAddr],
+    ) -> Vec<SocketAddr> {
+        let processed: HashSet<SocketAddr> = outcomes.iter().map(|(a, _)| *a).collect();
         let mut connected = Vec::new();
-        let mut processed: HashSet<SocketAddr> = HashSet::new();
 
-        loop {
-            match tokio::time::timeout(per_call_timeout, joinset.join_next()).await {
-                Ok(Some(Ok((addr, Ok(conn))))) => {
-                    processed.insert(addr);
+        for (addr, result) in outcomes {
+            match result {
+                Ok(conn) => {
                     tracing::info!("peer connected: {}", addr);
                     self.connections.insert(addr, Arc::new(conn));
                     self.backoff.remove(&addr);
                     connected.push(addr);
                 }
-                Ok(Some(Ok((addr, Err(_))))) => {
-                    processed.insert(addr);
+                Err(_) => {
                     let state = self
                         .backoff
                         .entry(addr)
@@ -198,17 +194,11 @@ impl PeerManager {
                         self.backoff.remove(&addr);
                     }
                 }
-                Ok(Some(Err(e))) => {
-                    tracing::error!("peer connection task panicked: {}", e);
-                }
-                Ok(None) => break, // all tasks completed
-                Err(_) => break,   // per-call timeout — remaining tasks still running
             }
         }
 
-        // Re-enqueue peers whose tasks are still in-flight (timeout path)
-        // so they are retried on the next tick.
-        for addr in &batch {
+        // Re-enqueue peers whose tasks timed out (not in outcomes)
+        for addr in batch {
             if !processed.contains(addr) {
                 self.pending.push_unique(*addr);
             }

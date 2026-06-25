@@ -13,12 +13,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{RwLock, mpsc};
+use tokio::task::JoinSet;
 
 use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
 use crate::magnet::hex_encode;
 use crate::metainfo::{Metainfo, Mode};
-use crate::peer::{ExtensionNegotiation, PeerId, PeerMessage};
+use crate::peer::{ExtensionNegotiation, PeerConnection, PeerId, PeerMessage};
 use crate::piece::{PieceManager, PieceSelector, RarestFirst};
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
@@ -267,6 +268,19 @@ impl TorrentHandle {
 
 /// The core swarm engine for a single torrent — manages peer connections,
 /// piece downloads/uploads, choke/unchoke, tracker announces, and PEX.
+///
+/// # Lock Ordering
+///
+/// When acquiring multiple locks, follow this order to prevent deadlocks:
+///
+/// 1. `piece_mgr` (if needed)
+/// 2. `peer_mgr`
+/// 3. `status`
+///
+/// `peer_mgr` is the most contended lock.  To minimize contention:
+/// - `connect_pending()` releases the write lock between draining the
+///   pending queue and awaiting connection results (three-phase approach).
+/// - `send_to()` takes only a read lock on the hot path.
 pub(crate) struct SwarmLoop {
     pub info_hash: InfoHash,
     pub metainfo: Metainfo,
@@ -454,11 +468,53 @@ impl SwarmLoop {
     }
 
     /// Connect to pending peers (called from status tick).
+    ///
+    /// Uses a three-phase approach to avoid holding the write lock during
+    /// network I/O:
+    /// 1. Drain pending batch under write lock
+    /// 2. Await connection results WITHOUT the lock
+    /// 3. Apply results under write lock
     async fn connect_pending(&mut self) -> Result<(), Error> {
+        // Phase 1: Drain pending batch under write lock
+        let (batch, connect_timeout) = {
+            let mut pm = self.peer_mgr.write().await;
+            (pm.drain_pending_batch(), pm.connect_timeout())
+        };
+        // Write lock RELEASED here
+
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        // Phase 2: Spawn connection tasks and collect results WITHOUT lock
+        let mut joinset = JoinSet::new();
+        for &addr in &batch {
+            let info_hash = self.info_hash;
+            let peer_id = self.peer_id;
+            joinset.spawn(async move {
+                let result = PeerConnection::connect(addr, info_hash, peer_id).await;
+                (addr, result)
+            });
+        }
+
+        let mut outcomes: Vec<(SocketAddr, Result<PeerConnection, Error>)> = Vec::new();
+        loop {
+            match tokio::time::timeout(connect_timeout, joinset.join_next()).await {
+                Ok(Some(Ok(result))) => outcomes.push(result),
+                Ok(Some(Err(e))) => {
+                    tracing::error!("peer connection task panicked: {}", e);
+                }
+                Ok(None) => break, // all tasks completed
+                Err(_) => break,   // per-call timeout — remaining still running
+            }
+        }
+
+        // Phase 3: Apply results under write lock
         let newly_connected = {
             let mut pm = self.peer_mgr.write().await;
-            pm.connect_pending().await
+            pm.apply_connect_results(outcomes, &batch)
         };
+        // Write lock RELEASED here
 
         for addr in &newly_connected {
             let conn_arc = {
