@@ -16,12 +16,12 @@ impl SwarmLoop {
                 // Clear this peer's pipeline, mark its blocks as unrequested
                 if let Some(peer) = self.peers.get(&addr) {
                     for slot in &peer.pipeline {
-                        if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b)) {
-                            if let Some(dl) = self.active_downloads.get_mut(&index) {
-                                let block_idx = (begin / dl.block_size) as usize;
-                                if block_idx < dl.requested.len() {
-                                    dl.requested[block_idx] = None;
-                                }
+                        if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b))
+                            && let Some(dl) = self.active_downloads.get_mut(&index)
+                        {
+                            let block_idx = (begin / dl.block_size) as usize;
+                            if block_idx < dl.requested.len() {
+                                dl.requested[block_idx] = None;
                             }
                         }
                     }
@@ -48,12 +48,12 @@ impl SwarmLoop {
                     // Clear pipeline for dead peer
                     if let Some(peer) = self.peers.get(&addr) {
                         for slot in &peer.pipeline {
-                            if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b)) {
-                                if let Some(dl) = self.active_downloads.get_mut(&index) {
-                                    let block_idx = (begin / dl.block_size) as usize;
-                                    if block_idx < dl.requested.len() {
-                                        dl.requested[block_idx] = None;
-                                    }
+                            if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b))
+                                && let Some(dl) = self.active_downloads.get_mut(&index)
+                            {
+                                let block_idx = (begin / dl.block_size) as usize;
+                                if block_idx < dl.requested.len() {
+                                    dl.requested[block_idx] = None;
                                 }
                             }
                         }
@@ -91,12 +91,12 @@ impl SwarmLoop {
             PeerMessage::Choke => {
                 peer.am_choked = true;
                 for slot in &mut peer.pipeline {
-                    if let Some((index, begin, _)) = *slot {
-                        if let Some(dl) = self.active_downloads.get_mut(&index) {
-                            let block_idx = (begin / dl.block_size) as usize;
-                            if block_idx < dl.requested.len() {
-                                dl.requested[block_idx] = None;
-                            }
+                    if let Some((index, begin, _)) = *slot
+                        && let Some(dl) = self.active_downloads.get_mut(&index)
+                    {
+                        let block_idx = (begin / dl.block_size) as usize;
+                        if block_idx < dl.requested.len() {
+                            dl.requested[block_idx] = None;
                         }
                     }
                     *slot = None;
