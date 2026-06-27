@@ -136,6 +136,16 @@ pub struct SessionConfig {
     ///
     /// Default: `60` s.
     pub pex_interval: Duration,
+    /// Enable Local Service Discovery (LSD, BEP 14). When enabled, the
+    /// session announces its presence on the local network via UDP
+    /// multicast and discovers LAN peers automatically.
+    ///
+    /// Default: `true`.
+    pub lsd_enabled: bool,
+    /// How often to send LSD announce messages (BEP 14).
+    ///
+    /// Default: `300` s (5 minutes).
+    pub lsd_interval: Duration,
     /// Buffer size for the peer message channel (per torrent).
     ///
     /// Default: `256`.
@@ -188,6 +198,8 @@ impl Default for SessionConfig {
             dht_poll_interval: Duration::from_secs(30),
             pex_enabled: true,
             pex_interval: Duration::from_secs(60),
+            lsd_enabled: true,
+            lsd_interval: Duration::from_secs(300),
             peer_msg_buffer_size: 256,
             bootstrap_nodes: Some(vec![
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
@@ -309,6 +321,8 @@ mod serde_tests {
             dht_poll_interval: Duration::from_secs(60),
             pex_enabled: false,
             pex_interval: Duration::from_secs(120),
+            lsd_enabled: false,
+            lsd_interval: Duration::from_secs(600),
             peer_msg_buffer_size: 512,
         };
 

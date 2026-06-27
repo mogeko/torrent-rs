@@ -10,6 +10,7 @@
 
 mod stream;
 
+pub use torrent_core::peer::lsd;
 pub use torrent_core::peer::metadata;
 pub use torrent_core::peer::pex;
 pub use torrent_core::peer::{

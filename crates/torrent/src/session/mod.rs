@@ -12,6 +12,7 @@
 
 mod config;
 mod download;
+mod lsd;
 mod peer_mgr;
 mod seed;
 mod swarm;
@@ -28,6 +29,8 @@ use std::str::FromStr as _;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use tokio::task::JoinHandle;
+
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
@@ -36,6 +39,7 @@ use crate::piece::PieceManager;
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 
+use self::lsd::LsdService;
 use self::seed::{DataSourceStorage, verify_existing};
 use self::swarm::{TorrentCommand, TorrentHandle};
 
@@ -75,6 +79,9 @@ pub struct Session {
     /// Shared dual-stack DHT node (if DHT is enabled).
     #[expect(dead_code)]
     dht_node: Option<Arc<DhtNode>>,
+    /// LSD background task handle (keeps the task alive).
+    #[expect(dead_code)]
+    lsd_task: Option<JoinHandle<()>>,
 }
 
 impl Session {
@@ -124,10 +131,24 @@ impl Session {
             }
         };
 
+        // Initialize LSD (Local Service Discovery, BEP 14)
+        let lsd_task = if config.lsd_enabled {
+            match LsdService::new(&config, torrents.clone()) {
+                Ok(mut lsd) => Some(tokio::spawn(async move { lsd.run().await })),
+                Err(e) => {
+                    tracing::warn!("LSD init failed, LSD disabled: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Session {
             config,
             torrents,
             dht_node,
+            lsd_task,
         })
     }
 
