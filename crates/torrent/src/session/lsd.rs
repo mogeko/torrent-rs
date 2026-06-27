@@ -175,7 +175,7 @@ impl LsdService {
         let mut announce_tick = tokio::time::interval(self.announce_interval);
 
         // Fire an initial announce immediately (don't wait 5 min)
-        self.broadcast_announce();
+        self.broadcast_announce().await;
 
         loop {
             tokio::select! {
@@ -188,7 +188,7 @@ impl LsdService {
 
                 // ── Periodic announce ──
                 _ = announce_tick.tick() => {
-                    self.broadcast_announce();
+                    self.broadcast_announce().await;
                 }
             }
         }
@@ -267,13 +267,14 @@ impl LsdService {
     // ── Announce ──────────────────────────────────────────────────────────
 
     /// Broadcast our presence for all active torrents on both multicast groups.
-    fn broadcast_announce(&self) {
-        let torrents = self.torrents.read().unwrap();
-        if torrents.is_empty() {
-            return;
-        }
-        let info_hashes: Vec<InfoHash> = torrents.keys().copied().collect();
-        drop(torrents);
+    async fn broadcast_announce(&self) {
+        let info_hashes: Vec<InfoHash> = {
+            let torrents = self.torrents.read().unwrap();
+            if torrents.is_empty() {
+                return;
+            }
+            torrents.keys().copied().collect()
+        };
 
         // IPv4 announce
         if let Some(ref socket) = self.socket_v4 {
@@ -281,7 +282,7 @@ impl LsdService {
                 LsdAnnounce::new(LsdHost::V4, self.listen_port).info_hashes(info_hashes.clone());
             if let Some(bytes) = announce.to_bytes() {
                 let dst = SocketAddr::V4(SocketAddrV4::new(LSD_IPV4_MULTICAST, LSD_PORT));
-                if let Err(e) = socket.try_send_to(&bytes, dst) {
+                if let Err(e) = socket.send_to(&bytes, dst).await {
                     tracing::warn!("LSD: failed to send IPv4 announce: {e}");
                 } else {
                     tracing::trace!(
@@ -297,7 +298,7 @@ impl LsdService {
             let announce = LsdAnnounce::new(LsdHost::V6, self.listen_port).info_hashes(info_hashes);
             if let Some(bytes) = announce.to_bytes() {
                 let dst = SocketAddr::V6(SocketAddrV6::new(LSD_IPV6_MULTICAST, LSD_PORT, 0, 0));
-                if let Err(e) = socket.try_send_to(&bytes, dst) {
+                if let Err(e) = socket.send_to(&bytes, dst).await {
                     tracing::warn!("LSD: failed to send IPv6 announce: {e}");
                 } else {
                     tracing::trace!(
