@@ -99,6 +99,11 @@ impl LsdService {
             .map_err(|e| tracing::warn!("LSD: set_multicast_ttl_v4(2) failed: {e}"))
             .ok();
 
+        socket
+            .set_multicast_loop_v4(false)
+            .map_err(|e| tracing::warn!("LSD: set_multicast_loop_v4(false) failed: {e}"))
+            .ok();
+
         socket.set_nonblocking(true).map_err(|e| {
             tracing::warn!("LSD: set_nonblocking(v4) failed: {e}");
             Error::new(ErrorKind::Io)
@@ -144,6 +149,11 @@ impl LsdService {
         socket
             .set_multicast_hops_v6(2)
             .map_err(|e| tracing::warn!("LSD: set_multicast_hops_v6(2) failed: {e}"))
+            .ok();
+
+        socket
+            .set_multicast_loop_v6(false)
+            .map_err(|e| tracing::warn!("LSD: set_multicast_loop_v6(false) failed: {e}"))
             .ok();
 
         socket.set_nonblocking(true).map_err(|e| {
@@ -290,7 +300,10 @@ impl LsdService {
                 if let Err(e) = socket.try_send_to(&bytes, dst) {
                     tracing::warn!("LSD: failed to send IPv6 announce: {e}");
                 } else {
-                    tracing::trace!("LSD: sent IPv6 announce");
+                    tracing::trace!(
+                        "LSD: sent IPv6 announce for {} torrent(s)",
+                        announce.info_hashes.len()
+                    );
                 }
             }
         }

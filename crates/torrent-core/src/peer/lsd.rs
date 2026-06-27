@@ -64,6 +64,7 @@ const MAX_ANNOUNCE_SIZE: usize = 1400;
 /// assert_eq!(v6.multicast_addr(), "[ff15::efc0:988f]:6771");
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum LsdHost {
     /// IPv4 org-local: `239.192.152.143:6771`
     V4,

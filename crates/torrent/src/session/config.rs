@@ -287,6 +287,8 @@ mod serde_tests {
         assert_eq!(back.tracker_timeout, config.tracker_timeout);
         assert_eq!(back.node_id, config.node_id);
         assert_eq!(back.dht_poll_interval, config.dht_poll_interval);
+        assert_eq!(back.lsd_enabled, config.lsd_enabled);
+        assert_eq!(back.lsd_interval, config.lsd_interval);
         assert_eq!(back.pex_enabled, config.pex_enabled);
         assert_eq!(back.pex_interval, config.pex_interval);
         assert_eq!(back.peer_msg_buffer_size, config.peer_msg_buffer_size);
