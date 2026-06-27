@@ -21,6 +21,8 @@ argument-hint: "[BEP number or protocol feature to implement]"
 | ------ | ---------------------------------------- | -------------------------------------------------------------- |
 | BEP 3  | The BitTorrent Protocol Specification    | `bencode`, `metainfo`, `peer`, `tracker`, `storage`, `session` |
 | BEP 5  | DHT Protocol                             | `dht` (krpc, routing table, rpc, query)                        |
+| BEP 6  | Fast Extension                           | `peer::message` (Suggest, HaveAll/None, Reject, AllowedFast),  |
+|        |                                          | `peer::handshake` (bit 44), `session::swarm`                   |
 | BEP 7  | IPv6 Tracker Extension                   | `tracker` (AnnounceRequest ip/ipv6, compact peers6, UDP IPv6)  |
 | BEP 9  | Extension for Peers to Send Metadata     | `magnet`                                                       |
 | BEP 10 | Extension Protocol (LTEP)                | `peer::extension`, `peer::message` (Extended), `peer::stream`  |
@@ -42,7 +44,7 @@ bencode (BEP 3 wire format)       tracker::http (BEP 3/23)
 metainfo (BEP 3/12/52 parsing)    tracker::udp (BEP 15)
 magnet (BEP 9 URI parsing)        peer::stream (BEP 3 TCP)
 peer::handshake (68-byte)         dht::rpc (BEP 5 UDP)
-peer::message (12 types)          session (orchestration)
+peer::message (17 types, BEP 6)   session (orchestration)
 peer::extension (BEP 10 LTEP)
 peer::pex (BEP 11 PEX)
 dht::krpc (BEP 5 message format)
@@ -75,7 +77,9 @@ When adding a new protocol feature, follow this order:
 <4-byte big-endian length> <1-byte message ID> <payload>
 ```
 
-### 11 Message Types
+### 17 Message Types (BEP 3 + BEP 6 + BEP 10)
+
+**Standard (BEP 3)**
 
 | ID  | Name          | Length | Payload                        |
 | --- | ------------- | ------ | ------------------------------ |
@@ -90,6 +94,22 @@ When adding a new protocol feature, follow this order:
 | 7   | Piece         | 9+X    | index + begin + block data     |
 | 8   | Cancel        | 13     | index + begin + length (u32×3) |
 | 9   | Port          | 3      | listen port (u16)              |
+
+**Fast Extension (BEP 6)**
+
+| ID  | Name        | Length | Payload                        |
+| --- | ----------- | ------ | ------------------------------ |
+| 13  | Suggest     | 5      | piece index (u32)              |
+| 14  | HaveAll     | 1      | —                              |
+| 15  | HaveNone    | 1      | —                              |
+| 16  | Reject      | 13     | index + begin + length (u32×3) |
+| 17  | AllowedFast | 5      | piece index (u32)              |
+
+**Extension Protocol (BEP 10)**
+
+| ID  | Name     | Length | Payload                |
+| --- | -------- | ------ | ---------------------- |
+| 20  | Extended | 2+X    | ext_id + bencoded data |
 
 Defined in [`crates/torrent-core/src/peer/message.rs`](../../../crates/torrent-core/src/peer/message.rs).
 
@@ -218,7 +238,6 @@ These BEPs are reserved or partially referenced in the codebase but not yet full
 
 | BEP | Title                           | Notes                                                               |
 | --- | ------------------------------- | ------------------------------------------------------------------- |
-| 6   | Fast Extension                  | Reserved bit 44 in handshake; Have All/None, Suggest, Allowed Fast  |
 | 14  | Local Service Discovery (LSD)   | LAN peer discovery via multicast                                    |
 | 27  | Private Torrents                | Single `private` flag in metainfo                                   |
 | 29  | uTP (Micro Transport Protocol)  | UDP-based congestion-controlled transport; required by most clients |

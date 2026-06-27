@@ -117,9 +117,14 @@ impl SwarmLoop {
         let choked_count = previously_unchoked.len();
         for addr in previously_unchoked {
             if !to_unchoke.contains(&addr) {
-                // Cancel outstanding requests before choking
+                // Cancel outstanding requests before choking.
+                // BEP 6: keep allowed-fast requests alive — only cancel
+                // requests that aren't in our_allowed_fast.
                 if let Some(peer) = self.peers.get(&addr) {
                     for (index, begin, _) in peer.pipeline.iter().flatten() {
+                        if peer.our_allowed_fast.contains(index) {
+                            continue;
+                        }
                         let cancel_len = self
                             .active_downloads
                             .get(index)
@@ -133,18 +138,20 @@ impl SwarmLoop {
                         let _ = pm.send_to(&addr, &msg).await;
                     }
                 }
-                // Clear pipeline for this peer
+                // Clear pipeline for this peer (BEP 6: keep allowed-fast slots).
                 if let Some(peer) = self.peers.get_mut(&addr) {
                     for slot in &mut peer.pipeline {
-                        if let Some((index, begin, _)) = *slot {
+                        if let Some((index, begin, _)) = *slot
+                            && !peer.our_allowed_fast.contains(&index)
+                        {
                             if let Some(dl) = self.active_downloads.get_mut(&index) {
                                 let block_idx = (begin / dl.block_size) as usize;
                                 if block_idx < dl.requested.len() {
                                     dl.requested[block_idx] = None;
                                 }
                             }
+                            *slot = None;
                         }
-                        *slot = None;
                     }
                 }
                 self.upload_mgr.choke(&addr);

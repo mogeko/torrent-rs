@@ -90,16 +90,20 @@ impl SwarmLoop {
             PeerMessage::KeepAlive => {}
             PeerMessage::Choke => {
                 peer.am_choked = true;
+                // BEP 6: keep allowed-fast requests alive — the peer
+                // may still request those even while choked.
                 for slot in &mut peer.pipeline {
                     if let Some((index, begin, _)) = *slot
-                        && let Some(dl) = self.active_downloads.get_mut(&index)
+                        && !peer.peer_allowed_fast.contains(&index)
                     {
-                        let block_idx = (begin / dl.block_size) as usize;
-                        if block_idx < dl.requested.len() {
-                            dl.requested[block_idx] = None;
+                        if let Some(dl) = self.active_downloads.get_mut(&index) {
+                            let block_idx = (begin / dl.block_size) as usize;
+                            if block_idx < dl.requested.len() {
+                                dl.requested[block_idx] = None;
+                            }
                         }
+                        *slot = None;
                     }
-                    *slot = None;
                 }
             }
             PeerMessage::Unchoke => {
@@ -174,13 +178,16 @@ impl SwarmLoop {
                 begin,
                 length,
             } => {
-                if !self.upload_mgr.is_unchoked(&addr) {
+                let unchoked = self.upload_mgr.is_unchoked(&addr);
+                // BEP 6: allow requests for pieces in our_allowed_fast
+                // even when the peer is choked.
+                let peer = self.peers.get(&addr);
+                let allowed_fast = peer.is_some_and(|p| p.our_allowed_fast.contains(&index));
+                if !unchoked && !allowed_fast {
                     return Ok(());
                 }
 
                 // BEP 16: only serve unrevealed pieces to the assigned peer.
-                // Revealed pieces (not in super_seed_unrevealed) are served
-                // to anyone, same as normal seeding mode.
                 if self.super_seed
                     && self.super_seed_unrevealed.contains(&index)
                     && self.super_seed_assignments.get(&index) != Some(&addr)
@@ -242,6 +249,46 @@ impl SwarmLoop {
             PeerMessage::Extended { ext_id, data } => {
                 self.handle_extended_message(addr, ext_id, data).await?;
             }
+            // ── BEP 6 Fast Extension ──
+            PeerMessage::Suggest(index) => {
+                tracing::trace!("peer {} suggests piece {}", addr, index);
+            }
+            PeerMessage::HaveAll => {
+                let num_pieces = self.metainfo.info.num_pieces();
+                peer.bitfield = vec![true; num_pieces];
+                tracing::debug!("peer {} has all {} pieces (HaveAll)", addr, num_pieces);
+            }
+            PeerMessage::HaveNone => {
+                let num_pieces = self.metainfo.info.num_pieces();
+                peer.bitfield = vec![false; num_pieces];
+                tracing::debug!("peer {} has no pieces (HaveNone)", addr);
+            }
+            PeerMessage::Reject { index, begin, .. } => {
+                tracing::debug!(
+                    "peer {} rejected request (piece {} offset {})",
+                    addr,
+                    index,
+                    begin,
+                );
+                if let Some(p) = self.peers.get_mut(&addr) {
+                    p.remove_request(index, begin);
+                }
+                if let Some(dl) = self.active_downloads.get_mut(&index) {
+                    let block_idx = (begin / dl.block_size) as usize;
+                    if block_idx < dl.requested.len() {
+                        dl.requested[block_idx] = None;
+                    }
+                }
+            }
+            PeerMessage::AllowedFast(index) => {
+                if !peer.peer_allowed_fast.contains(&index) {
+                    peer.peer_allowed_fast.push(index);
+                }
+                tracing::debug!("peer {} granted allowed fast piece {}", addr, index,);
+            }
+            PeerMessage::Unknown { id, .. } => {
+                tracing::trace!("ignoring unknown peer message id {} from {}", id, addr);
+            }
         }
 
         Ok(())
@@ -274,6 +321,9 @@ impl SwarmLoop {
     ///
     /// In super seeding mode (BEP 16), unrevealed pieces are excluded
     /// from the bitfield so peers don't request them until we reveal.
+    ///
+    /// If both sides support BEP 6 (Fast Extension), HaveAll or HaveNone
+    /// is sent instead of Bitfield for fully-seeded or empty peers.
     pub(super) async fn send_bitfield(&self, addr: SocketAddr) -> Result<(), Error> {
         let piece_mgr = self.piece_mgr.clone();
         let peer_mgr = self.peer_mgr.clone();
@@ -296,12 +346,31 @@ impl SwarmLoop {
             let have_all = pm.missing_pieces().is_empty();
             (bf, have_all)
         };
+
         let pm = peer_mgr.read().await;
-        // BEP 3: the bitfield message is optional and SHOULD NOT be sent
-        // if the client has no pieces (all bits are zero).
-        if bf_bytes.iter().any(|&b| b != 0) {
-            pm.send_to(&addr, &PeerMessage::Bitfield(bf_bytes)).await?;
+        let fast_enabled = pm
+            .connection(&addr)
+            .is_some_and(|c| c.remote_has_extension(44));
+
+        if fast_enabled {
+            if have_all {
+                // BEP 6: send HaveAll instead of a large Bitfield.
+                pm.send_to(&addr, &PeerMessage::HaveAll).await?;
+            } else if !bf_bytes.iter().any(|&b| b != 0) {
+                // BEP 6: explicitly signal no pieces with HaveNone.
+                pm.send_to(&addr, &PeerMessage::HaveNone).await?;
+            } else {
+                // Partial — send regular Bitfield.
+                pm.send_to(&addr, &PeerMessage::Bitfield(bf_bytes)).await?;
+            }
+        } else {
+            // BEP 3: the bitfield message is optional and SHOULD NOT be sent
+            // if the client has no pieces (all bits are zero).
+            if bf_bytes.iter().any(|&b| b != 0) {
+                pm.send_to(&addr, &PeerMessage::Bitfield(bf_bytes)).await?;
+            }
         }
+
         // BEP 3: only send Interested when we actually need pieces.
         if !have_all {
             pm.send_to(&addr, &PeerMessage::Interested).await?;

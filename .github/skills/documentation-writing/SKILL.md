@@ -56,8 +56,8 @@ Every `mod.rs` or module root file should start with `//!` that describes:
 ````rust
 //! Peer wire protocol message types (BEP 3).
 //!
-//! This module defines the 11 message types used in peer-to-peer
-//! communication after the handshake. All types are sync-only
+//! This module defines the 17 message types (BEP 3 + BEP 6 + BEP 10)
+//! used in peer-to-peer communication after the handshake. All types are sync-only
 //! and belong in `torrent-core`.
 //!
 //! # Message Format

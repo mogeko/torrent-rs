@@ -19,7 +19,7 @@ use crate::error::Error;
 
 use super::krpc::{self, KrpcMessage};
 use super::rpc::{DhtRpc, QueryHandler};
-use super::{DualRoutingTable, Node, find_node, generate_node_id, get_peers};
+use super::{DualRoutingTable, Node, find_node, generate_node_id, generate_secret, get_peers};
 
 /// Interval between periodic bootstrap refreshes.
 const BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(300);
@@ -75,7 +75,7 @@ impl DhtNode {
                 None
             }
         };
-        let secret = generate_node_id();
+        let secret = generate_secret();
         let routing_table = Arc::new(Mutex::new(DualRoutingTable::with_id(node_id)));
 
         let mut bootstrap_nodes = Vec::new();

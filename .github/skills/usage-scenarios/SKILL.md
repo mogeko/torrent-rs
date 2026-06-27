@@ -840,31 +840,31 @@ argument-hint: "[scenario category or specific use case to analyze]"
 
 ### In Scope (library responsibility)
 
-| Area                        | Scope                               |
-| --------------------------- | ----------------------------------- |
-| BitTorrent protocol (BEP 3) | Full implementation                 |
-| BenCode encoding/decoding   | Standalone, reusable                |
-| .torrent file parsing       | Complete (BEP 3/52)                 |
-| Magnet URI parsing          | Complete (BEP 9)                    |
-| Peer wire protocol          | All 11 message types                |
-| Extension protocol (BEP 10) | Handshake + message framing         |
-| Peer Exchange PEX (BEP 11)  | In scope                            |
-| Multi-tracker (BEP 12)      | announce-list support               |
-| Local Service Discovery     | In scope (BEP 14)                   |
-| UDP tracker (BEP 15)        | Client implementation               |
-| WebSeed download (BEP 19)   | In scope, as optional feature       |
-| Compact peer lists (BEP 23) | Parsing                             |
-| DHT (BEP 5)                 | Client + server node                |
-| Piece management            | Selection strategies + verification |
-| Storage abstraction         | Trait + file backend                |
-| Session orchestration       | High-level download/upload loop     |
-| HTTP/HTTPS tracker          | Client implementation               |
-| SOCKS5 proxy                | In scope, as `SessionConfig` option |
-| UPnP/NAT-PMP port mapping   | Optional feature, off by default    |
-| WebTorrent interop          | In scope as extension               |
-| Embedded tracker            | In scope for LAN/CI distribution    |
-| Serde support for types     | Optional feature gate               |
-| Metrics/Prometheus export   | In scope, minimal implementation    |
+| Area                        | Scope                                 |
+| --------------------------- | ------------------------------------- |
+| BitTorrent protocol (BEP 3) | Full implementation                   |
+| BenCode encoding/decoding   | Standalone, reusable                  |
+| .torrent file parsing       | Complete (BEP 3/52)                   |
+| Magnet URI parsing          | Complete (BEP 9)                      |
+| Peer wire protocol          | All 17 message types (BEP 3 + 6 + 10) |
+| Extension protocol (BEP 10) | Handshake + message framing           |
+| Peer Exchange PEX (BEP 11)  | In scope                              |
+| Multi-tracker (BEP 12)      | announce-list support                 |
+| Local Service Discovery     | In scope (BEP 14)                     |
+| UDP tracker (BEP 15)        | Client implementation                 |
+| WebSeed download (BEP 19)   | In scope, as optional feature         |
+| Compact peer lists (BEP 23) | Parsing                               |
+| DHT (BEP 5)                 | Client + server node                  |
+| Piece management            | Selection strategies + verification   |
+| Storage abstraction         | Trait + file backend                  |
+| Session orchestration       | High-level download/upload loop       |
+| HTTP/HTTPS tracker          | Client implementation                 |
+| SOCKS5 proxy                | In scope, as `SessionConfig` option   |
+| UPnP/NAT-PMP port mapping   | Optional feature, off by default      |
+| WebTorrent interop          | In scope as extension                 |
+| Embedded tracker            | In scope for LAN/CI distribution      |
+| Serde support for types     | Optional feature gate                 |
+| Metrics/Prometheus export   | In scope, minimal implementation      |
 
 ### Out of Scope (NOT library responsibility)
 

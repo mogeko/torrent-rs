@@ -17,18 +17,18 @@ and can also be used standalone when only low-level parsing or encoding is neede
 
 ## Modules
 
-| Module                       | Description                                           | BEP              |
-| ---------------------------- | ----------------------------------------------------- | ---------------- |
-| [`bencode`](./src/bencode)   | Bencode encoding/decoding with strict validation      | BEP 3            |
-| [`error`](./src/error.rs)    | Error + ErrorKind (kind + source pattern)             | —                |
-| [`metainfo`](./src/metainfo) | `.torrent` file parsing, `info_hash()`                | BEP 3, 12, 52    |
-| [`magnet`](./src/magnet)     | Magnet URI parsing (hex + base32)                     | BEP 9            |
-| [`peer`](./src/peer)         | Handshake, 12 message types, PeerId, PEX, metadata    | BEP 3, 9, 10, 11 |
-| [`dht`](./src/dht)           | KRPC message format, Kademlia RoutingTable            | BEP 5            |
-| [`tracker`](./src/tracker)   | Announce request/response data types                  | BEP 3, 15, 23    |
-| [`piece`](./src/piece)       | PieceManager (bitfield), PieceSelector + 4 strategies | BEP 3            |
-| [`spec`](./src/spec.rs)      | Unified torrent spec (metainfo or magnet)             | —                |
-| [`storage`](./src/storage)   | Storage trait for piece read/write                    | BEP 3            |
+| Module                       | Description                                           | BEP                 |
+| ---------------------------- | ----------------------------------------------------- | ------------------- |
+| [`bencode`](./src/bencode)   | Bencode encoding/decoding with strict validation      | BEP 3               |
+| [`error`](./src/error.rs)    | Error + ErrorKind (kind + source pattern)             | —                   |
+| [`metainfo`](./src/metainfo) | `.torrent` file parsing, `info_hash()`                | BEP 3, 12, 52       |
+| [`magnet`](./src/magnet)     | Magnet URI parsing (hex + base32)                     | BEP 9               |
+| [`peer`](./src/peer)         | Handshake, 17 message types, PeerId, PEX, metadata    | BEP 3, 6, 9, 10, 11 |
+| [`dht`](./src/dht)           | KRPC message format, Kademlia RoutingTable            | BEP 5               |
+| [`tracker`](./src/tracker)   | Announce request/response data types                  | BEP 3, 15, 23       |
+| [`piece`](./src/piece)       | PieceManager (bitfield), PieceSelector + 4 strategies | BEP 3               |
+| [`spec`](./src/spec.rs)      | Unified torrent spec (metainfo or magnet)             | —                   |
+| [`storage`](./src/storage)   | Storage trait for piece read/write                    | BEP 3               |
 
 ## Quick Start
 
