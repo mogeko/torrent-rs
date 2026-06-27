@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{UdpSocket, lookup_host};
 
 use crate::error::{Error, ErrorKind};
@@ -106,21 +107,8 @@ impl UdpTracker {
         };
 
         for addr in target_addrs {
-            // Bind a socket matching this address family.
-            let bind_addr = SocketAddr::new(
-                if addr.is_ipv4() {
-                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-                } else {
-                    IpAddr::V6(Ipv6Addr::UNSPECIFIED)
-                },
-                0,
-            );
-            let socket = match UdpSocket::bind(bind_addr).await {
-                Ok(s) => s,
-                Err(e) => {
-                    last_err = Some(Error::tracker_failed(e));
-                    continue;
-                }
+            let Ok(socket) = bind_tracker_socket(addr.is_ipv4()) else {
+                continue;
             };
 
             // Phase 1: Connect (use cached connection_id if available)
@@ -172,6 +160,47 @@ impl UdpTracker {
 
         Err(last_err.unwrap_or_else(|| Error::new(ErrorKind::TrackerRequestFailed)))
     }
+}
+
+/// Bind a UDP socket with SO_REUSEADDR for tracker communication.
+///
+/// Binds to an ephemeral port (`:0`). SO_REUSEADDR avoids bind failures
+/// when many short-lived tracker requests are made in rapid succession.
+fn bind_tracker_socket(v4: bool) -> Result<UdpSocket, Error> {
+    let domain = if v4 { Domain::IPV4 } else { Domain::IPV6 };
+    let socket = match Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)) {
+        Ok(s) => s,
+        Err(e) => return Err(Error::tracker_failed(e)),
+    };
+
+    socket
+        .set_reuse_address(true)
+        .map_err(|e| tracing::warn!("UDP tracker: set_reuse_address failed: {e}"))
+        .ok();
+
+    if !v4 {
+        socket
+            .set_only_v6(true)
+            .map_err(|e| tracing::warn!("UDP tracker: set_only_v6 failed: {e}"))
+            .ok();
+    }
+
+    let bind_addr = if v4 {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+    } else {
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+    };
+
+    socket
+        .bind(&bind_addr.into())
+        .map_err(Error::tracker_failed)?;
+    socket
+        .set_nonblocking(true)
+        .map_err(Error::tracker_failed)?;
+
+    let std_socket: std::net::UdpSocket = socket.into();
+
+    tokio::net::UdpSocket::from_std(std_socket).map_err(Error::tracker_failed)
 }
 
 /// Connect phase: obtain a connection ID from the tracker.

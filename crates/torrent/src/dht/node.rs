@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use rand::RngExt;
 use sha1::{Digest, Sha1};
+use tokio::net::lookup_host;
 use tokio::sync::Mutex;
 
 use crate::error::Error;
@@ -80,7 +81,7 @@ impl DhtNode {
 
         let mut bootstrap_nodes = Vec::new();
         for (host, port) in bootstrap_v4.iter().chain(bootstrap_v6.iter()) {
-            if let Ok(mut addrs) = tokio::net::lookup_host((*host, *port)).await {
+            if let Ok(mut addrs) = lookup_host((*host, *port)).await {
                 if let Some(addr) = addrs.next() {
                     bootstrap_nodes.push(addr);
                 }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, lookup_host};
 use tokio_rustls::TlsConnector;
 
 use crate::error::{Error, ErrorKind};
@@ -203,9 +203,39 @@ async fn send_http_request(
     let path_and_query = path_and_query.to_owned();
 
     let response = tokio::time::timeout(timeout, async move {
-        let tcp_stream = TcpStream::connect((&*host, port))
+        let addrs = lookup_host((&*host, port))
             .await
             .map_err(Error::tracker_failed)?;
+
+        // Try each resolved address (IPv4 and/or IPv6) until one connects.
+        // This mirrors TcpStream::connect((host, port)) which iterates all
+        // resolved addresses, but also allows us to set TCP_NODELAY.
+        let mut last_err = None;
+        let mut tcp_stream = None;
+        for addr in addrs {
+            let socket = if addr.is_ipv4() {
+                TcpSocket::new_v4()
+            } else {
+                TcpSocket::new_v6()
+            }
+            .map_err(Error::tracker_failed)?;
+
+            socket
+                .set_nodelay(true)
+                .map_err(Error::tracker_failed)?;
+
+            match socket.connect(addr).await {
+                Ok(s) => {
+                    tcp_stream = Some(s);
+                    break;
+                }
+                Err(e) => last_err = Some(Error::tracker_failed(e)),
+            }
+        }
+
+        let Some(tcp_stream) = tcp_stream else {
+            return Err(last_err.unwrap_or(Error::new(ErrorKind::TrackerRequestFailed)));
+        };
 
         let mut stream: Box<dyn TrackerStream> = if let Some(ref connector) = tls {
             use rustls::pki_types::ServerName;

@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 
@@ -55,7 +56,7 @@ impl DhtRpc {
     pub async fn with_timeout(
         bind_addr: SocketAddr, timeout: Duration,
     ) -> Result<Arc<Self>, Error> {
-        let socket = UdpSocket::bind(bind_addr).await?;
+        let socket = bind_dht_socket(bind_addr)?;
         let rpc = Arc::new(DhtRpc {
             socket,
             pending: Mutex::new(HashMap::new()),
@@ -150,4 +151,45 @@ impl DhtRpc {
             }
         });
     }
+}
+
+/// Bind a UDP socket with SO_REUSEADDR for DHT.
+///
+/// DHT binds known ports (e.g. 6882). Without SO_REUSEADDR, a session
+/// restart would fail while the old socket is still in TIME_WAIT (up to
+/// 120 s).
+fn bind_dht_socket(bind_addr: SocketAddr) -> Result<UdpSocket, Error> {
+    let domain = if bind_addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    let socket = match Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)) {
+        Ok(s) => s,
+        Err(e) => return Err(Error::protocol(e)),
+    };
+
+    socket
+        .set_reuse_address(true)
+        .map_err(|e| tracing::warn!("DHT: set_reuse_address failed: {e}"))
+        .ok();
+
+    if bind_addr.is_ipv6() {
+        socket
+            .set_only_v6(true)
+            .map_err(|e| tracing::warn!("DHT: set_only_v6 failed: {e}"))
+            .ok();
+    }
+
+    socket
+        .bind(&bind_addr.into())
+        .map_err(|e| Error::with_source(ErrorKind::Protocol, e))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|e| Error::with_source(ErrorKind::Protocol, e))?;
+
+    let std_socket: std::net::UdpSocket = socket.into();
+
+    tokio::net::UdpSocket::from_std(std_socket).map_err(Error::protocol)
 }
