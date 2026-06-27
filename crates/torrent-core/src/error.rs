@@ -72,6 +72,8 @@ pub enum ErrorKind {
     PeerInvalidPexMessage,
     /// A Fast Extension message (BEP 6) was malformed.
     PeerInvalidFastMessage,
+    /// An LSD announce message (BEP 14) was malformed.
+    PeerInvalidLsdAnnounce,
     // Tracker errors
     TrackerInvalidResponse,
     TrackerRequestFailed,
@@ -98,6 +100,7 @@ impl fmt::Display for Error {
             ErrorKind::PeerInvalidExtendedMessage => write!(f, "invalid extended peer message"),
             ErrorKind::PeerInvalidPexMessage => write!(f, "invalid PEX message"),
             ErrorKind::PeerInvalidFastMessage => write!(f, "invalid Fast Extension message"),
+            ErrorKind::PeerInvalidLsdAnnounce => write!(f, "invalid LSD announce message"),
             ErrorKind::TrackerInvalidResponse => write!(f, "invalid tracker response"),
             ErrorKind::TrackerRequestFailed => write!(f, "tracker request failed"),
             ErrorKind::TrackerProtocolError => write!(f, "tracker protocol error"),
@@ -128,6 +131,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::PeerInvalidExtendedMessage => write!(f, "PeerInvalidExtendedMessage"),
             ErrorKind::PeerInvalidPexMessage => write!(f, "PeerInvalidPexMessage"),
             ErrorKind::PeerInvalidFastMessage => write!(f, "PeerInvalidFastMessage"),
+            ErrorKind::PeerInvalidLsdAnnounce => write!(f, "PeerInvalidLsdAnnounce"),
             ErrorKind::TrackerInvalidResponse => write!(f, "TrackerInvalidResponse"),
             ErrorKind::TrackerRequestFailed => write!(f, "TrackerRequestFailed"),
             ErrorKind::TrackerProtocolError => write!(f, "TrackerProtocolError"),
