@@ -44,12 +44,19 @@ impl SwarmLoop {
 
         let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
         for addr in peer_addrs {
-            let can_req = self.peers.get(&addr).is_some_and(|p| p.can_request());
-            if !can_req {
+            let can_req_normal = self.peers.get(&addr).is_some_and(|p| p.can_request());
+            // BEP 6: even when choked, the peer may still request pieces
+            // that are in its peer_allowed_fast set.
+            let can_req_fast = self
+                .peers
+                .get(&addr)
+                .is_some_and(|p| p.am_choked && !p.peer_allowed_fast.is_empty());
+            if !can_req_normal && !can_req_fast {
                 continue;
             }
+            let only_allowed_fast = !can_req_normal && can_req_fast;
 
-            let block_opt = self.find_block_for_peer(&addr, in_endgame);
+            let block_opt = self.find_block_for_peer(&addr, in_endgame, only_allowed_fast);
 
             let (index, begin) = if let Some(blk) = block_opt {
                 blk
@@ -114,8 +121,11 @@ impl SwarmLoop {
     }
 
     /// Find the next block to request from a specific peer.
+    ///
+    /// When `only_allowed_fast` is true, only pieces in the peer's
+    /// `peer_allowed_fast` set are considered (BEP 6).
     pub(super) fn find_block_for_peer(
-        &self, addr: &SocketAddr, in_endgame: bool,
+        &self, addr: &SocketAddr, in_endgame: bool, only_allowed_fast: bool,
     ) -> Option<(u32, u32)> {
         let peer = self.peers.get(addr)?;
         if peer.bitfield.is_empty() {
@@ -125,6 +135,10 @@ impl SwarmLoop {
         for (idx, dl) in &self.active_downloads {
             let idx_usize = *idx as usize;
             if idx_usize >= peer.bitfield.len() || !peer.bitfield[idx_usize] {
+                continue;
+            }
+            // BEP 6: when only_allowed_fast is set, filter to allowed pieces.
+            if only_allowed_fast && !peer.peer_allowed_fast.contains(idx) {
                 continue;
             }
 

@@ -19,7 +19,9 @@ use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
 use crate::magnet::hex_encode;
 use crate::metainfo::{Metainfo, Mode};
-use crate::peer::{ExtensionNegotiation, PeerConnection, PeerId, PeerMessage};
+use crate::peer::{
+    ExtensionNegotiation, PeerConnection, PeerId, PeerMessage, compute_allowed_fast_set,
+};
 use crate::piece::{PieceManager, PieceSelector, RarestFirst};
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
@@ -523,6 +525,25 @@ impl SwarmLoop {
                         self.send_extended_handshake(*addr, &pi.our_extension_ids)
                             .await;
                     }
+                }
+
+                // BEP 6: compute and send our Allowed Fast set to the peer
+                // before the Bitfield/HaveAll/HaveNone exchange.
+                if conn_arc.remote_has_extension(44) {
+                    let num_pieces = self.metainfo.info.num_pieces() as u32;
+                    let fast_set = compute_allowed_fast_set(
+                        &self.info_hash,
+                        *addr,
+                        num_pieces,
+                        10, // k=10 per BEP 6 recommendation
+                    );
+                    if !fast_set.is_empty() {
+                        let pm = self.peer_mgr.read().await;
+                        for &piece_idx in &fast_set {
+                            let _ = pm.send_to(addr, &PeerMessage::AllowedFast(piece_idx)).await;
+                        }
+                    }
+                    pi.our_allowed_fast = fast_set;
                 }
 
                 self.spawn_peer_reader(*addr, conn_arc);

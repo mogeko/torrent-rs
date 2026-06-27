@@ -64,6 +64,9 @@ impl PeerConnection {
         // BEP 10 convention: byte 5 bit 4 = 0x10 signals LTEP support
         // (alongside bit 63 which is shared with DHT)
         handshake.set_reserved_byte(5, handshake.reserved[5] | 0x10);
+        // BEP 6: byte 5 bit 4 is already set above (bit 44 = LTEP shared bit).
+        // Additionally set bit 3 (0x08) for Fast Extension support.
+        handshake.set_reserved_byte(5, handshake.reserved[5] | 0x08);
         let handshake_bytes = handshake.to_bytes();
 
         if let Err(e) =

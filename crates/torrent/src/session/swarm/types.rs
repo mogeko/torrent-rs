@@ -70,6 +70,12 @@ pub(crate) struct PeerInfo {
     /// Metadata size from remote's LTEP handshake (BEP 10 `metadata_size`,
     /// for BEP 9 metadata exchange).
     pub(super) metadata_size: Option<i64>,
+    /// Pieces we told this peer they may request from us even when choked
+    /// (BEP 6). Populated during connection establishment.
+    pub(super) our_allowed_fast: Vec<u32>,
+    /// Pieces this peer told us we may request from them even when choked
+    /// (BEP 6). Populated from incoming AllowedFast messages.
+    pub(super) peer_allowed_fast: Vec<u32>,
 }
 
 impl PeerInfo {
@@ -93,6 +99,8 @@ impl PeerInfo {
             max_requests: PIPELINE_SIZE,
             client_version: None,
             metadata_size: None,
+            our_allowed_fast: Vec::new(),
+            peer_allowed_fast: Vec::new(),
         }
     }
 
