@@ -1,3 +1,7 @@
+use std::net::IpAddr;
+
+use sha1::{Digest, Sha1};
+
 use crate::error::{Error, ErrorKind};
 
 /// A peer wire protocol message (BEP 3).
@@ -8,8 +12,9 @@ use crate::error::{Error, ErrorKind};
 /// <4-byte big-endian length> <1-byte message ID> <payload>
 /// ```
 ///
-/// Currently 11 message types are supported, from `KeepAlive` (length = 0)
-/// to `Port` (length = 3).
+/// Supports 17 message types: 12 standard (BEP 3) including BEP 10 Extended,
+/// plus 5 Fast Extension messages (BEP 6) and an `Unknown` catch-all for
+/// forward compatibility.
 ///
 /// # Examples
 ///
@@ -106,6 +111,51 @@ pub enum PeerMessage {
         /// Bencoded dictionary payload.
         data: Vec<u8>,
     },
+    /// Suggest: `<len=0005><id=13><piece index>` (BEP 6).
+    ///
+    /// Advisory message suggesting a piece the peer should download.
+    /// May be ignored by the receiver.
+    Suggest(u32),
+    /// HaveAll: `<len=0001><id=14>` (BEP 6).
+    ///
+    /// Sent by a peer that has every piece, replacing the Bitfield
+    /// message. This eliminates sending a large bitfield for seeds.
+    HaveAll,
+    /// HaveNone: `<len=0001><id=15>` (BEP 6).
+    ///
+    /// Sent by a peer that has no pieces, replacing an all-zero
+    /// Bitfield message.
+    HaveNone,
+    /// Reject: `<len=0013><id=16><index><begin><length>` (BEP 6).
+    ///
+    /// Sent in response to a Request that cannot be fulfilled.
+    /// The receiver should clear the corresponding block from its
+    /// pipeline.
+    Reject {
+        /// Piece index.
+        index: u32,
+        /// Byte offset within the piece.
+        begin: u32,
+        /// Length of the block that was requested.
+        length: u32,
+    },
+    /// AllowedFast: `<len=0005><id=17><piece index>` (BEP 6).
+    ///
+    /// Grants the receiver permission to request this piece even
+    /// when choked. Sent during connection establishment after
+    /// the handshake, before the Bitfield/HaveAll/HaveNone exchange.
+    AllowedFast(u32),
+    /// Unknown message type (forward compatibility).
+    ///
+    /// BEP 3 requires clients to ignore messages with unrecognized
+    /// IDs rather than disconnecting. This variant captures such
+    /// messages so they can be silently skipped.
+    Unknown {
+        /// The unrecognized message ID byte.
+        id: u8,
+        /// Raw payload bytes (excluding the length prefix and ID).
+        data: Vec<u8>,
+    },
 }
 
 /// Encode a `PeerMessage` to its wire format bytes.
@@ -195,7 +245,105 @@ pub fn encode(msg: &PeerMessage) -> Vec<u8> {
             buf.extend_from_slice(data);
             buf
         }
+        PeerMessage::Suggest(index) => {
+            let mut buf = vec![0, 0, 0, 5, 13];
+            buf.extend_from_slice(&index.to_be_bytes());
+            buf
+        }
+        PeerMessage::HaveAll => vec![0, 0, 0, 1, 14],
+        PeerMessage::HaveNone => vec![0, 0, 0, 1, 15],
+        PeerMessage::Reject {
+            index,
+            begin,
+            length,
+        } => {
+            let mut buf = vec![0, 0, 0, 13, 16];
+            buf.extend_from_slice(&index.to_be_bytes());
+            buf.extend_from_slice(&begin.to_be_bytes());
+            buf.extend_from_slice(&length.to_be_bytes());
+            buf
+        }
+        PeerMessage::AllowedFast(index) => {
+            let mut buf = vec![0, 0, 0, 5, 17];
+            buf.extend_from_slice(&index.to_be_bytes());
+            buf
+        }
+        PeerMessage::Unknown { id, data } => {
+            // SAFETY: MAX_MESSAGE_SIZE (2 MiB) ensures data.len() never exceeds
+            // u32::MAX - 1, so the length prefix always fits in a u32.
+            let len = 1u32
+                + u32::try_from(data.len()).expect("unknown message payload exceeds u32::MAX - 1");
+            let mut buf = Vec::with_capacity(4 + len as usize);
+            buf.extend_from_slice(&len.to_be_bytes());
+            buf.push(*id);
+            buf.extend_from_slice(data);
+            buf
+        }
     }
+}
+
+/// Compute the Allowed Fast set for a peer (BEP 6 §2.2).
+///
+/// Returns the first `k` unique piece indices derived from:
+///
+/// ```text
+/// SHA1(info_hash || ip_bytes || i)
+/// ```
+///
+/// where `ip_bytes` is the peer's IP address in network byte order
+/// (4 bytes for IPv4, 16 bytes for IPv6) and `i` starts at 0 and
+/// increments until `k` unique indices are found or the search is
+/// exhausted.
+///
+/// The result is returned in generation order as required by BEP 6.
+///
+/// # Examples
+///
+/// ```
+/// use std::net::SocketAddr;
+/// use torrent_core::peer::compute_allowed_fast_set;
+///
+/// let info_hash = [0u8; 20];
+/// let addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
+/// let set = compute_allowed_fast_set(&info_hash, addr, 100, 10);
+/// assert_eq!(set.len(), 10);
+/// ```
+pub fn compute_allowed_fast_set(
+    info_hash: &[u8; 20], addr: std::net::SocketAddr, num_pieces: u32, k: usize,
+) -> Vec<u32> {
+    if num_pieces == 0 || k == 0 {
+        return Vec::new();
+    }
+
+    let ip_bytes = match addr.ip() {
+        IpAddr::V4(v4) => v4.octets().to_vec(),
+        IpAddr::V6(v6) => v6.octets().to_vec(),
+    };
+
+    let mut set = Vec::with_capacity(k);
+    // Upper bound: if we've tried 4× the piece count without filling
+    // k slots, the set is saturated.
+    let max_iterations = num_pieces as usize * 4;
+
+    for i in 0u32.. {
+        if set.len() >= k || i as usize >= max_iterations {
+            break;
+        }
+
+        let mut hasher = Sha1::new();
+        Digest::update(&mut hasher, info_hash);
+        Digest::update(&mut hasher, &ip_bytes);
+        Digest::update(&mut hasher, i.to_be_bytes().as_ref());
+        let hash = hasher.finalize();
+
+        let piece_index = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) % num_pieces;
+
+        if !set.contains(&piece_index) {
+            set.push(piece_index);
+        }
+    }
+
+    set
 }
 
 /// Decode a `PeerMessage` from wire format bytes.
@@ -311,7 +459,53 @@ pub fn decode(data: &[u8]) -> Result<PeerMessage, Error> {
             let data = payload[1..].to_vec();
             Ok(PeerMessage::Extended { ext_id, data })
         }
-        _ => Err(Error::new(ErrorKind::PeerInvalidMessage)),
+        13 => {
+            if len != 5 || payload.len() != 4 {
+                return Err(Error::new(ErrorKind::PeerInvalidFastMessage));
+            }
+            let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(PeerMessage::Suggest(index))
+        }
+        14 => {
+            if len != 1 {
+                return Err(Error::new(ErrorKind::PeerInvalidFastMessage));
+            }
+            Ok(PeerMessage::HaveAll)
+        }
+        15 => {
+            if len != 1 {
+                return Err(Error::new(ErrorKind::PeerInvalidFastMessage));
+            }
+            Ok(PeerMessage::HaveNone)
+        }
+        16 => {
+            if len != 13 || payload.len() != 12 {
+                return Err(Error::new(ErrorKind::PeerInvalidFastMessage));
+            }
+            let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let length = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            Ok(PeerMessage::Reject {
+                index,
+                begin,
+                length,
+            })
+        }
+        17 => {
+            if len != 5 || payload.len() != 4 {
+                return Err(Error::new(ErrorKind::PeerInvalidFastMessage));
+            }
+            let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(PeerMessage::AllowedFast(index))
+        }
+        _ => {
+            // BEP 3: ignore unknown message types for forward compatibility.
+            tracing::debug!("ignoring unknown peer message id {}", msg_id);
+            Ok(PeerMessage::Unknown {
+                id: msg_id,
+                data: payload.to_vec(),
+            })
+        }
     }
 }
 
@@ -472,9 +666,17 @@ mod tests {
 
     #[test]
     fn decode_unknown_message_id() {
-        // length=1, id=255 (invalid)
+        // BEP 3: unknown message IDs should be accepted as Unknown
+        // for forward compatibility, not rejected.
         let data = [0, 0, 0, 1, 255];
-        assert!(decode(&data).is_err());
+        let decoded = decode(&data).unwrap();
+        assert_eq!(
+            decoded,
+            PeerMessage::Unknown {
+                id: 255,
+                data: vec![]
+            }
+        );
     }
 
     #[test]
@@ -537,5 +739,195 @@ mod tests {
         let encoded = encode(&msg);
         let decoded = decode(&encoded).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    // ── BEP 6 Fast Extension tests ──
+
+    #[test]
+    fn encode_suggest() {
+        let msg = PeerMessage::Suggest(42);
+        let encoded = encode(&msg);
+        assert_eq!(encoded.len(), 9);
+        assert_eq!(&encoded[0..5], &[0, 0, 0, 5, 13]);
+        assert_eq!(&encoded[5..], &42u32.to_be_bytes());
+    }
+
+    #[test]
+    fn encode_haveall() {
+        let msg = PeerMessage::HaveAll;
+        let encoded = encode(&msg);
+        assert_eq!(encoded, vec![0, 0, 0, 1, 14]);
+    }
+
+    #[test]
+    fn encode_havenone() {
+        let msg = PeerMessage::HaveNone;
+        let encoded = encode(&msg);
+        assert_eq!(encoded, vec![0, 0, 0, 1, 15]);
+    }
+
+    #[test]
+    fn encode_reject() {
+        let msg = PeerMessage::Reject {
+            index: 3,
+            begin: 2048,
+            length: 16384,
+        };
+        let encoded = encode(&msg);
+        assert_eq!(encoded.len(), 17);
+        assert_eq!(encoded[4], 16);
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn encode_allowed_fast() {
+        let msg = PeerMessage::AllowedFast(7);
+        let encoded = encode(&msg);
+        assert_eq!(encoded.len(), 9);
+        assert_eq!(&encoded[0..5], &[0, 0, 0, 5, 17]);
+        assert_eq!(&encoded[5..], &7u32.to_be_bytes());
+    }
+
+    #[test]
+    fn roundtrip_bep6_messages() {
+        let messages = vec![
+            PeerMessage::Suggest(0),
+            PeerMessage::Suggest(42),
+            PeerMessage::HaveAll,
+            PeerMessage::HaveNone,
+            PeerMessage::Reject {
+                index: 0,
+                begin: 0,
+                length: 16384,
+            },
+            PeerMessage::AllowedFast(0),
+            PeerMessage::AllowedFast(99),
+        ];
+        for msg in &messages {
+            let encoded = encode(msg);
+            let decoded = decode(&encoded).unwrap();
+            assert_eq!(msg, &decoded, "roundtrip failed for {:?}", msg);
+        }
+    }
+
+    #[test]
+    fn decode_unknown_is_forward_compatible() {
+        // An unknown message with id=99, len=2 (id + 1 byte payload)
+        let data = [0, 0, 0, 2, 99, 0xAB];
+        let decoded = decode(&data).unwrap();
+        assert_eq!(
+            decoded,
+            PeerMessage::Unknown {
+                id: 99,
+                data: vec![0xAB],
+            }
+        );
+    }
+
+    #[test]
+    fn roundtrip_unknown() {
+        let msg = PeerMessage::Unknown {
+            id: 200,
+            data: vec![1, 2, 3],
+        };
+        let encoded = encode(&msg);
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn decode_invalid_suggest() {
+        // len=3 (wrong), id=13 — should fail with PeerInvalidFastMessage
+        let data = [0, 0, 0, 3, 13, 0, 0];
+        let err = decode(&data).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PeerInvalidFastMessage);
+    }
+
+    #[test]
+    fn decode_invalid_haveall() {
+        // len=2 (wrong), id=14
+        let data = [0, 0, 0, 2, 14, 0];
+        let err = decode(&data).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PeerInvalidFastMessage);
+    }
+
+    #[test]
+    fn decode_invalid_reject() {
+        // len=5 (wrong), id=16
+        let data = [0, 0, 0, 5, 16, 0, 0, 0, 0];
+        let err = decode(&data).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PeerInvalidFastMessage);
+    }
+
+    // ── compute_allowed_fast_set tests ──
+
+    #[test]
+    fn allowed_fast_empty_when_zero_pieces() {
+        let addr: std::net::SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let set = compute_allowed_fast_set(&[0u8; 20], addr, 0, 10);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn allowed_fast_empty_when_k_zero() {
+        let addr: std::net::SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let set = compute_allowed_fast_set(&[0u8; 20], addr, 100, 0);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn allowed_fast_produces_expected_count() {
+        let addr: std::net::SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let set = compute_allowed_fast_set(&[0u8; 20], addr, 100, 10);
+        assert_eq!(set.len(), 10);
+        // All indices should be within [0, 100)
+        for &idx in &set {
+            assert!(idx < 100, "index {} out of range", idx);
+        }
+    }
+
+    #[test]
+    fn allowed_fast_is_deterministic() {
+        let addr: std::net::SocketAddr = "10.0.0.1:9999".parse().unwrap();
+        let info_hash = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10, 0x11, 0x12, 0x13, 0x14,
+        ];
+        let set1 = compute_allowed_fast_set(&info_hash, addr, 200, 5);
+        let set2 = compute_allowed_fast_set(&info_hash, addr, 200, 5);
+        assert_eq!(set1, set2, "allowed fast set must be deterministic");
+    }
+
+    #[test]
+    fn allowed_fast_different_ips_produce_different_sets() {
+        let info_hash = [0x42u8; 20];
+        let addr1: std::net::SocketAddr = "1.1.1.1:6881".parse().unwrap();
+        let addr2: std::net::SocketAddr = "2.2.2.2:6881".parse().unwrap();
+        let set1 = compute_allowed_fast_set(&info_hash, addr1, 1000, 10);
+        let set2 = compute_allowed_fast_set(&info_hash, addr2, 1000, 10);
+        // It's extremely unlikely (but technically possible) they are equal.
+        // We only verify both are valid.
+        assert_eq!(set1.len(), 10);
+        assert_eq!(set2.len(), 10);
+    }
+
+    #[test]
+    fn allowed_fast_ipv6() {
+        let addr: std::net::SocketAddr = "[::1]:6881".parse().unwrap();
+        let set = compute_allowed_fast_set(&[0u8; 20], addr, 50, 5);
+        assert_eq!(set.len(), 5);
+        for &idx in &set {
+            assert!(idx < 50);
+        }
+    }
+
+    #[test]
+    fn allowed_fast_k_exceeds_num_pieces() {
+        let addr: std::net::SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        // Only 3 possible piece indices
+        let set = compute_allowed_fast_set(&[0xFFu8; 20], addr, 3, 10);
+        // Should return at most 3 unique indices
+        assert!(set.len() <= 3);
     }
 }

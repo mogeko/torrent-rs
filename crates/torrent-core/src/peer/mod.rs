@@ -1,10 +1,11 @@
-//! BitTorrent peer wire protocol (BEP 3).
+//! BitTorrent peer wire protocol (BEP 3, BEP 6, BEP 10).
 //!
 //! This module provides sync primitives for peer communication:
 //! - [`PeerId`]: 20-byte client identifier
 //! - [`Handshake`]: 68-byte protocol handshake
-//! - [`PeerMessage`]: 12 wire protocol message types (including BEP 10 extended)
+//! - [`PeerMessage`]: 17 wire protocol message types (BEP 3 + BEP 6 + BEP 10)
 //! - [`ExtensionNegotiation`]: LTEP extension negotiation (BEP 10)
+//! - [`compute_allowed_fast_set`]: Fast Extension piece set computation (BEP 6)
 //! - [`PeerState`]: connection state machine
 //!
 //! All types are purely data with no I/O, usable in both sync and async
@@ -18,7 +19,7 @@ pub mod pex;
 
 pub use self::extension::ExtensionNegotiation;
 pub use self::handshake::Handshake;
-pub use self::message::{PeerMessage, decode, encode};
+pub use self::message::{PeerMessage, compute_allowed_fast_set, decode, encode};
 
 use std::fmt;
 
