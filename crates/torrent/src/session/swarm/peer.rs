@@ -146,6 +146,11 @@ impl SwarmLoop {
                     begin,
                     addr
                 );
+                // Block data is accumulated in memory (ActiveDownload::data).
+                // Disk I/O is deferred to verify_and_complete_piece, which
+                // calls Storage::write_piece after SHA-1 verification passes.
+                // This avoids writing each 16 KB block separately and reduces
+                // syscall count by up to 256× for a 4 MB piece.
                 self.total_downloaded += data.len() as u64;
                 if let Some(p) = self.peers.get_mut(&addr) {
                     let len = data.len() as u64;
@@ -342,13 +347,10 @@ impl SwarmLoop {
             (bf, have_all)
         };
 
-        let fast_enabled = {
-            let pm = peer_mgr.read().await;
-            pm.connection(&addr)
-                .is_some_and(|c| c.remote_has_extension(44))
-        };
-
         let pm = peer_mgr.read().await;
+        let fast_enabled = pm
+            .connection(&addr)
+            .is_some_and(|c| c.remote_has_extension(44));
 
         if fast_enabled {
             if have_all {

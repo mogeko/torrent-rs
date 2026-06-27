@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
+use std::net::SocketAddr;
 
 use sha1::{Digest, Sha1};
 
@@ -309,7 +311,7 @@ pub fn encode(msg: &PeerMessage) -> Vec<u8> {
 /// assert_eq!(set.len(), 10);
 /// ```
 pub fn compute_allowed_fast_set(
-    info_hash: &[u8; 20], addr: std::net::SocketAddr, num_pieces: u32, k: usize,
+    info_hash: &[u8; 20], addr: SocketAddr, num_pieces: u32, k: usize,
 ) -> Vec<u32> {
     if num_pieces == 0 || k == 0 {
         return Vec::new();
@@ -320,6 +322,7 @@ pub fn compute_allowed_fast_set(
         IpAddr::V6(v6) => v6.octets().to_vec(),
     };
 
+    let mut seen = HashSet::with_capacity(k);
     let mut set = Vec::with_capacity(k);
     // Upper bound: if we've tried 4× the piece count without filling
     // k slots, the set is saturated.
@@ -338,7 +341,7 @@ pub fn compute_allowed_fast_set(
 
         let piece_index = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) % num_pieces;
 
-        if !set.contains(&piece_index) {
+        if seen.insert(piece_index) {
             set.push(piece_index);
         }
     }
@@ -864,21 +867,21 @@ mod tests {
 
     #[test]
     fn allowed_fast_empty_when_zero_pieces() {
-        let addr: std::net::SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
         let set = compute_allowed_fast_set(&[0u8; 20], addr, 0, 10);
         assert!(set.is_empty());
     }
 
     #[test]
     fn allowed_fast_empty_when_k_zero() {
-        let addr: std::net::SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
         let set = compute_allowed_fast_set(&[0u8; 20], addr, 100, 0);
         assert!(set.is_empty());
     }
 
     #[test]
     fn allowed_fast_produces_expected_count() {
-        let addr: std::net::SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
         let set = compute_allowed_fast_set(&[0u8; 20], addr, 100, 10);
         assert_eq!(set.len(), 10);
         // All indices should be within [0, 100)
@@ -889,7 +892,7 @@ mod tests {
 
     #[test]
     fn allowed_fast_is_deterministic() {
-        let addr: std::net::SocketAddr = "10.0.0.1:9999".parse().unwrap();
+        let addr: SocketAddr = "10.0.0.1:9999".parse().unwrap();
         let info_hash = [
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
             0x0F, 0x10, 0x11, 0x12, 0x13, 0x14,
@@ -902,8 +905,8 @@ mod tests {
     #[test]
     fn allowed_fast_different_ips_produce_different_sets() {
         let info_hash = [0x42u8; 20];
-        let addr1: std::net::SocketAddr = "1.1.1.1:6881".parse().unwrap();
-        let addr2: std::net::SocketAddr = "2.2.2.2:6881".parse().unwrap();
+        let addr1: SocketAddr = "1.1.1.1:6881".parse().unwrap();
+        let addr2: SocketAddr = "2.2.2.2:6881".parse().unwrap();
         let set1 = compute_allowed_fast_set(&info_hash, addr1, 1000, 10);
         let set2 = compute_allowed_fast_set(&info_hash, addr2, 1000, 10);
         // It's extremely unlikely (but technically possible) they are equal.
@@ -914,7 +917,7 @@ mod tests {
 
     #[test]
     fn allowed_fast_ipv6() {
-        let addr: std::net::SocketAddr = "[::1]:6881".parse().unwrap();
+        let addr: SocketAddr = "[::1]:6881".parse().unwrap();
         let set = compute_allowed_fast_set(&[0u8; 20], addr, 50, 5);
         assert_eq!(set.len(), 5);
         for &idx in &set {
@@ -924,7 +927,7 @@ mod tests {
 
     #[test]
     fn allowed_fast_k_exceeds_num_pieces() {
-        let addr: std::net::SocketAddr = "192.168.1.1:6881".parse().unwrap();
+        let addr: SocketAddr = "192.168.1.1:6881".parse().unwrap();
         // Only 3 possible piece indices
         let set = compute_allowed_fast_set(&[0xFFu8; 20], addr, 3, 10);
         // Should return at most 3 unique indices
