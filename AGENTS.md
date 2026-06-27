@@ -158,7 +158,8 @@ bencode ─── metainfo             session
 - **Bencode**: Recursive-descent parser with strict validation. Dict keys sorted lexicographically during both decode and encode for idempotent round-trips. Uses `Vec<(Bytes, Bencode)>` for dicts.
 - **Metainfo**: `info_hash()` computes SHA-1 of the raw bencoded `info` dict. Supports single-file, multi-file (BEP 52), and announce-list (BEP 12).
 - **Magnet**: Parses `magnet:?xt=urn:btih:<hex\|base32>`. Hex and base32 decoding implemented manually.
-- **Peer**: 12 message types (`KeepAlive`–`Port` + `Extended`). 68-byte handshake with reserved extension bits. Types in `torrent-core`, async `PeerConnection` in `torrent`.
+- **Peer**: 17 message types (`KeepAlive`–`Port` + `Extended` + BEP 6 Fast Extension). 68-byte handshake with reserved extension bits (bit 44 = Fast Extension, bit 63 = DHT/LTEP). Types in `torrent-core`, async `PeerConnection` in `torrent`.
+- **Fast Extension (BEP 6)**: `compute_allowed_fast_set()` + 5 message types (Suggest, HaveAll/None, Reject, AllowedFast) in `torrent-core`. AllowedFast bypasses choke, HaveAll/HaveNone replaces Bitfield. `Unknown` catch-all for forward compatibility.
 - **LTEP (BEP 10)**: `ExtensionNegotiation` in `torrent-core` for handshake dict encode/decode. Async LTEP negotiation during `PeerConnection::connect()` in `torrent`.
 - **PEX (BEP 11)**: `PexMessage` in `torrent-core` for peer list encode/decode. `SwarmLoop` handler in `torrent` dispatches incoming PEX, broadcasts periodically with `pex_interval`.
 - **Tracker**: `HttpTracker` uses manual HTTP/1.1 (no `reqwest`). `UdpTracker` implements BEP 15 connection protocol + announce + retry. Both in `torrent`.

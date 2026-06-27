@@ -17,7 +17,7 @@ management, tracker communication, and file storage — built on top of
 | Module                     | Description                                      | BEP           |
 | -------------------------- | ------------------------------------------------ | ------------- |
 | [`session`](./src/session) | Session, download/upload loops, peer manager     | —             |
-| [`peer`](./src/peer)       | Async `PeerConnection`, re-exports core types    | BEP 3         |
+| [`peer`](./src/peer)       | Async `PeerConnection`, re-exports core types    | BEP 3, 6, 10  |
 | [`tracker`](./src/tracker) | HTTP (manual) + UDP tracker announce             | BEP 3, 15, 23 |
 | [`dht`](./src/dht)         | Async DHT RPC, query helpers (`find_node`, etc.) | BEP 5         |
 | [`storage`](./src/storage) | `FileStorage` (async file I/O)                   | —             |
