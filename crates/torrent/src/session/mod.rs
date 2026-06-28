@@ -18,6 +18,7 @@ mod seed;
 mod swarm;
 mod uni_deque;
 mod upload_mgr;
+mod webseed;
 
 pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 pub use self::download::DownloadBuilder;

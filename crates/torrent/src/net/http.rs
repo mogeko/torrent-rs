@@ -69,7 +69,6 @@ impl HttpClient {
     ///
     /// Used by web seed download (BEP 19) to fetch partial file
     /// content. Returns the body bytes for the requested range.
-    #[expect(dead_code, reason = "will be used by web seed download (Phase 2)")]
     pub async fn get_with_range(
         &self, url: &Url, path_and_query: &str, range_start: u64, range_end: u64,
     ) -> Result<Vec<u8>, Error> {

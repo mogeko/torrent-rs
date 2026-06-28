@@ -151,6 +151,28 @@ pub struct SessionConfig {
     /// Default: `256`.
     pub peer_msg_buffer_size: usize,
 
+    // ── Web Seed ──
+    /// Enable web seed downloads (BEP 19). When enabled, the session
+    /// downloads from HTTP/FTP web seed URLs found in the torrent
+    /// metadata (`url-list`) or magnet link (`ws` parameter).
+    ///
+    /// Default: `true`.
+    pub webseed_enabled: bool,
+    /// Minimum contiguous gap in pieces to trigger a web seed HTTP
+    /// download. Smaller gaps are left for P2P peers.
+    ///
+    /// Default: `4`.
+    pub webseed_min_gap_pieces: u32,
+    /// Maximum bytes per web seed HTTP Range request.
+    /// BEP 19 suggests ~5% of total file size.
+    ///
+    /// Default: `5 * 1024 * 1024` (5 MB).
+    pub webseed_max_range_bytes: u64,
+    /// Timeout for web seed HTTP connect + download.
+    ///
+    /// Default: `30` s.
+    pub webseed_timeout: Duration,
+
     // ── DHT ──
     /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
     /// When `Some`, the session initializes a DHT node and uses these
@@ -201,6 +223,10 @@ impl Default for SessionConfig {
             lsd_enabled: true,
             lsd_interval: Duration::from_secs(300),
             peer_msg_buffer_size: 256,
+            webseed_enabled: true,
+            webseed_min_gap_pieces: 4,
+            webseed_max_range_bytes: 5 * 1024 * 1024,
+            webseed_timeout: Duration::from_secs(30),
             bootstrap_nodes: Some(vec![
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
                 BootstrapNode::from(("dht.transmissionbt.com", 6881)),
@@ -326,6 +352,10 @@ mod serde_tests {
             lsd_enabled: false,
             lsd_interval: Duration::from_secs(600),
             peer_msg_buffer_size: 512,
+            webseed_enabled: true,
+            webseed_min_gap_pieces: 8,
+            webseed_max_range_bytes: 10 * 1024 * 1024,
+            webseed_timeout: Duration::from_secs(60),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -361,6 +391,10 @@ mod serde_tests {
         assert_eq!(back.pex_enabled, false);
         assert_eq!(back.pex_interval, Duration::from_secs(120));
         assert_eq!(back.peer_msg_buffer_size, 512);
+        assert_eq!(back.webseed_enabled, true);
+        assert_eq!(back.webseed_min_gap_pieces, 8);
+        assert_eq!(back.webseed_max_range_bytes, 10 * 1024 * 1024);
+        assert_eq!(back.webseed_timeout, Duration::from_secs(60));
     }
 
     #[test]
