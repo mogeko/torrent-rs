@@ -108,6 +108,8 @@ pub(crate) fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
     // --- Optional fields ---
 
     let announce_list = parse_announce_list(&val);
+    let url_list = parse_url_list(&val);
+    let httpseeds = parse_httpseeds(&val);
     let creation_date = dict_get_int(&val, b"creation date");
     let comment = dict_get(&val, b"comment").and_then(|v| string_from_bencode(v).ok());
     let created_by = dict_get(&val, b"created by").and_then(|v| string_from_bencode(v).ok());
@@ -117,6 +119,8 @@ pub(crate) fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
         announce,
         announce_list,
         info,
+        url_list,
+        httpseeds,
         creation_date,
         comment,
         created_by,
@@ -232,6 +236,58 @@ fn parse_announce_list(val: &Bencode) -> Vec<Vec<String>> {
         }
     }
     result
+}
+
+/// Parse the optional `url-list` field (BEP 19).
+///
+/// `url-list` can be either a single string or a list of strings.
+/// Both forms are accepted. Non-UTF-8 entries are silently skipped.
+fn parse_url_list(val: &Bencode) -> Vec<String> {
+    match dict_get(val, b"url-list") {
+        // Single URL string
+        Some(Bencode::Bytes(b)) => {
+            if let Ok(s) = String::from_utf8(b.as_ref().to_vec()) {
+                if !s.is_empty() {
+                    return vec![s];
+                }
+            }
+            Vec::new()
+        }
+        // List of URL strings
+        Some(Bencode::List(items)) => items
+            .iter()
+            .filter_map(|v| {
+                if let Bencode::Bytes(b) = v {
+                    String::from_utf8(b.as_ref().to_vec()).ok()
+                } else {
+                    None
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .collect(),
+        // Key absent or wrong type → empty
+        _ => Vec::new(),
+    }
+}
+
+/// Parse the optional `httpseeds` field (BEP 17, Draft).
+///
+/// `httpseeds` must be a list of URL strings.
+fn parse_httpseeds(val: &Bencode) -> Vec<String> {
+    match dict_get(val, b"httpseeds") {
+        Some(Bencode::List(items)) => items
+            .iter()
+            .filter_map(|v| {
+                if let Bencode::Bytes(b) = v {
+                    String::from_utf8(b.as_ref().to_vec()).ok()
+                } else {
+                    None
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Extract a required string field from a dict.

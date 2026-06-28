@@ -190,6 +190,8 @@ impl<'s> SeedBuilder<'s> {
                 name,
                 length: total_length,
             },
+            Vec::new(), // url_list — not set during seeding
+            Vec::new(), // httpseeds — not set during seeding
         );
 
         if let Some(list) = &self.announce_list {

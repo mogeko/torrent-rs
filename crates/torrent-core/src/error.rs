@@ -62,6 +62,11 @@ pub enum ErrorKind {
     MetainfoMissingField,
     MetainfoInvalidField,
     MetainfoInvalidPieces,
+    // Metainfo errors (continued)
+    /// The `url-list` key (BEP 19) or `httpseeds` key (BEP 17) is malformed.
+    MetainfoInvalidUrlList,
+    /// The `httpseeds` key (BEP 17) contains invalid data.
+    MetainfoInvalidHttpSeeds,
     // Peer errors
     PeerInvalidHandshake,
     PeerInvalidMessage,
@@ -94,6 +99,8 @@ impl fmt::Display for Error {
             ErrorKind::MetainfoMissingField => write!(f, "missing required metainfo field"),
             ErrorKind::MetainfoInvalidField => write!(f, "invalid metainfo field"),
             ErrorKind::MetainfoInvalidPieces => write!(f, "invalid pieces length in metainfo"),
+            ErrorKind::MetainfoInvalidUrlList => write!(f, "invalid url-list in metainfo"),
+            ErrorKind::MetainfoInvalidHttpSeeds => write!(f, "invalid httpseeds in metainfo"),
             ErrorKind::PeerInvalidHandshake => write!(f, "invalid peer handshake"),
             ErrorKind::PeerInvalidMessage => write!(f, "invalid peer message"),
             ErrorKind::PeerConnectionClosed => write!(f, "peer connection closed"),
@@ -125,6 +132,8 @@ impl fmt::Display for ErrorKind {
             ErrorKind::MetainfoMissingField => write!(f, "MetainfoMissingField"),
             ErrorKind::MetainfoInvalidField => write!(f, "MetainfoInvalidField"),
             ErrorKind::MetainfoInvalidPieces => write!(f, "MetainfoInvalidPieces"),
+            ErrorKind::MetainfoInvalidUrlList => write!(f, "MetainfoInvalidUrlList"),
+            ErrorKind::MetainfoInvalidHttpSeeds => write!(f, "MetainfoInvalidHttpSeeds"),
             ErrorKind::PeerInvalidHandshake => write!(f, "PeerInvalidHandshake"),
             ErrorKind::PeerInvalidMessage => write!(f, "PeerInvalidMessage"),
             ErrorKind::PeerConnectionClosed => write!(f, "PeerConnectionClosed"),

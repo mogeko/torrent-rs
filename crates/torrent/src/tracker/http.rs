@@ -1,27 +1,16 @@
 use std::fmt;
-use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpSocket, lookup_host};
 use tokio_rustls::TlsConnector;
 
 use crate::error::{Error, ErrorKind};
+use crate::net::http::{HttpClient, MAX_REDIRECTS, resolve_redirect_url};
+use crate::net::tls::build_tls_connector;
 
 use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
 /// Timeout for HTTP tracker connect + request + response read.
 use super::DEFAULT_TIMEOUT;
-
-/// Maximum number of redirects to follow before giving up.
-const MAX_REDIRECTS: u32 = 5;
-
-/// Maximum response size to guard against malicious or buggy trackers (256 KB).
-const MAX_RESPONSE_SIZE: u64 = 256 * 1024;
-
-/// Internal trait to unify plain TCP and TLS streams into a single `Box<dyn …>`.
-trait TrackerStream: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> TrackerStream for T {}
 
 /// HTTP tracker client (BEP 3, BEP 23).
 ///
@@ -104,11 +93,12 @@ impl HttpTracker {
         let mut current_url = self.url.clone();
         let mut tls = self.tls.clone();
         let mut redirects_remaining = MAX_REDIRECTS;
+        let client = HttpClient::new(self.timeout);
 
         loop {
             let path_and_query = format!("{}?{}", current_url.path(), build_query_string(req));
 
-            let buf = send_http_request(&current_url, &tls, &path_and_query, self.timeout).await?;
+            let buf = client.get(&current_url, &path_and_query).await?;
 
             // Parse HTTP response: find "\r\n\r\n" separator
             let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
@@ -167,143 +157,6 @@ impl HttpTracker {
                     return Err(Error::new(ErrorKind::TrackerRequestFailed));
                 }
             }
-        }
-    }
-}
-
-/// Build a TLS connector with system root certificates.
-fn build_tls_connector() -> Result<TlsConnector, Error> {
-    let mut root_store = rustls::RootCertStore::empty();
-
-    let native_certs = rustls_native_certs::load_native_certs();
-    for cert in native_certs.certs {
-        root_store.add(cert).map_err(Error::invalid_input)?;
-    }
-
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    Ok(TlsConnector::from(Arc::new(config)))
-}
-
-/// Send an HTTP GET request to the given URL and return the raw response bytes.
-///
-/// Handles TCP connection, optional TLS wrapping, request sending, and
-/// response reading (capped at [`MAX_RESPONSE_SIZE`]).
-async fn send_http_request(
-    url: &Url, tls: &Option<TlsConnector>, path_and_query: &str, timeout: Duration,
-) -> Result<Vec<u8>, Error> {
-    let host = url
-        .host_str()
-        .ok_or(Error::new(ErrorKind::InvalidInput))?
-        .to_owned();
-    let port = url.port_or_known_default().unwrap_or(80);
-    let tls = tls.clone();
-    let path_and_query = path_and_query.to_owned();
-
-    let response = tokio::time::timeout(timeout, async move {
-        let addrs = lookup_host((&*host, port))
-            .await
-            .map_err(Error::tracker_failed)?;
-
-        // Try each resolved address (IPv4 and/or IPv6) until one connects.
-        // This mirrors TcpStream::connect((host, port)) which iterates all
-        // resolved addresses, but also allows us to set TCP_NODELAY.
-        let mut last_err = None;
-        let mut tcp_stream = None;
-        for addr in addrs {
-            let socket = if addr.is_ipv4() {
-                TcpSocket::new_v4()
-            } else {
-                TcpSocket::new_v6()
-            }
-            .map_err(Error::tracker_failed)?;
-
-            socket
-                .set_nodelay(true)
-                .map_err(Error::tracker_failed)?;
-
-            match socket.connect(addr).await {
-                Ok(s) => {
-                    tcp_stream = Some(s);
-                    break;
-                }
-                Err(e) => last_err = Some(Error::tracker_failed(e)),
-            }
-        }
-
-        let Some(tcp_stream) = tcp_stream else {
-            return Err(last_err.unwrap_or(Error::new(ErrorKind::TrackerRequestFailed)));
-        };
-
-        let mut stream: Box<dyn TrackerStream> = if let Some(ref connector) = tls {
-            use rustls::pki_types::ServerName;
-
-            let domain = ServerName::try_from(host.clone())
-                .map_err(Error::invalid_input)?;
-            let tls_stream = connector
-                .connect(domain, tcp_stream)
-                .await
-                .map_err(Error::tracker_failed)?;
-            Box::new(tls_stream)
-        } else {
-            Box::new(tcp_stream)
-        };
-
-        let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: torrent-rs/0.1.0\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
-            path_and_query, host
-        );
-
-        stream
-            .write_all(request.as_bytes())
-            .await
-            .map_err(Error::tracker_failed)?;
-
-        let mut buf = Vec::new();
-        let mut limited = AsyncReadExt::take(&mut stream, MAX_RESPONSE_SIZE);
-
-        limited
-            .read_to_end(&mut buf)
-            .await
-            .map_err(Error::tracker_failed)?;
-
-        Ok(buf)
-    })
-    .await;
-
-    match response {
-        Ok(Ok(buf)) => Ok(buf),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(Error::new(ErrorKind::TrackerRequestFailed)),
-    }
-}
-
-/// Resolve a redirect `Location` header value against a base URL.
-///
-/// Handles absolute URLs (e.g. `http://new.example.com/announce`),
-/// relative paths (e.g. `/announce` or `announce`), and scheme-relative
-/// URLs (e.g. `//new.example.com/announce`).
-///
-/// Returns an error if the resulting URL uses an unsupported scheme
-/// (anything other than `http` or `https`).
-fn resolve_redirect_url(base: &Url, location: &str) -> Result<Url, Error> {
-    // url::Url::options().base_url() follows RFC 3986 reference resolution.
-    let new_url = Url::options()
-        .base_url(Some(base))
-        .parse(location)
-        .map_err(|_| Error::new(ErrorKind::TrackerProtocolError))?;
-
-    match new_url.scheme() {
-        "http" | "https" => Ok(new_url),
-        _ => {
-            tracing::warn!(
-                "HTTP redirect: unsupported scheme '{}' in redirect URL {}",
-                new_url.scheme(),
-                new_url,
-            );
-            Err(Error::new(ErrorKind::TrackerProtocolError))
         }
     }
 }
