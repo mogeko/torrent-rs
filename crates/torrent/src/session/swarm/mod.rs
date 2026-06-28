@@ -239,7 +239,7 @@ impl TorrentHandle {
             super_seed_unrevealed: HashSet::new(),
             web_seeds: self.web_seeds.clone(),
             webseed_config,
-            webseed_task: None,
+            webseed_tasks: Vec::new(),
             webseed_notify,
         };
 
@@ -350,8 +350,8 @@ pub(crate) struct SwarmLoop {
     pub(crate) web_seeds: Vec<String>,
     /// Web seed configuration.
     pub(crate) webseed_config: WebSeedConfig,
-    /// Handle for the spawned web seed task.
-    pub(crate) webseed_task: Option<JoinHandle<()>>,
+    /// Handles for spawned web seed tasks (one per URL).
+    pub(crate) webseed_tasks: Vec<JoinHandle<()>>,
     /// Notify web seed tasks when a piece is completed by a peer.
     pub(crate) webseed_notify: Arc<Notify>,
 }
@@ -392,10 +392,7 @@ impl SwarmLoop {
                     }
                 }
             }
-            // Store first task handle for cancellation tracking.
-            // Multiple tasks share the same notify — cancelling any
-            // one is a signal; the actual abort happens in the Cancel arm.
-            self.webseed_task = tasks.into_iter().next();
+            self.webseed_tasks = tasks;
         }
 
         loop {
@@ -412,7 +409,7 @@ impl SwarmLoop {
                         }
                         Some(TorrentCommand::Cancel) | None => {
                             let _ = self.announce_to_tracker(AnnounceEvent::Stopped).await;
-                            if let Some(task) = self.webseed_task.take() {
+                            for task in self.webseed_tasks.drain(..) {
                                 task.abort();
                             }
                             break;

@@ -80,7 +80,7 @@ impl HttpClient {
         };
         let range = Some((range_start, range_end));
         let raw = self.send_request(url, &tls, path_and_query, range).await?;
-        Ok(Self::body_from_response(&raw).to_vec())
+        Ok(Self::body_from_response(&raw)?.to_vec())
     }
 
     /// Core request implementation: TCP connect, optional TLS, send
@@ -177,12 +177,12 @@ impl HttpClient {
     /// Split HTTP response into body bytes (strips headers at `\r\n\r\n`).
     ///
     /// Returns just the body portion after the header separator.
-    /// Returns an empty slice if the separator is not found.
-    fn body_from_response(buf: &[u8]) -> &[u8] {
+    /// Returns an error if the separator is not found (malformed response).
+    fn body_from_response(buf: &[u8]) -> Result<&[u8], Error> {
         if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            &buf[pos + 4..]
+            Ok(&buf[pos + 4..])
         } else {
-            &[]
+            Err(Error::new(ErrorKind::TrackerInvalidResponse))
         }
     }
 }

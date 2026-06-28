@@ -83,6 +83,10 @@ pub enum ErrorKind {
     TrackerInvalidResponse,
     TrackerRequestFailed,
     TrackerProtocolError,
+    // Web seed errors
+    /// Web seed returned data that failed SHA-1 verification (BEP 19).
+    /// The URL should be discarded and not retried.
+    WebSeedHashMismatch,
     // Placeholder categories for future phases
     Io,
     InvalidInput,
@@ -111,6 +115,7 @@ impl fmt::Display for Error {
             ErrorKind::TrackerInvalidResponse => write!(f, "invalid tracker response"),
             ErrorKind::TrackerRequestFailed => write!(f, "tracker request failed"),
             ErrorKind::TrackerProtocolError => write!(f, "tracker protocol error"),
+            ErrorKind::WebSeedHashMismatch => write!(f, "web seed SHA-1 hash mismatch"),
             ErrorKind::Io => write!(f, "I/O error"),
             ErrorKind::InvalidInput => write!(f, "invalid input"),
             ErrorKind::Protocol => write!(f, "protocol error"),
@@ -144,6 +149,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::TrackerInvalidResponse => write!(f, "TrackerInvalidResponse"),
             ErrorKind::TrackerRequestFailed => write!(f, "TrackerRequestFailed"),
             ErrorKind::TrackerProtocolError => write!(f, "TrackerProtocolError"),
+            ErrorKind::WebSeedHashMismatch => write!(f, "WebSeedHashMismatch"),
             ErrorKind::Io => write!(f, "Io"),
             ErrorKind::InvalidInput => write!(f, "InvalidInput"),
             ErrorKind::Protocol => write!(f, "Protocol"),

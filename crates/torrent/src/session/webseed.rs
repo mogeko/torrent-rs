@@ -173,15 +173,19 @@ impl WebSeedTask {
                 Ok(downloaded_pieces) => {
                     retry_delay = self.config.retry_delay; // reset backoff
 
-                    // Notify SwarmLoop about completed pieces
-                    // (webseed_notify is for waking us up,
-                    //  broadcast_have is done by the caller)
                     for index in &downloaded_pieces {
                         tracing::debug!("web seed {}: completed piece {}", self.url, index,);
                     }
                     if !downloaded_pieces.is_empty() {
                         self.notify.notify_one();
                     }
+                }
+                Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => {
+                    tracing::error!(
+                        "web seed {}: SHA-1 mismatch, discarding URL permanently",
+                        self.url,
+                    );
+                    return;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -225,6 +229,13 @@ impl WebSeedTask {
 
             // Only verify if we have the full piece
             if chunk.len() as u64 == piece_len {
+                // Skip if a P2P peer already completed this piece
+                // while we were downloading.
+                if self.piece_mgr.read().await.has_piece(piece_index) {
+                    offset = chunk_end;
+                    continue;
+                }
+
                 let expected_hash = match self.metainfo.info.pieces.get(piece_index as usize) {
                     Some(h) => *h,
                     None => {
@@ -240,7 +251,7 @@ impl WebSeedTask {
                         self.url,
                         piece_index,
                     );
-                    return Err(Error::new(ErrorKind::TrackerInvalidResponse));
+                    return Err(Error::new(ErrorKind::WebSeedHashMismatch));
                 }
 
                 // Write the verified piece
