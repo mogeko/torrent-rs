@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sha1::{Digest, Sha1};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use url::Url;
 
 use crate::error::{Error, ErrorKind};
@@ -61,7 +61,6 @@ impl Default for WebSeedConfig {
 /// Runs in the background for one web seed URL. Reads the piece
 /// bitfield to find gaps, downloads them via HTTP Range requests,
 /// verifies SHA-1 hashes, and writes completed pieces to storage.
-#[expect(dead_code, reason = "will be wired into SwarmLoop in Phase 3")]
 pub(crate) struct WebSeedTask {
     /// Base URL from the torrent metadata or magnet link.
     url: Url,
@@ -74,6 +73,10 @@ pub(crate) struct WebSeedTask {
     /// Piece length in bytes (constant for all non-final pieces).
     piece_length: u64,
     /// Number of pieces in the torrent.
+    #[expect(
+        dead_code,
+        reason = "set during construction, used by future multi-file range mapping"
+    )]
     num_pieces: u32,
     /// Torrent metadata for URL construction and SHA-1 verification.
     metainfo: Metainfo,
@@ -81,7 +84,7 @@ pub(crate) struct WebSeedTask {
     config: WebSeedConfig,
     /// Notification channel — woken when a peer completes a piece
     /// (so we can re-evaluate gaps).
-    notify: Arc<tokio::sync::Notify>,
+    notify: Arc<Notify>,
 }
 
 impl WebSeedTask {
@@ -89,10 +92,9 @@ impl WebSeedTask {
     ///
     /// `url` is the base web seed URL from `url-list` or `ws` parameter.
     /// If it ends with `/`, the file path is appended (multi-file).
-    #[expect(dead_code, reason = "will be called by SwarmLoop in Phase 3")]
     pub fn new(
         url: Url, piece_mgr: Arc<RwLock<PieceManager>>, storage: Arc<dyn Storage>,
-        metainfo: Metainfo, config: WebSeedConfig, notify: Arc<tokio::sync::Notify>,
+        metainfo: Metainfo, config: WebSeedConfig, notify: Arc<Notify>,
     ) -> Self {
         let num_pieces = metainfo.info.num_pieces() as u32;
         let piece_length = metainfo.info.piece_length;
@@ -115,7 +117,6 @@ impl WebSeedTask {
     ///
     /// Identifies gaps in the piece bitfield and fills them with HTTP
     /// Range requests. Exits when all pieces are complete.
-    #[expect(dead_code, reason = "will be spawned by SwarmLoop in Phase 3")]
     pub async fn run(self) {
         tracing::info!("web seed task started: {}", self.url);
 
@@ -319,11 +320,8 @@ impl WebSeedTask {
 /// Returns `(gap_start_index, gap_size_in_pieces)`, or `None` if
 /// no gaps exist (all pieces present).
 fn find_largest_gap(bitfield: &[bool]) -> Option<(u32, u32)> {
-    let mut best_start = None;
-    let mut best_size = 0u32;
-
-    let mut gap_start = None;
-    let mut gap_size = 0u32;
+    let (mut best_start, mut best_size) = (None, 0u32);
+    let (mut gap_start, mut gap_size) = (None, 0u32);
 
     for (i, &has) in bitfield.iter().enumerate() {
         if !has {
@@ -356,45 +354,108 @@ fn find_largest_gap(bitfield: &[bool]) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use torrent_core::storage::StorageFactory;
+
+    use crate::metainfo::MetainfoBuilder;
+    use crate::storage::FileStorageFactory;
+
     use super::*;
+
+    // ── Helper: mock HTTP server ─────────────────────────────────
+
+    /// Start a mock HTTP server that serves `body` bytes on a random
+    /// local port. Handles one GET request (with optional Range),
+    /// then shuts down. Returns `(url, join_handle)`.
+    async fn mock_http_server(body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+
+            // Parse Range header
+            let range = if request.contains("Range: bytes=") {
+                let line = request
+                    .lines()
+                    .find(|l| l.starts_with("Range: bytes="))
+                    .unwrap();
+                let range_str = line.strip_prefix("Range: bytes=").unwrap();
+                let parts: Vec<&str> = range_str.split('-').collect();
+                let start: usize = parts[0].parse().unwrap();
+                let end: usize = parts[1].parse().unwrap();
+                Some((start, end))
+            } else {
+                None
+            };
+
+            let (response_body, status) = if let Some((start, end)) = range {
+                let slice = &body[start..=end.min(body.len().saturating_sub(1))];
+                (slice.to_vec(), "206 Partial Content")
+            } else {
+                (body.clone(), "200 OK")
+            };
+
+            let response = format!(
+                "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                status,
+                response_body.len(),
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&response_body).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        (addr, handle)
+    }
+
+    /// Build a single-file Metainfo from known data.
+    fn build_test_metainfo(data: &[u8], piece_length: u32) -> crate::metainfo::Metainfo {
+        let mut builder = MetainfoBuilder::new(piece_length);
+        builder.add_data(data);
+        builder.finish(
+            "http://tracker.example.com/announce".into(),
+            Mode::Single {
+                name: "test.bin".into(),
+                length: data.len() as u64,
+            },
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    // ── find_largest_gap tests ───────────────────────────────────
 
     #[test]
     fn find_largest_gap_empty() {
-        // All complete → no gaps
         let bf = vec![true; 10];
         assert_eq!(find_largest_gap(&bf), None);
     }
 
     #[test]
     fn find_largest_gap_full() {
-        // All missing → one big gap
         let bf = vec![false; 10];
         assert_eq!(find_largest_gap(&bf), Some((0, 10)));
     }
 
     #[test]
     fn find_largest_gap_multiple() {
-        // Pattern: YYnnnnYnnY
         let bf = vec![
-            true, true, // YY
-            false, false, false, false, // nnnn (gap of 4)
-            true,  // Y
-            false, false, // nn (gap of 2)
-            true,  // Y
+            true, true, false, false, false, false, true, false, false, true,
         ];
         assert_eq!(find_largest_gap(&bf), Some((2, 4)));
     }
 
     #[test]
     fn find_largest_gap_trailing() {
-        // Trailing gap is largest
         let bf = vec![true, false, false, true, false, false, false];
         assert_eq!(find_largest_gap(&bf), Some((4, 3)));
     }
 
     #[test]
     fn find_largest_gap_leading() {
-        // Leading gap is largest
         let bf = vec![false, false, false, true, true, false];
         assert_eq!(find_largest_gap(&bf), Some((0, 3)));
     }
@@ -409,5 +470,163 @@ mod tests {
     fn find_largest_gap_zero_length() {
         let bf: Vec<bool> = vec![];
         assert_eq!(find_largest_gap(&bf), None);
+    }
+
+    // ── download_range async tests (mock HTTP server) ────────────
+
+    #[tokio::test]
+    async fn downloads_full_file_single_piece() {
+        let piece_length = 256u32;
+        let data = vec![0xABu8; piece_length as usize];
+
+        let metainfo = build_test_metainfo(&data, piece_length);
+
+        // Test HttpClient direct connectivity
+        let (server_url, _server) = mock_http_server(data.clone()).await;
+        let url = Url::parse(&server_url).unwrap();
+        let client = HttpClient::new(Duration::from_secs(5));
+        let body = client.get_with_range(&url, "/", 0, 255).await.unwrap();
+        assert_eq!(body.len(), 256);
+
+        // Test WebSeedTask via download_range directly
+        let (server_url2, _server2) = mock_http_server(data.clone()).await;
+        let url2 = Url::parse(&server_url2).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = FileStorageFactory::new(tmp.path().to_path_buf());
+        let storage = factory.create(&metainfo.info).await.unwrap();
+        storage.prepare().await.unwrap();
+        let piece_mgr = Arc::new(RwLock::new(PieceManager::new(metainfo.info.num_pieces())));
+        let notify = Arc::new(Notify::new());
+        let config = WebSeedConfig {
+            min_gap_pieces: 1,
+            max_range_bytes: 5 * 1024 * 1024,
+            timeout: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(100),
+        };
+
+        let task = WebSeedTask {
+            url: url2,
+            http: HttpClient::new(config.timeout),
+            piece_mgr: piece_mgr.clone(),
+            storage: storage.clone(),
+            piece_length: metainfo.info.piece_length,
+            num_pieces: metainfo.info.num_pieces() as u32,
+            metainfo: metainfo.clone(),
+            config: config.clone(),
+            notify,
+        };
+
+        let completed = task.download_range(0, 255).await.unwrap();
+        assert_eq!(completed, vec![0]);
+
+        let pm = piece_mgr.read().await;
+        assert!(pm.has_piece(0));
+    }
+
+    #[tokio::test]
+    async fn downloads_multiple_pieces() {
+        let piece_length = 128u32;
+        let data: Vec<u8> = (0u32..(piece_length * 3) as u32).map(|v| v as u8).collect();
+        let metainfo = build_test_metainfo(&data, piece_length);
+
+        let (server_url, _server) = mock_http_server(data.clone()).await;
+        let url = Url::parse(&server_url).unwrap();
+
+        // Verify HttpClient returns correct body
+        let client = HttpClient::new(Duration::from_secs(5));
+        let body = client.get_with_range(&url, "/", 0, 383).await.unwrap();
+        assert_eq!(body.len(), 384, "body should be 384 bytes");
+        assert_eq!(&body[..128], &data[0..128]);
+        assert_eq!(&body[128..256], &data[128..256]);
+        assert_eq!(&body[256..384], &data[256..384]);
+
+        // Now test download_range with a fresh mock server
+        let (server_url2, _server2) = mock_http_server(data.clone()).await;
+        let url2 = Url::parse(&server_url2).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = FileStorageFactory::new(tmp.path().to_path_buf());
+        let storage = factory.create(&metainfo.info).await.unwrap();
+        storage.prepare().await.unwrap();
+
+        let piece_mgr = Arc::new(RwLock::new(PieceManager::new(metainfo.info.num_pieces())));
+        let notify = Arc::new(Notify::new());
+        let config = WebSeedConfig {
+            min_gap_pieces: 1,
+            max_range_bytes: piece_length as u64 * 3,
+            timeout: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(100),
+        };
+
+        let task = WebSeedTask {
+            url: url2,
+            http: HttpClient::new(config.timeout),
+            piece_mgr: piece_mgr.clone(),
+            storage: storage.clone(),
+            piece_length: metainfo.info.piece_length,
+            num_pieces: metainfo.info.num_pieces() as u32,
+            metainfo: metainfo.clone(),
+            config,
+            notify,
+        };
+
+        let completed = task.download_range(0, 383).await.unwrap();
+        assert_eq!(completed, vec![0, 1, 2]);
+
+        let pm = piece_mgr.read().await;
+        assert!(pm.has_piece(0));
+        assert!(pm.has_piece(1));
+        assert!(pm.has_piece(2));
+    }
+
+    #[tokio::test]
+    async fn sha1_mismatch_does_not_mark_complete() {
+        let piece_length = 256u32;
+        let correct_data = vec![0xABu8; piece_length as usize];
+        let wrong_data = vec![0xCDu8; piece_length as usize];
+
+        let metainfo = build_test_metainfo(&correct_data, piece_length);
+
+        let (server_url, _server) = mock_http_server(wrong_data).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = FileStorageFactory::new(tmp.path().to_path_buf());
+        let storage = factory.create(&metainfo.info).await.unwrap();
+        storage.prepare().await.unwrap();
+
+        let piece_mgr = Arc::new(RwLock::new(PieceManager::new(metainfo.info.num_pieces())));
+
+        let url = Url::parse(&server_url).unwrap();
+        let notify = Arc::new(Notify::new());
+
+        let config = WebSeedConfig {
+            min_gap_pieces: 1,
+            max_range_bytes: 5 * 1024 * 1024,
+            timeout: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(100),
+        };
+
+        let task = WebSeedTask::new(
+            url,
+            piece_mgr.clone(),
+            storage.clone(),
+            metainfo.clone(),
+            config,
+            notify,
+        );
+
+        let task_handle = tokio::spawn(async move { task.run().await });
+
+        // Wait for the task to try downloading (SHA-1 will fail)
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let pm = piece_mgr.read().await;
+        assert!(
+            !pm.has_piece(0),
+            "piece should NOT be marked complete with wrong data"
+        );
+        drop(pm);
+
+        task_handle.abort();
     }
 }

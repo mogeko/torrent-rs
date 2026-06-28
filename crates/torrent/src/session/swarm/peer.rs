@@ -171,6 +171,9 @@ impl SwarmLoop {
 
                 if piece_complete && self.verify_and_complete_piece(index).await? {
                     self.broadcast_have(index).await?;
+                    // Wake the web seed task so it can re-evaluate gaps
+                    // now that a piece has been filled by a P2P peer.
+                    self.webseed_notify.notify_one();
                 }
             }
             PeerMessage::Request {

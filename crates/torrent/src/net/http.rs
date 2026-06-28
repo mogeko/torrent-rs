@@ -68,7 +68,8 @@ impl HttpClient {
     /// HTTP GET with a `Range: bytes=start-end` header.
     ///
     /// Used by web seed download (BEP 19) to fetch partial file
-    /// content. Returns the body bytes for the requested range.
+    /// content. Returns the body bytes for the requested range
+    /// (HTTP headers are stripped).
     pub async fn get_with_range(
         &self, url: &Url, path_and_query: &str, range_start: u64, range_end: u64,
     ) -> Result<Vec<u8>, Error> {
@@ -78,7 +79,8 @@ impl HttpClient {
             None
         };
         let range = Some((range_start, range_end));
-        self.send_request(url, &tls, path_and_query, range).await
+        let raw = self.send_request(url, &tls, path_and_query, range).await?;
+        Ok(Self::body_from_response(&raw).to_vec())
     }
 
     /// Core request implementation: TCP connect, optional TLS, send
@@ -169,6 +171,18 @@ impl HttpClient {
             Ok(Ok(buf)) => Ok(buf),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(Error::new(ErrorKind::TrackerRequestFailed)),
+        }
+    }
+
+    /// Split HTTP response into body bytes (strips headers at `\r\n\r\n`).
+    ///
+    /// Returns just the body portion after the header separator.
+    /// Returns an empty slice if the separator is not found.
+    fn body_from_response(buf: &[u8]) -> &[u8] {
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            &buf[pos + 4..]
+        } else {
+            &[]
         }
     }
 }
