@@ -145,7 +145,7 @@ impl WebSeedTask {
     /// Identifies gaps in the piece bitfield and fills them with HTTP
     /// Range requests. Exits when all pieces are complete.
     pub async fn run(self) {
-        tracing::info!("web seed task started: {}", self.url);
+        tracing::debug!("web seed {}: starting", self.url);
 
         let mut retry_delay = self.config.retry_delay;
 
@@ -186,15 +186,6 @@ impl WebSeedTask {
                 .min(total_size)
                 .saturating_sub(1);
 
-            tracing::info!(
-                "web seed {}: downloading gap [{}, {}] ({} pieces, {} bytes)",
-                self.url,
-                gap_start,
-                gap_start + gap_size - 1,
-                gap_size,
-                end_byte - start_byte + 1,
-            );
-
             // Acquire a concurrency permit before the HTTP call.
             // Held only for the duration of the network round-trip
             // (~seconds), not the full run loop — other tasks can
@@ -207,17 +198,15 @@ impl WebSeedTask {
                     retry_delay = self.config.retry_delay; // reset backoff
 
                     for index in &downloaded_pieces {
-                        tracing::info!("web seed {}: completed piece {}", self.url, index);
+                        tracing::debug!("web seed {}: completed piece {}", self.url, index);
                     }
                     if !downloaded_pieces.is_empty() {
                         self.notify.notify_one();
                     }
                 }
                 Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => {
-                    tracing::error!(
-                        "web seed {}: SHA-1 mismatch, discarding URL permanently",
-                        self.url,
-                    );
+                    // The warn! was already emitted in download_range()
+                    // with the piece index — just exit the task.
                     return;
                 }
                 Err(e) => {
@@ -243,8 +232,8 @@ impl WebSeedTask {
         let request_url = self.build_request_url()?;
         let path_and_query = request_url.path().to_string();
 
-        tracing::info!(
-            "web seed {}: requesting GET {} (bytes {}-{})",
+        tracing::debug!(
+            "web seed {}: GET {} (bytes {}-{})",
             self.url,
             request_url,
             start_byte,
@@ -287,7 +276,7 @@ impl WebSeedTask {
 
                 let actual_hash: [u8; 20] = Sha1::digest(chunk).into();
                 if actual_hash != expected_hash {
-                    tracing::error!(
+                    tracing::warn!(
                         "web seed {}: SHA-1 mismatch for piece {} — discarding URL",
                         self.url,
                         piece_index,

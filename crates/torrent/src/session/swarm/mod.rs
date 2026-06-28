@@ -394,7 +394,7 @@ impl SwarmLoop {
                             self.webseed_notify.clone(),
                             semaphore.clone(),
                         );
-                        tracing::info!("spawning web seed task for {}", url_str);
+                        tracing::debug!("spawning web seed task for {url_str}");
                         tasks.push(tokio::spawn(async move { task.run().await }));
                     }
                     Err(e) => {
