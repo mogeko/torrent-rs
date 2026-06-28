@@ -87,7 +87,9 @@ pub(crate) fn from_bytes(data: &[u8]) -> Result<Metainfo, Error> {
     // --- Required fields ---
 
     tracing::debug!("extracting announce URL");
-    let announce = get_required_string(&val, b"announce")?;
+    let announce = dict_get(&val, b"announce")
+        .and_then(|v| string_from_bencode(v).ok())
+        .unwrap_or_default();
 
     let info_val = dict_get(&val, b"info").ok_or(Error::new(ErrorKind::MetainfoMissingField))?;
 

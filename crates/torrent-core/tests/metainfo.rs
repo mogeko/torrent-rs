@@ -166,7 +166,36 @@ fn compute_info_hash() {
 }
 
 #[test]
-fn reject_missing_announce() {
+fn allow_missing_announce_with_announce_list() {
+    let info_dict = Bencode::Dict(vec![
+        (Bytes::from("name"), Bencode::Bytes(Bytes::from("x"))),
+        (Bytes::from("piece length"), Bencode::Integer(16384)),
+        (Bytes::from("length"), Bencode::Integer(1)),
+        (
+            Bytes::from("pieces"),
+            Bencode::Bytes(Bytes::from(vec![0u8; 20])),
+        ),
+    ]);
+    let root = Bencode::Dict(vec![
+        (
+            Bytes::from("announce-list"),
+            Bencode::List(vec![Bencode::List(vec![Bencode::Bytes(Bytes::from(
+                "http://t1.com/ann",
+            ))])]),
+        ),
+        (Bytes::from("info"), info_dict),
+    ]);
+    let data = encode(&root);
+    let meta = from_bytes(&data).unwrap();
+    // announce is empty (key absent) but announce-list is present
+    assert_eq!(meta.announce, "");
+    assert_eq!(meta.announce_list.len(), 1);
+    assert_eq!(meta.announce_list[0][0], "http://t1.com/ann");
+}
+
+#[test]
+fn allow_missing_announce_standalone() {
+    // Torrent with neither announce nor announce-list
     let info_dict = Bencode::Dict(vec![
         (Bytes::from("name"), Bencode::Bytes(Bytes::from("x"))),
         (Bytes::from("piece length"), Bencode::Integer(16384)),
@@ -178,7 +207,9 @@ fn reject_missing_announce() {
     ]);
     let root = Bencode::Dict(vec![(Bytes::from("info"), info_dict)]);
     let data = encode(&root);
-    assert!(from_bytes(&data).is_err());
+    // Parses successfully with empty announce (lenient)
+    let meta = from_bytes(&data).unwrap();
+    assert_eq!(meta.announce, "");
 }
 
 #[test]
