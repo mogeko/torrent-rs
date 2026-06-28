@@ -98,7 +98,8 @@ impl WebSeedTask {
     ) -> Self {
         let num_pieces = metainfo.info.num_pieces() as u32;
         let piece_length = metainfo.info.piece_length;
-        let http = HttpClient::new(config.timeout);
+        let max_range_bytes = config.max_range_bytes + 1024 * 1024;
+        let http = HttpClient::with_max_response(config.timeout, max_range_bytes);
 
         WebSeedTask {
             url,
@@ -174,7 +175,7 @@ impl WebSeedTask {
                     retry_delay = self.config.retry_delay; // reset backoff
 
                     for index in &downloaded_pieces {
-                        tracing::debug!("web seed {}: completed piece {}", self.url, index,);
+                        tracing::info!("web seed {}: completed piece {}", self.url, index);
                     }
                     if !downloaded_pieces.is_empty() {
                         self.notify.notify_one();
@@ -207,11 +208,19 @@ impl WebSeedTask {
     /// Returns the list of piece indices that were successfully
     /// completed.
     async fn download_range(&self, start_byte: u64, end_byte: u64) -> Result<Vec<u32>, Error> {
-        // Build the URL and path for the request
-        let (request_url, path_and_query) = self.build_range_url(start_byte, end_byte)?;
+        let request_url = self.build_request_url()?;
+        let path_and_query = request_url.path().to_string();
 
-        let body = self
-            .http
+        tracing::info!(
+            "web seed {}: requesting GET {} (bytes {}-{})",
+            self.url,
+            request_url,
+            start_byte,
+            end_byte,
+        );
+
+        let http_client = &self.http;
+        let body = http_client
             .get_with_range(&request_url, &path_and_query, start_byte, end_byte)
             .await?;
 
@@ -276,37 +285,25 @@ impl WebSeedTask {
         Ok(completed)
     }
 
-    /// Build the URL for a byte range request.
+    /// Build the full file URL for a byte range request.
     ///
-    /// For single-file torrents, the URL is used directly.
-    /// For multi-file torrents with a trailing `/` URL, the
-    /// file path is appended.
-    ///
-    /// Returns `(request_url, path_and_query)` — for web seeds,
-    /// `path_and_query` is typically just `/` since the URL
-    /// already contains the full path.
-    fn build_range_url(&self, _start: u64, _end: u64) -> Result<(Url, String), Error> {
+    /// For single-file torrents:
+    /// - If the URL ends with `/` (BEP 19 directory URL), appends the
+    ///   torrent file name: `http://mirror.com/pub/` → `http://mirror.com/pub/file.iso`
+    /// - If the URL is an explicit file URL, returns it as-is.
+    fn build_request_url(&self) -> Result<Url, Error> {
         match &self.metainfo.info.mode {
-            Mode::Single { .. } => {
-                // Single file: URL is the direct file URL.
-                // The path is already part of the URL; our "path_and_query"
-                // is just the URL's own path (or "/").
-                let path = self.url.path().to_string();
-                // Note: for a clean URL like http://mirror.com/file.iso,
-                // path() returns "/file.iso". For web seed, we need
-                // to separate the "base URL" from the path.
-                //
-                // Simplification: treat the entire url as the request
-                // target, and pass path() as path_and_query.
-                Ok((self.url.clone(), path))
+            Mode::Single { name, .. } => {
+                if self.url.path().ends_with('/') {
+                    match self.url.join(name) {
+                        Ok(url) => Ok(url),
+                        Err(_) => Err(Error::new(ErrorKind::InvalidInput)),
+                    }
+                } else {
+                    Ok(self.url.clone())
+                }
             }
-            Mode::Multiple { name: _, files: _ } => {
-                // Multi-file: URL ends with "/" (directory).
-                // Full multi-file support (byte → file mapping) is a
-                // follow-up. For now, treat the base URL as-is.
-                let path = self.url.path().to_string();
-                Ok((self.url.clone(), path))
-            }
+            Mode::Multiple { .. } => Ok(self.url.clone()),
         }
     }
 

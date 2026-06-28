@@ -44,12 +44,23 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> HttpStream for T {}
 pub(crate) struct HttpClient {
     /// Per-request timeout (connect + send + receive).
     timeout: Duration,
+    /// Maximum response size to read (anti-DoS).
+    max_response: u64,
 }
 
 impl HttpClient {
-    /// Create a new HTTP client with the given timeout.
+    /// Create a new HTTP client with the given timeout and default
+    /// response cap ([`MAX_RESPONSE_SIZE`], 256 KB).
     pub fn new(timeout: Duration) -> Self {
-        HttpClient { timeout }
+        HttpClient::with_max_response(timeout, MAX_RESPONSE_SIZE)
+    }
+
+    /// Create a client with a custom response size cap.
+    pub fn with_max_response(timeout: Duration, max_response: u64) -> Self {
+        HttpClient {
+            timeout,
+            max_response,
+        }
     }
 
     /// HTTP GET request without a `Range` header.
@@ -158,7 +169,7 @@ impl HttpClient {
             }
 
             let mut buf = Vec::new();
-            let mut limited = AsyncReadExt::take(&mut stream, MAX_RESPONSE_SIZE);
+            let mut limited = AsyncReadExt::take(&mut stream, self.max_response);
 
             if let Err(e) = limited.read_to_end(&mut buf).await {
                 return Err(Error::tracker_failed(e));
@@ -170,7 +181,7 @@ impl HttpClient {
         match response.await {
             Ok(Ok(buf)) => Ok(buf),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(Error::new(ErrorKind::TrackerRequestFailed)),
+            Err(elapsed) => Err(Error::tracker_failed(elapsed)),
         }
     }
 
