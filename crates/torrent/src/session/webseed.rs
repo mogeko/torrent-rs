@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sha1::{Digest, Sha1};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Notify, RwLock, Semaphore};
 use url::Url;
 
 use crate::error::{Error, ErrorKind};
@@ -43,6 +43,26 @@ pub(crate) struct WebSeedConfig {
     /// refused). Doubles on each consecutive failure up to 60 s.
     /// Default: 2 s.
     pub retry_delay: Duration,
+    /// Maximum concurrent in-flight HTTP Range requests across all
+    /// web seed tasks.  Serves two purposes:
+    ///
+    /// 1. Prevents TLS-handshake CPU spikes from starving a
+    ///    [`current_thread`](https://docs.rs/tokio/latest/tokio/runtime/index.html#current-thread-scheduler)
+    ///    runtime when many web seed URLs are present (BEP 19 torrents
+    ///    can list hundreds of mirrors).
+    /// 2. Caps connections to any single origin server, mitigating
+    ///    the risk of being rate-limited or blacklisted (similar to
+    ///    libtorrent's per-URL limit of 5 and Transmission's serial
+    ///    web seed downloads).
+    ///
+    /// On a [`multi_thread`](https://docs.rs/tokio/latest/tokio/runtime/index.html#multi-thread-scheduler)
+    /// runtime users can raise this value for higher throughput —
+    /// a good starting point is `num_workers * 8`.  The library
+    /// deliberately keeps a conservative default because it cannot
+    /// detect the caller's runtime flavour.
+    ///
+    /// Default: 16.
+    pub max_concurrent: usize,
 }
 
 impl Default for WebSeedConfig {
@@ -52,6 +72,7 @@ impl Default for WebSeedConfig {
             max_range_bytes: 5 * 1024 * 1024, // 5 MB
             timeout: Duration::from_secs(30),
             retry_delay: Duration::from_secs(2),
+            max_concurrent: 16,
         }
     }
 }
@@ -85,6 +106,10 @@ pub(crate) struct WebSeedTask {
     /// Notification channel — woken when a peer completes a piece
     /// (so we can re-evaluate gaps).
     notify: Arc<Notify>,
+    /// Concurrency limiter shared across all web seed tasks.
+    /// Acquired before each HTTP Range request and released after,
+    /// preventing TLS handshake starvation on single-threaded runtimes.
+    semaphore: Arc<Semaphore>,
 }
 
 impl WebSeedTask {
@@ -94,7 +119,7 @@ impl WebSeedTask {
     /// If it ends with `/`, the file path is appended (multi-file).
     pub fn new(
         url: Url, piece_mgr: Arc<RwLock<PieceManager>>, storage: Arc<dyn Storage>,
-        metainfo: Metainfo, config: WebSeedConfig, notify: Arc<Notify>,
+        metainfo: Metainfo, config: WebSeedConfig, notify: Arc<Notify>, semaphore: Arc<Semaphore>,
     ) -> Self {
         let num_pieces = metainfo.info.num_pieces() as u32;
         let piece_length = metainfo.info.piece_length;
@@ -111,6 +136,7 @@ impl WebSeedTask {
             metainfo,
             config,
             notify,
+            semaphore,
         }
     }
 
@@ -169,7 +195,13 @@ impl WebSeedTask {
                 end_byte - start_byte + 1,
             );
 
-            // Download the range
+            // Acquire a concurrency permit before the HTTP call.
+            // Held only for the duration of the network round-trip
+            // (~seconds), not the full run loop — other tasks can
+            // do lightweight work (bitfield read, gap search, sleep)
+            // while waiting.  See [`WebSeedConfig::max_concurrent`].
+            let _permit = self.semaphore.clone().acquire_owned().await;
+
             match self.download_range(start_byte, end_byte).await {
                 Ok(downloaded_pieces) => {
                     retry_delay = self.config.retry_delay; // reset backoff
@@ -510,6 +542,7 @@ mod tests {
             max_range_bytes: 5 * 1024 * 1024,
             timeout: Duration::from_secs(5),
             retry_delay: Duration::from_millis(100),
+            max_concurrent: 1,
         };
 
         let task = WebSeedTask {
@@ -522,6 +555,7 @@ mod tests {
             metainfo: metainfo.clone(),
             config: config.clone(),
             notify,
+            semaphore: Arc::new(Semaphore::new(1)),
         };
 
         let completed = task.download_range(0, 255).await.unwrap();
@@ -564,6 +598,7 @@ mod tests {
             max_range_bytes: piece_length as u64 * 3,
             timeout: Duration::from_secs(5),
             retry_delay: Duration::from_millis(100),
+            max_concurrent: 1,
         };
 
         let task = WebSeedTask {
@@ -576,6 +611,7 @@ mod tests {
             metainfo: metainfo.clone(),
             config,
             notify,
+            semaphore: Arc::new(Semaphore::new(1)),
         };
 
         let completed = task.download_range(0, 383).await.unwrap();
@@ -612,6 +648,7 @@ mod tests {
             max_range_bytes: 5 * 1024 * 1024,
             timeout: Duration::from_secs(5),
             retry_delay: Duration::from_millis(100),
+            max_concurrent: 1,
         };
 
         let task = WebSeedTask::new(
@@ -621,6 +658,7 @@ mod tests {
             metainfo.clone(),
             config,
             notify,
+            Arc::new(Semaphore::new(1)),
         );
 
         let task_handle = tokio::spawn(async move { task.run().await });

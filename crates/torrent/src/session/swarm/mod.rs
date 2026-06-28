@@ -12,7 +12,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Notify, RwLock, mpsc};
+use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use url::Url;
 
@@ -193,6 +193,7 @@ impl TorrentHandle {
             max_range_bytes: config.webseed_max_range_bytes,
             timeout: config.webseed_timeout,
             retry_delay: Duration::from_secs(2),
+            max_concurrent: config.webseed_max_concurrent,
         };
         let webseed_notify = Arc::new(Notify::new());
 
@@ -371,7 +372,15 @@ impl SwarmLoop {
 
         // Spawn web seed download tasks (BEP 19).
         // One task per unique web seed URL.
+        // A shared semaphore caps concurrent HTTP Range requests
+        // for two reasons: (1) prevent TLS-handshake CPU spikes
+        // from starving a current_thread runtime when hundreds of
+        // mirrors are listed, and (2) avoid flooding a single
+        // origin server with too many connections.  Each task
+        // holds the permit only for the download_range() call
+        // (~seconds), not the entire run loop.
         if !self.web_seeds.is_empty() {
+            let semaphore = Arc::new(Semaphore::new(self.webseed_config.max_concurrent));
             let mut tasks = Vec::new();
             for url_str in &self.web_seeds {
                 match Url::parse(url_str) {
@@ -383,6 +392,7 @@ impl SwarmLoop {
                             self.metainfo.clone(),
                             self.webseed_config.clone(),
                             self.webseed_notify.clone(),
+                            semaphore.clone(),
                         );
                         tracing::info!("spawning web seed task for {}", url_str);
                         tasks.push(tokio::spawn(async move { task.run().await }));
