@@ -63,6 +63,23 @@ impl HttpClient {
         }
     }
 
+    /// HTTP HEAD request (no body).
+    ///
+    /// Sends `HEAD` instead of `GET`. The response body is discarded;
+    /// only the status line and headers are returned for inspection.
+    /// Used by web seed connectivity probing (BEP 19).
+    ///
+    /// Returns the raw response (headers + optional empty body) capped
+    /// at [`MAX_RESPONSE_SIZE`].
+    pub async fn head(&self, url: &Url, path_and_query: &str) -> Result<Vec<u8>, Error> {
+        let tls = if url.scheme() == "https" {
+            Some(build_tls_connector()?)
+        } else {
+            None
+        };
+        self.send_head_request(url, &tls, path_and_query).await
+    }
+
     /// HTTP GET request without a `Range` header.
     ///
     /// Returns the full response body (capped at [`MAX_RESPONSE_SIZE`]).
@@ -73,7 +90,7 @@ impl HttpClient {
         } else {
             None
         };
-        self.send_request(url, &tls, path_and_query, None).await
+        self.send_get_request(url, &tls, path_and_query, None).await
     }
 
     /// HTTP GET with a `Range: bytes=start-end` header.
@@ -90,13 +107,15 @@ impl HttpClient {
             None
         };
         let range = Some((range_start, range_end));
-        let raw = self.send_request(url, &tls, path_and_query, range).await?;
+        let raw = self
+            .send_get_request(url, &tls, path_and_query, range)
+            .await?;
         Ok(Self::body_from_response(&raw)?.to_vec())
     }
 
     /// Core request implementation: TCP connect, optional TLS, send
     /// request, read response (capped).
-    async fn send_request(
+    async fn send_get_request(
         &self, url: &Url, tls: &Option<TlsConnector>, path_and_query: &str,
         range: Option<(u64, u64)>,
     ) -> Result<Vec<u8>, Error> {
@@ -163,6 +182,89 @@ impl HttpClient {
             }
 
             request.push_str("\r\n");
+
+            if let Err(e) = stream.write_all(request.as_bytes()).await {
+                return Err(Error::tracker_failed(e));
+            }
+
+            let mut buf = Vec::new();
+            let mut limited = AsyncReadExt::take(&mut stream, self.max_response);
+
+            if let Err(e) = limited.read_to_end(&mut buf).await {
+                return Err(Error::tracker_failed(e));
+            }
+
+            Ok(buf)
+        });
+
+        match response.await {
+            Ok(Ok(buf)) => Ok(buf),
+            Ok(Err(e)) => Err(e),
+            Err(elapsed) => Err(Error::tracker_failed(elapsed)),
+        }
+    }
+
+    /// Send an HTTP HEAD request and return the raw response (headers only).
+    ///
+    /// Reuses the same TCP/TLS connection logic as [`send_request`] but
+    /// uses the `HEAD` method so the server omits the body.
+    async fn send_head_request(
+        &self, url: &Url, tls: &Option<TlsConnector>, path_and_query: &str,
+    ) -> Result<Vec<u8>, Error> {
+        let host = url
+            .host_str()
+            .ok_or(Error::new(ErrorKind::InvalidInput))?
+            .to_owned();
+        let port = url.port_or_known_default().unwrap_or(80);
+        let tls = tls.clone();
+        let path_and_query = path_and_query.to_owned();
+        let timeout = self.timeout;
+
+        let response = tokio::time::timeout(timeout, async move {
+            let addrs = match lookup_host((&*host, port)).await {
+                Ok(a) => a,
+                Err(e) => return Err(Error::tracker_failed(e)),
+            };
+
+            let (mut tcp_stream, mut last_err) = (None, None);
+            for addr in addrs {
+                let socket = if addr.is_ipv4() {
+                    TcpSocket::new_v4()
+                } else {
+                    TcpSocket::new_v6()
+                }
+                .map_err(Error::tracker_failed)?;
+
+                socket.set_nodelay(true).map_err(Error::tracker_failed)?;
+
+                match socket.connect(addr).await {
+                    Ok(s) => {
+                        tcp_stream = Some(s);
+                        break;
+                    }
+                    Err(e) => last_err = Some(Error::tracker_failed(e)),
+                }
+            }
+
+            let Some(tcp_stream) = tcp_stream else {
+                return Err(last_err.unwrap_or(Error::new(ErrorKind::TrackerRequestFailed)));
+            };
+
+            let mut stream: Box<dyn HttpStream> = if let Some(ref connector) = tls {
+                let domain = ServerName::try_from(host.clone()).map_err(Error::invalid_input)?;
+                let tls_stream = match connector.connect(domain, tcp_stream).await {
+                    Ok(ts) => ts,
+                    Err(e) => return Err(Error::tracker_failed(e)),
+                };
+                Box::new(tls_stream)
+            } else {
+                Box::new(tcp_stream)
+            };
+
+            let request = format!(
+                "HEAD {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: torrent-rs/0.1.0\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+                path_and_query, host
+            );
 
             if let Err(e) = stream.write_all(request.as_bytes()).await {
                 return Err(Error::tracker_failed(e));

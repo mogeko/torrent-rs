@@ -194,6 +194,8 @@ impl TorrentHandle {
             timeout: config.webseed_timeout,
             retry_delay: Duration::from_secs(2),
             max_concurrent: config.webseed_max_concurrent,
+            park_threshold: 5,
+            park_retry_interval: Duration::from_secs(60),
         };
         let webseed_notify = Arc::new(Notify::new());
 
