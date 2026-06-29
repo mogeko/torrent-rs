@@ -46,20 +46,26 @@ impl WebSeedScheduler {
         }
     }
 
-    /// Run the scheduler loop: probe → dispatch/revive/handle results.
+    /// Run the scheduler loop: optimistic start → dispatch/revive/handle.
+    ///
+    /// All URLs are initially Active — the scheduler does not probe
+    /// upfront.  Instead, FetchTasks try to download immediately;
+    /// failures are caught by [`handle_result`] and unreachable URLs
+    /// are parked after `park_threshold` consecutive errors.
+    /// Parked URLs are periodically re-probed via [`revive_parked`].
     pub async fn run(mut self) {
-        tracing::debug!("web seed scheduler: starting with {} URLs", self.urls.len());
+        tracing::info!(
+            "web seed scheduler: starting with {} URLs (optimistic)",
+            self.urls.len(),
+        );
 
-        let probe_timeout = Duration::from_secs(5);
+        // All URLs start Active — let the Fetcher retry logic and
+        // handle_result's park mechanism filter out dead URLs.
         for state in &mut self.urls {
-            if probe_url(&state.url, &state.url_kind, &self.metainfo, probe_timeout).await {
-                state.activity = UrlActivity::Active;
-            } else {
-                state.activity = UrlActivity::Parked;
-                tracing::info!("web seed {}: initial probe failed, parking", state.url);
-            }
+            state.activity = UrlActivity::Active;
         }
 
+        let probe_timeout = Duration::from_secs(5);
         let mut dispatch_tick = tokio::time::interval(Duration::from_secs(1));
         let mut revive_tick = tokio::time::interval(self.config.park_retry_interval);
 
