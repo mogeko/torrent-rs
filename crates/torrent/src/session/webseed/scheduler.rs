@@ -203,7 +203,7 @@ impl WebSeedScheduler {
                     })
             });
 
-        let Some((idx, _state)) = best_idx else {
+        let Some((idx, state)) = best_idx else {
             return;
         };
 
@@ -212,6 +212,13 @@ impl WebSeedScheduler {
         let end_byte = (start_byte + self.config.max_range_bytes)
             .min(total_size)
             .saturating_sub(1);
+
+        tracing::debug!(
+            "web seed scheduler: dispatch piece {} ({:.1} MB) to {}",
+            gap_start,
+            (end_byte - start_byte + 1) as f64 / (1024.0 * 1024.0),
+            state.url,
+        );
 
         if self.urls[idx]
             .work_tx

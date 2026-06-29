@@ -74,13 +74,13 @@ impl FetchTask {
 
     /// Run the fetcher loop — waits for work, downloads with retry, reports.
     pub async fn run(mut self) {
-        tracing::debug!("web seed {}: fetcher started", self.url);
+        tracing::trace!("web seed {}: started", self.url);
         while let Some(work) = self.work_rx.recv().await {
             let _permit = self.semaphore.clone().acquire_owned().await;
             let result = self.download_with_retry(work).await;
             let _ = self.result_tx.send(result).await;
         }
-        tracing::debug!("web seed {}: fetcher exiting (channel closed)", self.url);
+        tracing::trace!("web seed {}: exiting", self.url);
     }
 
     /// Download with up to 3 retries on transient errors (exponential backoff).
@@ -211,7 +211,7 @@ impl FetchTask {
                 let expected_hash = match self.metainfo.info.pieces.get(piece_index as usize) {
                     Some(h) => *h,
                     None => {
-                        tracing::warn!("web seed {}: piece {} out of range", self.url, piece_index,);
+                        tracing::warn!("web seed {}: piece {} out of range", self.url, piece_index);
                         break;
                     }
                 };
@@ -302,25 +302,19 @@ pub(super) async fn probe_url(
     let path = request_url.path().to_string();
 
     if try_head(&request_url, &path, probe_timeout).await {
-        tracing::debug!("web seed {url}: HEAD probe OK");
+        tracing::trace!("web seed {url}: HEAD probe OK");
         return true;
     }
     if try_tiny_range(&request_url, &path, probe_timeout).await {
-        tracing::debug!("web seed {url}: tiny Range probe OK");
+        tracing::trace!("web seed {url}: tiny Range probe OK");
         return true;
     }
-    if try_short_get(
-        &request_url,
-        &path,
-        metainfo.info.total_size(),
-        probe_timeout,
-    )
-    .await
-    {
-        tracing::debug!("web seed {url}: short GET probe OK");
+    let total_size = metainfo.info.total_size();
+    if try_short_get(&request_url, &path, total_size, probe_timeout).await {
+        tracing::trace!("web seed {url}: short GET probe OK");
         return true;
     }
-    tracing::debug!("web seed {url}: all probes failed");
+    tracing::debug!("web seed {url}: probe failed");
     false
 }
 
