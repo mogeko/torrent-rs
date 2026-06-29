@@ -31,8 +31,8 @@ use crate::tracker::{AnnounceEvent, Tracker};
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
 use super::webseed::{
-    FetchTask, UrlActivity, UrlHealth, UrlState, WebSeedConfig, WebSeedScheduler, WorkItem,
-    WorkResult,
+    FetchTask, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WebSeedScheduler,
+    WorkItem, WorkResult, deduplicate_urls,
 };
 use super::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 
@@ -383,41 +383,55 @@ impl SwarmLoop {
         // work to fetcher tasks via mpsc channels.  Each fetcher is a
         // passive worker that downloads whatever the scheduler assigns.
         if !self.web_seeds.is_empty() {
+            // Deduplicate URLs pointing to the same origin (BEP 19 mirrors
+            // often list many URLs for the same physical server).
+            let parsed: Vec<Url> = self
+                .web_seeds
+                .iter()
+                .filter_map(|s| {
+                    Url::parse(s)
+                        .map_err(|e| tracing::warn!("invalid web seed URL '{}': {}", s, e))
+                        .ok()
+                })
+                .collect();
+            let (unique, removed) = deduplicate_urls(parsed);
+            if removed > 0 {
+                tracing::info!(
+                    "web seed: {} URLs deduplicated to {} unique origins",
+                    removed + unique.len(),
+                    unique.len(),
+                );
+            }
+
             let max_concurrent = self.webseed_config.max_concurrent;
             let semaphore = Arc::new(Semaphore::new(max_concurrent));
             let (result_tx, result_rx) = mpsc::channel::<WorkResult>(max_concurrent * 2);
             let (mut urls, mut fetchers) = (Vec::new(), Vec::new());
 
-            for url_str in &self.web_seeds {
-                match Url::parse(url_str) {
-                    Ok(url) => {
-                        let (work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
-                        let result_tx = result_tx.clone();
+            for url in unique {
+                let (work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
+                let result_tx = result_tx.clone();
 
-                        let fetcher = FetchTask::new(
-                            url.clone(),
-                            self.piece_mgr.clone(),
-                            self.storage.clone(),
-                            self.metainfo.clone(),
-                            work_rx,
-                            result_tx,
-                            semaphore.clone(),
-                            self.webseed_config.timeout,
-                        );
-                        tracing::debug!("spawning web seed fetcher for {url_str}");
-                        fetchers.push(tokio::spawn(async move { fetcher.run().await }));
+                let fetcher = FetchTask::new(
+                    url.clone(),
+                    self.piece_mgr.clone(),
+                    self.storage.clone(),
+                    self.metainfo.clone(),
+                    work_rx,
+                    result_tx,
+                    semaphore.clone(),
+                    self.webseed_config.timeout,
+                );
+                tracing::debug!("spawning web seed fetcher for {url}");
+                fetchers.push(tokio::spawn(async move { fetcher.run().await }));
 
-                        urls.push(UrlState {
-                            url,
-                            health: UrlHealth::default(),
-                            work_tx,
-                            activity: UrlActivity::Active,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("invalid web seed URL '{}': {}", url_str, e);
-                    }
-                }
+                urls.push(UrlState {
+                    url: url.clone(),
+                    url_kind: UrlKind::classify(&url),
+                    health: UrlHealth::default(),
+                    work_tx,
+                    activity: UrlActivity::Active,
+                });
             }
 
             if !urls.is_empty() {

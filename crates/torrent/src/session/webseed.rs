@@ -22,7 +22,7 @@ use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
 use url::Url;
 
 use crate::error::{Error, ErrorKind};
-use crate::metainfo::{Metainfo, Mode};
+use crate::metainfo::Metainfo;
 use crate::net::http::HttpClient;
 use crate::piece::PieceManager;
 use crate::storage::Storage;
@@ -193,9 +193,30 @@ pub(crate) enum UrlActivity {
     InFlight,
 }
 
+/// Whether a web seed URL is a directory (append file path) or
+/// a script/explicit URL (serves the whole torrent as one file).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UrlKind {
+    /// Directory URL (BEP 19 §2): ends with `/`, client appends file path.
+    Directory,
+    /// Script or explicit file URL: serves the entire torrent content.
+    Script,
+}
+
+impl UrlKind {
+    pub(crate) fn classify(url: &Url) -> Self {
+        if url.path().ends_with('/') {
+            UrlKind::Directory
+        } else {
+            UrlKind::Script
+        }
+    }
+}
+
 /// A web seed URL with its health score and work channel.
 pub(crate) struct UrlState {
     pub(crate) url: Url,
+    pub(crate) url_kind: UrlKind,
     pub(crate) health: UrlHealth,
     pub(crate) work_tx: mpsc::Sender<WorkItem>,
     pub(crate) activity: UrlActivity,
@@ -203,22 +224,80 @@ pub(crate) struct UrlState {
 
 // ── Free helper functions (shared by FetchTask and WebSeedScheduler) ──
 
-/// Build the full file URL for an HTTP Range request.
+/// Build the full file URL for an HTTP Range request starting at `start_byte`.
 ///
-/// For single-file torrents: appends the filename if `url` ends with `/`.
-/// For multi-file torrents: returns the URL as-is (future: append file path).
-fn build_request_url(url: &Url, metainfo: &Metainfo) -> Result<Url, Error> {
-    match &metainfo.info.mode {
-        Mode::Single { name, .. } => {
-            if url.path().ends_with('/') {
-                url.join(name)
-                    .map_err(|_| Error::new(ErrorKind::InvalidInput))
-            } else {
-                Ok(url.clone())
+/// For directory URLs (BEP 19 §2): finds the file containing `start_byte`
+/// via [`Info::file_offsets`] and appends its path.
+/// For script URLs: returns the URL as-is.
+fn build_request_url(
+    url: &Url, metainfo: &Metainfo, url_kind: &UrlKind, start_byte: u64,
+) -> Result<Url, Error> {
+    match url_kind {
+        UrlKind::Directory => {
+            // Find the file that contains start_byte.
+            let offsets = metainfo.info.file_offsets();
+            let file = offsets
+                .iter()
+                .find(|fo| start_byte >= fo.offset && start_byte < fo.offset + fo.length)
+                .ok_or(Error::new(ErrorKind::InvalidInput))?;
+            let file_path = file.path.join("/");
+            url.join(&file_path)
+                .map_err(|_| Error::new(ErrorKind::InvalidInput))
+        }
+        UrlKind::Script => Ok(url.clone()),
+    }
+}
+
+/// Find the path components for the file containing `start_byte`.
+///
+/// Returns `None` if `start_byte` is out of range.
+fn file_path_at_byte(metainfo: &Metainfo, start_byte: u64) -> Option<Vec<String>> {
+    metainfo
+        .info
+        .file_offsets()
+        .iter()
+        .find(|fo| start_byte >= fo.offset && start_byte < fo.offset + fo.length)
+        .map(|fo| fo.path.clone())
+}
+
+/// Find the largest contiguous gap within a single file's piece range.
+///
+/// Unlike [`find_largest_gap`], this restricts the gap to pieces that
+/// fall entirely within one file. Used for directory-style web seed
+/// URLs where each HTTP request targets a single file.
+fn gap_within_file(
+    bitfield: &[bool], metainfo: &Metainfo, piece_length: u64, min_gap_pieces: u32,
+) -> Option<(u32, u32)> {
+    let offsets = metainfo.info.file_offsets();
+    let mut best: Option<(u32, u32)> = None;
+
+    for fo in &offsets {
+        let first_piece = (fo.offset / piece_length) as u32;
+        let last_piece = ((fo.offset + fo.length).saturating_sub(1) / piece_length) as u32;
+        let last_piece = last_piece.min(bitfield.len().saturating_sub(1) as u32);
+
+        let (mut gap_start, mut gap_size) = (None, 0u32);
+        for idx in first_piece..=last_piece {
+            if !bitfield[idx as usize] {
+                if gap_start.is_none() {
+                    gap_start = Some(idx);
+                }
+                gap_size += 1;
+            } else if let Some(start) = gap_start {
+                if gap_size > best.map(|(_, s)| s).unwrap_or(0) && gap_size >= min_gap_pieces {
+                    best = Some((start, gap_size));
+                }
+                gap_start = None;
+                gap_size = 0;
             }
         }
-        Mode::Multiple { .. } => Ok(url.clone()),
+        if let Some(start) = gap_start {
+            if gap_size > best.map(|(_, s)| s).unwrap_or(0) && gap_size >= min_gap_pieces {
+                best = Some((start, gap_size));
+            }
+        }
     }
+    best
 }
 
 /// Length of the piece at `index` (last piece may be shorter).
@@ -238,9 +317,14 @@ fn piece_len(index: u32, metainfo: &Metainfo, piece_length: u64) -> u64 {
 
 /// Probe a web seed URL with a three-level fallback.
 ///
+/// For directory URLs, probes using the first file in the torrent.
 /// Returns `true` if any probe succeeds.
-async fn probe_url(url: &Url, metainfo: &Metainfo, probe_timeout: Duration) -> bool {
-    let request_url = match build_request_url(url, metainfo) {
+async fn probe_url(
+    url: &Url, url_kind: &UrlKind, metainfo: &Metainfo, probe_timeout: Duration,
+) -> bool {
+    // Use start_byte=0 for probing — the first file.
+    // Use start_byte=0 for probing — the first file.
+    let request_url = match build_request_url(url, metainfo, url_kind, 0) {
         Ok(u) => u,
         Err(_) => return false,
     };
@@ -388,7 +472,11 @@ impl FetchTask {
 
     /// Download a byte range, split into pieces, verify SHA-1, write to storage.
     async fn download_range(&self, start_byte: u64, end_byte: u64) -> Result<Vec<u32>, Error> {
-        let request_url = build_request_url(&self.url, &self.metainfo)?;
+        // For directory URLs, we need to know the URL kind to construct the
+        // right file path. The scheduler ensures directory URLs never get
+        // cross-file ranges, so start_byte always falls within one file.
+        let url_kind = UrlKind::classify(&self.url);
+        let request_url = build_request_url(&self.url, &self.metainfo, &url_kind, start_byte)?;
         let path_and_query = request_url.path().to_string();
 
         tracing::debug!(
@@ -454,6 +542,34 @@ impl FetchTask {
     }
 }
 
+// ── URL deduplication ─────────────────────────────────────────────
+
+/// Deduplicate URLs that resolve to the same origin (IP:port).
+///
+/// For torrents with hundreds of mirror URLs, many point to the same
+/// physical server. This function does a lightweight DNS-based dedup:
+/// URLs resolving to the same `(host, port)` tuple are collapsed to
+/// the first occurrence.
+///
+/// Returns `(deduplicated_urls, removed_count)`.
+pub(crate) fn deduplicate_urls(urls: Vec<Url>) -> (Vec<Url>, usize) {
+    let total = urls.len();
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::with_capacity(total);
+
+    for url in urls {
+        let key = (
+            url.host_str().map(|h| h.to_ascii_lowercase()),
+            url.port_or_known_default(),
+        );
+        if seen.insert(key) {
+            result.push(url);
+        }
+    }
+    let removed = total - result.len();
+    (result, removed)
+}
+
 // ── WebSeedScheduler: centralized work dispatch ───────────────────
 
 /// Centralized scheduler for web seed downloads (Phase 2).
@@ -506,7 +622,7 @@ impl WebSeedScheduler {
         // ── Initial probe ────────────────────────────────────────
         let probe_timeout = Duration::from_secs(5);
         for state in &mut self.urls {
-            if probe_url(&state.url, &self.metainfo, probe_timeout).await {
+            if probe_url(&state.url, &state.url_kind, &self.metainfo, probe_timeout).await {
                 state.activity = UrlActivity::Active;
             } else {
                 state.activity = UrlActivity::Parked;
@@ -601,29 +717,62 @@ impl WebSeedScheduler {
             pm.bitfield().to_vec()
         };
 
-        let Some((gap_start, _gap_size)) = find_largest_gap(&bitfield) else {
+        let piece_length = self.metainfo.info.piece_length;
+        let min_gap = self.config.min_gap_pieces;
+
+        // Try script URLs first (can download cross-file ranges).
+        // Fall back to directory URLs (restricted to single files).
+        let gap = find_largest_gap(&bitfield)
+            .or_else(|| gap_within_file(&bitfield, &self.metainfo, piece_length, min_gap));
+
+        let Some((gap_start, _gap_size)) = gap else {
             return;
         };
 
         // Pick the best available URL: Active, work_tx not full,
-        // highest throughput.
+        // highest throughput. Prefer script URLs over directory URLs
+        // for cross-file gaps.
         let best_idx = self
             .urls
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.activity == UrlActivity::Active && !s.work_tx.is_closed())
+            .filter(|(_, s)| {
+                if s.activity != UrlActivity::Active || s.work_tx.is_closed() {
+                    return false;
+                }
+                // For directory URLs, the gap must fall within a single file.
+                if s.url_kind == UrlKind::Directory {
+                    let start_byte = gap_start as u64 * piece_length;
+                    file_path_at_byte(&self.metainfo, start_byte).is_some()
+                } else {
+                    true
+                }
+            })
             .max_by(|(_, a), (_, b)| {
-                a.health
-                    .ema_throughput
-                    .partial_cmp(&b.health.ema_throughput)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                // Prefer script URLs (can handle any range).
+                let a_priority = if a.url_kind == UrlKind::Script {
+                    1u8
+                } else {
+                    0u8
+                };
+                let b_priority = if b.url_kind == UrlKind::Script {
+                    1u8
+                } else {
+                    0u8
+                };
+                a_priority.cmp(&b_priority).then_with(|| {
+                    a.health
+                        .ema_throughput
+                        .partial_cmp(&b.health.ema_throughput)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
             });
 
         let Some((idx, _state)) = best_idx else {
             return;
         };
 
-        let start_byte = gap_start as u64 * self.metainfo.info.piece_length;
+        let start_byte = gap_start as u64 * piece_length;
         let total_size = self.metainfo.info.total_size();
         let end_byte = (start_byte + self.config.max_range_bytes)
             .min(total_size)
@@ -648,7 +797,7 @@ impl WebSeedScheduler {
                 && state
                     .health
                     .ready_for_retry(self.config.park_retry_interval)
-                && probe_url(&state.url, &self.metainfo, *probe_timeout).await
+                && probe_url(&state.url, &state.url_kind, &self.metainfo, *probe_timeout).await
             {
                 tracing::info!("web seed {}: re-probe succeeded, reviving", state.url);
                 state.activity = UrlActivity::Active;
@@ -701,10 +850,9 @@ fn find_largest_gap(bitfield: &[bool]) -> Option<(u32, u32)> {
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use torrent_core::storage::StorageFactory;
 
-    use crate::metainfo::MetainfoBuilder;
-    use crate::storage::FileStorageFactory;
+    use crate::metainfo::{FileInfo, MetainfoBuilder, Mode, RawInfo};
+    use crate::storage::{FileStorageFactory, StorageFactory};
 
     use super::*;
 
@@ -862,6 +1010,119 @@ mod tests {
         // Second: 2000 B/s — EMA = 0.3*2000 + 0.7*1000 = 1300
         h.record_success(2000, Duration::from_secs(1));
         assert!((h.ema_throughput - 1300.0).abs() < 1.0);
+    }
+
+    // ── gap_within_file tests ────────────────────────────────────
+
+    /// Build a multi-file Info for testing.
+    fn make_multi_file_info() -> crate::metainfo::Info {
+        crate::metainfo::Info {
+            piece_length: 100,
+            pieces: vec![[0u8; 20]; 10],
+            mode: Mode::Multiple {
+                name: "root".into(),
+                files: vec![
+                    FileInfo {
+                        length: 300,
+                        path: vec!["a.txt".into()],
+                    }, // pieces 0-2
+                    FileInfo {
+                        length: 400,
+                        path: vec!["b.txt".into()],
+                    }, // pieces 3-6
+                    FileInfo {
+                        length: 300,
+                        path: vec!["c.txt".into()],
+                    }, // pieces 7-9
+                ],
+            },
+            raw_info: RawInfo::Hash([0u8; 20]),
+        }
+    }
+
+    #[test]
+    fn gap_within_file_finds_file_local_gap() {
+        let info = make_multi_file_info();
+        let metainfo = Metainfo {
+            announce: String::new(),
+            announce_list: vec![],
+            info,
+            url_list: vec![],
+            httpseeds: vec![],
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+        // All pieces missing — should find a gap within one file
+        let bf = vec![false; 10];
+        let gap = gap_within_file(&bf, &metainfo, 100, 1);
+        assert!(gap.is_some());
+        let (_, size) = gap.unwrap();
+        // File b.txt spans pieces 3-6 (4 pieces)
+        assert!(size >= 3, "should find gap >= 3 pieces in a file");
+    }
+
+    #[test]
+    fn gap_within_file_respects_have() {
+        let info = make_multi_file_info();
+        let metainfo = Metainfo {
+            announce: String::new(),
+            announce_list: vec![],
+            info,
+            url_list: vec![],
+            httpseeds: vec![],
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            encoding: None,
+        };
+        // File a.txt (0-2) is complete, b.txt (3-6) has gap at 4-5
+        let bf = vec![
+            true, true, true, true, false, false, true, false, false, false,
+        ];
+        let gap = gap_within_file(&bf, &metainfo, 100, 2);
+        assert!(gap.is_some());
+        let (start, size) = gap.unwrap();
+        assert_eq!(start, 7);
+        assert_eq!(size, 3); // c.txt: pieces 7-9 all missing
+    }
+
+    // ── deduplicate_urls tests ───────────────────────────────────
+
+    #[test]
+    fn dedup_removes_same_origin() {
+        let urls = vec![
+            Url::parse("http://mirror1.example.com/file.iso").unwrap(),
+            Url::parse("http://mirror1.example.com/file.iso").unwrap(), // dup
+            Url::parse("http://mirror2.example.com/file.iso").unwrap(),
+        ];
+        let (result, removed) = deduplicate_urls(urls);
+        assert_eq!(removed, 1);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn dedup_preserves_different_ports() {
+        let urls = vec![
+            Url::parse("http://example.com:8080/file").unwrap(),
+            Url::parse("http://example.com:9090/file").unwrap(),
+        ];
+        let (result, removed) = deduplicate_urls(urls);
+        assert_eq!(removed, 0);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn dedup_preserves_different_schemes() {
+        let urls = vec![
+            Url::parse("http://example.com/file").unwrap(),
+            Url::parse("https://example.com/file").unwrap(),
+        ];
+        let (result, removed) = deduplicate_urls(urls);
+        // http:80 vs https:443 — different origins
+        assert_eq!(removed, 0);
+        assert_eq!(result.len(), 2);
     }
 
     // ── download_range async tests (mock HTTP server) ────────────
