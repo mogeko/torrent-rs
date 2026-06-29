@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::TcpStream;
+use tokio::net::TcpSocket;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 
@@ -49,12 +49,28 @@ impl PeerConnection {
     ) -> Result<Self, Error> {
         tracing::debug!("connecting to peer {}", addr);
 
-        // TCP connect with timeout
-        let mut raw_stream =
-            match tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(addr)).await {
-                Ok(Ok(s)) => s,
-                _ => return Err(Error::new(ErrorKind::PeerConnectionClosed)),
-            };
+        // TCP connect with timeout and TCP_NODELAY (critical for BitTorrent's
+        // small control messages: Have, Request, Cancel — Nagle would add up
+        // to 200ms of extra latency on each).
+        let raw_stream = {
+            let socket = if addr.is_ipv4() {
+                TcpSocket::new_v4()
+            } else {
+                TcpSocket::new_v6()
+            }
+            .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?;
+
+            socket
+                .set_nodelay(true)
+                .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?;
+
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.connect(addr))
+                .await
+                .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+                .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+        };
+
+        let mut raw_stream = raw_stream;
 
         // Perform BEP 3 handshake directly on the raw TcpStream so that no
         // BufReader read-ahead can steal bytes from subsequent wire

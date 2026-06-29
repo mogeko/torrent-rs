@@ -492,6 +492,8 @@ mod tests {
             announce: "http://tracker.example.com/announce".into(),
             announce_list: vec![],
             info,
+            url_list: vec![],
+            httpseeds: vec![],
             creation_date: None,
             comment: None,
             created_by: None,

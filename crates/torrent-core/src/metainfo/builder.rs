@@ -35,6 +35,8 @@ use crate::metainfo::{Info, Metainfo, Mode, RawInfo};
 ///         name: "test.txt".into(),
 ///         length: data.len() as u64,
 ///     },
+///     Vec::new(),
+///     Vec::new(),
 /// );
 ///
 /// assert!(meta.to_bytes().is_some());
@@ -101,7 +103,12 @@ impl MetainfoBuilder {
     ///
     /// The resulting [`Metainfo`] has [`RawInfo::Bytes`] populated,
     /// so [`Metainfo::to_bytes`] and [`Metainfo::info_hash`] both work.
-    pub fn finish(self, announce: String, mode: Mode) -> Metainfo {
+    ///
+    /// `url_list` sets the `url-list` field (BEP 19) and `httpseeds`
+    /// sets the `httpseeds` field (BEP 17). Pass empty `Vec`s to omit.
+    pub fn finish(
+        self, announce: String, mode: Mode, url_list: Vec<String>, httpseeds: Vec<String>,
+    ) -> Metainfo {
         let mut pieces = self.pieces;
 
         // Hash any remaining partial piece
@@ -130,6 +137,8 @@ impl MetainfoBuilder {
             announce,
             announce_list: Vec::new(),
             info,
+            url_list,
+            httpseeds,
             creation_date: None,
             comment: None,
             created_by: None,
@@ -214,6 +223,8 @@ mod tests {
                 name: "empty.dat".into(),
                 length: 0,
             },
+            Vec::new(),
+            Vec::new(),
         );
 
         assert_eq!(meta.info.pieces.len(), 0);
@@ -237,6 +248,8 @@ mod tests {
                 name: "small.txt".into(),
                 length: data.len() as u64,
             },
+            Vec::new(),
+            Vec::new(),
         );
 
         // All data fits in one partial piece
@@ -263,6 +276,8 @@ mod tests {
                 name: "exact.dat".into(),
                 length: data.len() as u64,
             },
+            Vec::new(),
+            Vec::new(),
         );
 
         assert_eq!(meta.info.num_pieces(), 1);
@@ -287,6 +302,8 @@ mod tests {
                 name: "multi.dat".into(),
                 length: data.len() as u64,
             },
+            Vec::new(),
+            Vec::new(),
         );
 
         // 31 / 16 = 1 full piece + 15 bytes partial
@@ -319,6 +336,8 @@ mod tests {
                 name: "chunks.dat".into(),
                 length: 18,
             },
+            Vec::new(),
+            Vec::new(),
         );
 
         // 18 bytes ÷ 8 = 2 full + 2 partial
@@ -345,6 +364,8 @@ mod tests {
                 name: "fox.txt".into(),
                 length: data.len() as u64,
             },
+            Vec::new(),
+            Vec::new(),
         );
 
         assert_eq!(meta.info.pieces[0], expected_sha1);
@@ -376,6 +397,8 @@ mod tests {
                 name: "my_data".into(),
                 files,
             },
+            Vec::new(),
+            Vec::new(),
         );
 
         // 36 bytes ÷ 16 = 2 full + 4 partial = 3 pieces
@@ -399,6 +422,8 @@ mod tests {
                 name: "roundtrip.bin".into(),
                 length: data.len() as u64,
             },
+            Vec::new(),
+            Vec::new(),
         );
 
         // Serialize and re-parse

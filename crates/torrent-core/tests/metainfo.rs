@@ -1,6 +1,7 @@
 use torrent_core::bencode::{Bencode, Bytes, encode};
 use torrent_core::error::ErrorKind;
 use torrent_core::metainfo::{Mode, from_bytes};
+use torrent_core::spec::TorrentSpec;
 
 fn make_single_file_torrent() -> Vec<u8> {
     let info_dict = Bencode::Dict(vec![
@@ -165,7 +166,36 @@ fn compute_info_hash() {
 }
 
 #[test]
-fn reject_missing_announce() {
+fn allow_missing_announce_with_announce_list() {
+    let info_dict = Bencode::Dict(vec![
+        (Bytes::from("name"), Bencode::Bytes(Bytes::from("x"))),
+        (Bytes::from("piece length"), Bencode::Integer(16384)),
+        (Bytes::from("length"), Bencode::Integer(1)),
+        (
+            Bytes::from("pieces"),
+            Bencode::Bytes(Bytes::from(vec![0u8; 20])),
+        ),
+    ]);
+    let root = Bencode::Dict(vec![
+        (
+            Bytes::from("announce-list"),
+            Bencode::List(vec![Bencode::List(vec![Bencode::Bytes(Bytes::from(
+                "http://t1.com/ann",
+            ))])]),
+        ),
+        (Bytes::from("info"), info_dict),
+    ]);
+    let data = encode(&root);
+    let meta = from_bytes(&data).unwrap();
+    // announce is empty (key absent) but announce-list is present
+    assert_eq!(meta.announce, "");
+    assert_eq!(meta.announce_list.len(), 1);
+    assert_eq!(meta.announce_list[0][0], "http://t1.com/ann");
+}
+
+#[test]
+fn allow_missing_announce_standalone() {
+    // Torrent with neither announce nor announce-list
     let info_dict = Bencode::Dict(vec![
         (Bytes::from("name"), Bencode::Bytes(Bytes::from("x"))),
         (Bytes::from("piece length"), Bencode::Integer(16384)),
@@ -177,7 +207,9 @@ fn reject_missing_announce() {
     ]);
     let root = Bencode::Dict(vec![(Bytes::from("info"), info_dict)]);
     let data = encode(&root);
-    assert!(from_bytes(&data).is_err());
+    // Parses successfully with empty announce (lenient)
+    let meta = from_bytes(&data).unwrap();
+    assert_eq!(meta.announce, "");
 }
 
 #[test]
@@ -212,4 +244,165 @@ fn reject_invalid_pieces_length() {
     let result = from_bytes(&data);
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), ErrorKind::MetainfoInvalidPieces);
+}
+
+// ── Web seed (BEP 19) tests ──
+
+#[test]
+fn parse_url_list_single() {
+    let info_dict = Bencode::Dict(vec![
+        (Bytes::from("name"), Bencode::Bytes(Bytes::from("test.txt"))),
+        (Bytes::from("piece length"), Bencode::Integer(16384)),
+        (Bytes::from("length"), Bencode::Integer(1024)),
+        (
+            Bytes::from("pieces"),
+            Bencode::Bytes(Bytes::from(vec![0u8; 20])),
+        ),
+    ]);
+    let root = Bencode::Dict(vec![
+        (
+            Bytes::from("announce"),
+            Bencode::Bytes(Bytes::from("http://t.com/ann")),
+        ),
+        (
+            Bytes::from("url-list"),
+            Bencode::Bytes(Bytes::from("http://mirror.com/file.iso")),
+        ),
+        (Bytes::from("info"), info_dict),
+    ]);
+    let data = encode(&root);
+    let meta = from_bytes(&data).unwrap();
+    assert_eq!(meta.url_list, vec!["http://mirror.com/file.iso"]);
+    assert!(meta.httpseeds.is_empty());
+}
+
+#[test]
+fn parse_url_list_multiple() {
+    let info_dict = Bencode::Dict(vec![
+        (Bytes::from("name"), Bencode::Bytes(Bytes::from("test.txt"))),
+        (Bytes::from("piece length"), Bencode::Integer(16384)),
+        (Bytes::from("length"), Bencode::Integer(1024)),
+        (
+            Bytes::from("pieces"),
+            Bencode::Bytes(Bytes::from(vec![0u8; 20])),
+        ),
+    ]);
+    let root = Bencode::Dict(vec![
+        (
+            Bytes::from("announce"),
+            Bencode::Bytes(Bytes::from("http://t.com/ann")),
+        ),
+        (
+            Bytes::from("url-list"),
+            Bencode::List(vec![
+                Bencode::Bytes(Bytes::from("http://mirror1.com/file.iso")),
+                Bencode::Bytes(Bytes::from("http://mirror2.com/file.iso")),
+            ]),
+        ),
+        (Bytes::from("info"), info_dict),
+    ]);
+    let data = encode(&root);
+    let meta = from_bytes(&data).unwrap();
+    assert_eq!(
+        meta.url_list,
+        vec!["http://mirror1.com/file.iso", "http://mirror2.com/file.iso",]
+    );
+}
+
+#[test]
+fn parse_url_list_trailing_slash() {
+    let info_dict = Bencode::Dict(vec![
+        (Bytes::from("name"), Bencode::Bytes(Bytes::from("test.txt"))),
+        (Bytes::from("piece length"), Bencode::Integer(16384)),
+        (Bytes::from("length"), Bencode::Integer(1024)),
+        (
+            Bytes::from("pieces"),
+            Bencode::Bytes(Bytes::from(vec![0u8; 20])),
+        ),
+    ]);
+    let root = Bencode::Dict(vec![
+        (
+            Bytes::from("announce"),
+            Bencode::Bytes(Bytes::from("http://t.com/ann")),
+        ),
+        (
+            Bytes::from("url-list"),
+            Bencode::Bytes(Bytes::from("http://mirror.com/pub/")),
+        ),
+        (Bytes::from("info"), info_dict),
+    ]);
+    let data = encode(&root);
+    let meta = from_bytes(&data).unwrap();
+    assert_eq!(meta.url_list, vec!["http://mirror.com/pub/"]);
+}
+
+#[test]
+fn parse_url_list_missing() {
+    let data = make_single_file_torrent();
+    let meta = from_bytes(&data).unwrap();
+    assert!(meta.url_list.is_empty());
+    assert!(meta.httpseeds.is_empty());
+}
+
+#[test]
+fn parse_httpseeds() {
+    let info_dict = Bencode::Dict(vec![
+        (Bytes::from("name"), Bencode::Bytes(Bytes::from("test.txt"))),
+        (Bytes::from("piece length"), Bencode::Integer(16384)),
+        (Bytes::from("length"), Bencode::Integer(1024)),
+        (
+            Bytes::from("pieces"),
+            Bencode::Bytes(Bytes::from(vec![0u8; 20])),
+        ),
+    ]);
+    let root = Bencode::Dict(vec![
+        (
+            Bytes::from("announce"),
+            Bencode::Bytes(Bytes::from("http://t.com/ann")),
+        ),
+        (
+            Bytes::from("httpseeds"),
+            Bencode::List(vec![
+                Bencode::Bytes(Bytes::from("http://seed1.com/seed.php")),
+                Bencode::Bytes(Bytes::from("http://seed2.com/seed.php")),
+            ]),
+        ),
+        (Bytes::from("info"), info_dict),
+    ]);
+    let data = encode(&root);
+    let meta = from_bytes(&data).unwrap();
+    assert_eq!(
+        meta.httpseeds,
+        vec!["http://seed1.com/seed.php", "http://seed2.com/seed.php",]
+    );
+    assert!(meta.url_list.is_empty());
+}
+
+#[test]
+fn torrent_spec_web_seeds_from_metainfo() {
+    let info_dict = Bencode::Dict(vec![
+        (Bytes::from("name"), Bencode::Bytes(Bytes::from("test.txt"))),
+        (Bytes::from("piece length"), Bencode::Integer(16384)),
+        (Bytes::from("length"), Bencode::Integer(1024)),
+        (
+            Bytes::from("pieces"),
+            Bencode::Bytes(Bytes::from(vec![0u8; 20])),
+        ),
+    ]);
+    let root = Bencode::Dict(vec![
+        (
+            Bytes::from("announce"),
+            Bencode::Bytes(Bytes::from("http://t.com/ann")),
+        ),
+        (
+            Bytes::from("url-list"),
+            Bencode::Bytes(Bytes::from("http://mirror.com/file.iso")),
+        ),
+        (Bytes::from("info"), info_dict),
+    ]);
+    let data = encode(&root);
+    let meta = from_bytes(&data).unwrap();
+    let spec = TorrentSpec::from(meta);
+    assert_eq!(spec.web_seeds(), vec!["http://mirror.com/file.iso"]);
+    assert!(spec.httpseeds().is_empty());
 }

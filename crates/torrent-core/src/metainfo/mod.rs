@@ -64,6 +64,18 @@ pub struct Metainfo {
     pub announce_list: Vec<Vec<String>>,
     /// The info dictionary containing file metadata.
     pub info: Info,
+    /// Web seed URLs from the `url-list` key (BEP 19).
+    ///
+    /// Each URL points to a standard HTTP/FTP server hosting the
+    /// torrent's files. URLs ending with `/` are directory URLs —
+    /// the client appends the file path. Explicit file URLs are
+    /// used as-is.
+    pub url_list: Vec<String>,
+    /// HTTP seed URLs from the `httpseeds` key (BEP 17, Draft).
+    ///
+    /// These require a server-side script. Parsed for forward
+    /// compatibility but not yet used for download.
+    pub httpseeds: Vec<String>,
     /// Unix timestamp of creation (optional).
     pub creation_date: Option<i64>,
     /// Free-form comment (optional).
@@ -373,6 +385,8 @@ mod tests {
                 },
                 raw_info: RawInfo::Hash([0u8; 20]),
             },
+            url_list: vec![],
+            httpseeds: vec![],
             creation_date: None,
             comment: None,
             created_by: None,
@@ -398,6 +412,8 @@ mod tests {
                 },
                 raw_info: RawInfo::Hash([0u8; 20]),
             },
+            url_list: vec![],
+            httpseeds: vec![],
             creation_date: None,
             comment: None,
             created_by: None,
@@ -479,6 +495,8 @@ mod serde_tests {
             announce: "http://tracker.example.com/announce".into(),
             announce_list: vec![vec!["http://t2.com/ann".into()]],
             info,
+            url_list: vec![],
+            httpseeds: vec![],
             creation_date: Some(1672531200),
             comment: Some("test torrent".into()),
             created_by: Some("torrent-rs".into()),
@@ -522,6 +540,8 @@ mod serde_tests {
             announce: "http://t.com/a".into(),
             announce_list: vec![],
             info,
+            url_list: vec![],
+            httpseeds: vec![],
             creation_date: None,
             comment: None,
             created_by: None,
@@ -559,6 +579,8 @@ mod serde_tests {
                 },
                 raw_info: RawInfo::Hash([0x11; 20]),
             },
+            url_list: vec![],
+            httpseeds: vec![],
             creation_date: None,
             comment: None,
             created_by: None,

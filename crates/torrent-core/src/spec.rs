@@ -62,6 +62,28 @@ impl TorrentSpec {
             TorrentSpec::Magnet(m) => m.trackers.iter().map(|s| s.as_str()).collect(),
         }
     }
+
+    /// Web seed URLs from the `url-list` key (BEP 19) or magnet `ws` parameter.
+    ///
+    /// Returns all HTTP/FTP URLs that can be used as direct download
+    /// sources for the torrent's files.
+    pub fn web_seeds(&self) -> Vec<&str> {
+        match self {
+            TorrentSpec::Metainfo(m) => m.url_list.iter().map(|s| s.as_str()).collect(),
+            TorrentSpec::Magnet(m) => m.web_seeds.iter().map(|s| s.as_str()).collect(),
+        }
+    }
+
+    /// HTTP seed URLs from the `httpseeds` key (BEP 17, Draft).
+    ///
+    /// These require a server-side script and are not yet used for
+    /// download. Parsed for forward compatibility.
+    pub fn httpseeds(&self) -> Vec<&str> {
+        match self {
+            TorrentSpec::Metainfo(m) => m.httpseeds.iter().map(|s| s.as_str()).collect(),
+            TorrentSpec::Magnet(_) => Vec::new(),
+        }
+    }
 }
 
 /// Wrap a [`Metainfo`] into a [`TorrentSpec`].
@@ -124,6 +146,8 @@ mod tests {
                 },
                 raw_info: RawInfo::Bytes(Bytes::from_static(b"d4:infod...e")),
             },
+            url_list: vec![],
+            httpseeds: vec![],
             creation_date: None,
             comment: None,
             created_by: None,
@@ -147,6 +171,8 @@ mod tests {
                 },
                 raw_info: RawInfo::Bytes(Bytes::from_static(b"d4:infod...e")),
             },
+            url_list: vec![],
+            httpseeds: vec![],
             creation_date: None,
             comment: None,
             created_by: None,

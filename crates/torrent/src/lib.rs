@@ -31,6 +31,7 @@
 pub use torrent_core::{bencode, error, magnet, metainfo, piece, spec};
 
 pub mod dht;
+pub(crate) mod net;
 pub mod peer;
 pub mod session;
 pub mod storage;

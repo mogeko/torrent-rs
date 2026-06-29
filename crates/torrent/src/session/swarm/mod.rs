@@ -12,8 +12,9 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{RwLock, mpsc};
-use tokio::task::JoinSet;
+use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
+use tokio::task::{JoinHandle, JoinSet};
+use url::Url;
 
 use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
@@ -29,6 +30,7 @@ use crate::tracker::{AnnounceEvent, Tracker};
 
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
+use super::webseed::{WebSeedConfig, WebSeedTask};
 use super::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 
 use self::types::{UT_PEX, UT_PEX_ID};
@@ -49,12 +51,14 @@ pub(crate) struct TorrentHandle {
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
+    /// Web seed URLs collected from the torrent spec (BEP 19).
+    pub(crate) web_seeds: Vec<String>,
     /// Set by [`activate`](TorrentHandle::activate).
     pub storage: Option<Arc<dyn Storage>>,
     /// Set by [`activate`](TorrentHandle::activate).
     pub control_tx: Option<mpsc::Sender<TorrentCommand>>,
     /// Set by [`activate`](TorrentHandle::activate).
-    pub task: Option<tokio::task::JoinHandle<()>>,
+    pub task: Option<JoinHandle<()>>,
 }
 
 impl TorrentHandle {
@@ -64,6 +68,8 @@ impl TorrentHandle {
     /// For magnet links, `metainfo` is `None` and `num_pieces` is 0 —
     /// metainfo must be downloaded from peers before activation.
     pub(crate) fn register(spec: TorrentSpec, config: &SessionConfig) -> Self {
+        let web_seeds: Vec<String> = spec.web_seeds().into_iter().map(|s| s.to_owned()).collect();
+
         let (metainfo, info_hash, name, num_pieces) = match spec {
             TorrentSpec::Metainfo(meta) => {
                 let ih = meta.info_hash();
@@ -108,6 +114,7 @@ impl TorrentHandle {
             peer_mgr,
             piece_mgr,
             status,
+            web_seeds,
             storage: None,
             control_tx: None,
             task: None,
@@ -181,6 +188,15 @@ impl TorrentHandle {
         let peer_id = PeerId::random();
         let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
 
+        let webseed_config = WebSeedConfig {
+            min_gap_pieces: config.webseed_min_gap_pieces,
+            max_range_bytes: config.webseed_max_range_bytes,
+            timeout: config.webseed_timeout,
+            retry_delay: Duration::from_secs(2),
+            max_concurrent: config.webseed_max_concurrent,
+        };
+        let webseed_notify = Arc::new(Notify::new());
+
         let mut swarm_loop = SwarmLoop {
             info_hash: self.info_hash,
             metainfo,
@@ -222,6 +238,10 @@ impl TorrentHandle {
             super_seed,
             super_seed_assignments: HashMap::new(),
             super_seed_unrevealed: HashSet::new(),
+            web_seeds: self.web_seeds.clone(),
+            webseed_config,
+            webseed_tasks: Vec::new(),
+            webseed_notify,
         };
 
         let task = tokio::spawn(async move { swarm_loop.run().await });
@@ -327,6 +347,14 @@ pub(crate) struct SwarmLoop {
     /// Unrevealed piece indices. These pieces have been uploaded to
     /// the assigned peer but not yet confirmed (no HAVE received).
     pub(crate) super_seed_unrevealed: HashSet<u32>,
+    /// Web seed URLs for this torrent (BEP 19).
+    pub(crate) web_seeds: Vec<String>,
+    /// Web seed configuration.
+    pub(crate) webseed_config: WebSeedConfig,
+    /// Handles for spawned web seed tasks (one per URL).
+    pub(crate) webseed_tasks: Vec<JoinHandle<()>>,
+    /// Notify web seed tasks when a piece is completed by a peer.
+    pub(crate) webseed_notify: Arc<Notify>,
 }
 
 impl SwarmLoop {
@@ -342,6 +370,41 @@ impl SwarmLoop {
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
         let mut pex_tick = tokio::time::interval(self.pex_interval);
 
+        // Spawn web seed download tasks (BEP 19).
+        // One task per unique web seed URL.
+        // A shared semaphore caps concurrent HTTP Range requests
+        // for two reasons: (1) prevent TLS-handshake CPU spikes
+        // from starving a current_thread runtime when hundreds of
+        // mirrors are listed, and (2) avoid flooding a single
+        // origin server with too many connections.  Each task
+        // holds the permit only for the download_range() call
+        // (~seconds), not the entire run loop.
+        if !self.web_seeds.is_empty() {
+            let semaphore = Arc::new(Semaphore::new(self.webseed_config.max_concurrent));
+            let mut tasks = Vec::new();
+            for url_str in &self.web_seeds {
+                match Url::parse(url_str) {
+                    Ok(url) => {
+                        let task = WebSeedTask::new(
+                            url,
+                            self.piece_mgr.clone(),
+                            self.storage.clone(),
+                            self.metainfo.clone(),
+                            self.webseed_config.clone(),
+                            self.webseed_notify.clone(),
+                            semaphore.clone(),
+                        );
+                        tracing::debug!("spawning web seed task for {url_str}");
+                        tasks.push(tokio::spawn(async move { task.run().await }));
+                    }
+                    Err(e) => {
+                        tracing::warn!("invalid web seed URL '{}': {}", url_str, e);
+                    }
+                }
+            }
+            self.webseed_tasks = tasks;
+        }
+
         loop {
             tokio::select! {
                 cmd = self.control_rx.recv() => {
@@ -356,6 +419,9 @@ impl SwarmLoop {
                         }
                         Some(TorrentCommand::Cancel) | None => {
                             let _ = self.announce_to_tracker(AnnounceEvent::Stopped).await;
+                            for task in self.webseed_tasks.drain(..) {
+                                task.abort();
+                            }
                             break;
                         }
                     }

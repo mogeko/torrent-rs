@@ -151,6 +151,38 @@ pub struct SessionConfig {
     /// Default: `256`.
     pub peer_msg_buffer_size: usize,
 
+    // ── Web Seed ──
+    /// Enable web seed downloads (BEP 19). When enabled, the session
+    /// downloads from HTTP/FTP web seed URLs found in the torrent
+    /// metadata (`url-list`) or magnet link (`ws` parameter).
+    ///
+    /// Default: `true`.
+    pub webseed_enabled: bool,
+    /// Minimum contiguous gap in pieces to trigger a web seed HTTP
+    /// download. Smaller gaps are left for P2P peers.
+    ///
+    /// Default: `4`.
+    pub webseed_min_gap_pieces: u32,
+    /// Maximum bytes per web seed HTTP Range request.
+    /// BEP 19 suggests ~5% of total file size.
+    ///
+    /// Default: `5 * 1024 * 1024` (5 MB).
+    pub webseed_max_range_bytes: u64,
+    /// Timeout for web seed HTTP connect + download.
+    ///
+    /// Default: `30` s.
+    pub webseed_timeout: Duration,
+    /// Maximum concurrent web seed HTTP Range requests across all URLs.
+    ///
+    /// Prevents TLS-handshake CPU spikes from starving a
+    /// [`current_thread`](https://docs.rs/tokio/latest/tokio/runtime/index.html#current-thread-scheduler)
+    /// runtime and caps connections to origin servers. On a
+    /// [`multi_thread`](https://docs.rs/tokio/latest/tokio/runtime/index.html#multi-thread-scheduler)
+    /// runtime, raise this for higher throughput (e.g. `num_workers * 8`).
+    ///
+    /// Default: `16`.
+    pub webseed_max_concurrent: usize,
+
     // ── DHT ──
     /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
     /// When `Some`, the session initializes a DHT node and uses these
@@ -201,6 +233,11 @@ impl Default for SessionConfig {
             lsd_enabled: true,
             lsd_interval: Duration::from_secs(300),
             peer_msg_buffer_size: 256,
+            webseed_enabled: true,
+            webseed_min_gap_pieces: 4,
+            webseed_max_range_bytes: 5 * 1024 * 1024,
+            webseed_timeout: Duration::from_secs(30),
+            webseed_max_concurrent: 16,
             bootstrap_nodes: Some(vec![
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
                 BootstrapNode::from(("dht.transmissionbt.com", 6881)),
@@ -292,6 +329,7 @@ mod serde_tests {
         assert_eq!(back.pex_enabled, config.pex_enabled);
         assert_eq!(back.pex_interval, config.pex_interval);
         assert_eq!(back.peer_msg_buffer_size, config.peer_msg_buffer_size);
+        assert_eq!(back.webseed_max_concurrent, config.webseed_max_concurrent);
     }
 
     #[test]
@@ -326,6 +364,11 @@ mod serde_tests {
             lsd_enabled: false,
             lsd_interval: Duration::from_secs(600),
             peer_msg_buffer_size: 512,
+            webseed_enabled: true,
+            webseed_min_gap_pieces: 8,
+            webseed_max_range_bytes: 10 * 1024 * 1024,
+            webseed_timeout: Duration::from_secs(60),
+            webseed_max_concurrent: 16,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -361,6 +404,11 @@ mod serde_tests {
         assert_eq!(back.pex_enabled, false);
         assert_eq!(back.pex_interval, Duration::from_secs(120));
         assert_eq!(back.peer_msg_buffer_size, 512);
+        assert_eq!(back.webseed_enabled, true);
+        assert_eq!(back.webseed_min_gap_pieces, 8);
+        assert_eq!(back.webseed_max_range_bytes, 10 * 1024 * 1024);
+        assert_eq!(back.webseed_timeout, Duration::from_secs(60));
+        assert_eq!(back.webseed_max_concurrent, 16);
     }
 
     #[test]
