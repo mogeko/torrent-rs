@@ -431,43 +431,80 @@ impl FetchTask {
 
     /// Run the fetcher loop.
     ///
-    /// Waits for work, acquires a semaphore permit, downloads,
-    /// reports the result. Exits when the channel is closed
-    /// (scheduler dropped).
+    /// Waits for work, acquires a semaphore permit, downloads with
+    /// retry on transient errors, reports the result. Exits when the
+    /// channel is closed (scheduler dropped).
     pub async fn run(mut self) {
         tracing::debug!("web seed {}: fetcher started", self.url);
         while let Some(work) = self.work_rx.recv().await {
             let _permit = self.semaphore.clone().acquire_owned().await;
+            let result = self.download_with_retry(work).await;
+            let _ = self.result_tx.send(result).await;
+        }
+        tracing::debug!("web seed {}: fetcher exiting (channel closed)", self.url);
+    }
+
+    /// Download a work item with up to 3 retries on transient errors.
+    ///
+    /// Exponential backoff: 2s → 4s → 8s.  SHA-1 mismatches are fatal
+    /// (no retry — the URL must be discarded per BEP 19).
+    /// Partially completed pieces (from a truncated response) are
+    /// reported as success; the scheduler will re-assign the remainder.
+    async fn download_with_retry(&self, work: WorkItem) -> WorkResult {
+        const MAX_RETRIES: u32 = 3;
+        let mut retry_delay = Duration::from_secs(2);
+        let mut last_error = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                tracing::debug!(
+                    "web seed {}: retry {}/{} after {:?}",
+                    self.url,
+                    attempt,
+                    MAX_RETRIES,
+                    retry_delay,
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
+            }
+
             let started = Instant::now();
-            let result = match self.download_range(work.start_byte, work.end_byte).await {
+            match self.download_range(work.start_byte, work.end_byte).await {
                 Ok(completed) => {
                     let bytes: u64 = completed
                         .iter()
                         .map(|&i| piece_len(i, &self.metainfo, self.piece_length))
                         .sum();
-                    WorkResult {
+                    return WorkResult {
                         completed,
                         bytes,
                         elapsed: started.elapsed(),
                         error: None,
-                    }
+                    };
                 }
-                Err(e) => {
-                    let kind = e.kind();
-                    if kind == ErrorKind::WebSeedHashMismatch {
-                        // warn! already emitted in download_range
-                    }
-                    WorkResult {
+                Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => {
+                    // Fatal — no retry.
+                    return WorkResult {
                         completed: Vec::new(),
                         bytes: 0,
                         elapsed: started.elapsed(),
-                        error: Some(kind),
-                    }
+                        error: Some(ErrorKind::WebSeedHashMismatch),
+                    };
                 }
-            };
-            let _ = self.result_tx.send(result).await;
+                Err(e) => {
+                    last_error = Some(e.kind());
+                    // Continue to next retry attempt.
+                }
+            }
         }
-        tracing::debug!("web seed {}: fetcher exiting (channel closed)", self.url);
+
+        // Exhausted all retries.
+        WorkResult {
+            completed: Vec::new(),
+            bytes: 0,
+            elapsed: Instant::now().duration_since(Instant::now()), // ~0
+            error: last_error,
+        }
     }
 
     /// Download a byte range, split into pieces, verify SHA-1, write to storage.
