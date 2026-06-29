@@ -63,6 +63,23 @@ impl HttpClient {
         }
     }
 
+    /// HTTP HEAD request (no body).
+    ///
+    /// Sends `HEAD` instead of `GET`. The response body is discarded;
+    /// only the status line and headers are returned for inspection.
+    /// Used by web seed connectivity probing (BEP 19).
+    ///
+    /// Returns the raw response (headers + optional empty body) capped
+    /// at [`MAX_RESPONSE_SIZE`].
+    pub async fn head(&self, url: &Url, path_and_query: &str) -> Result<Vec<u8>, Error> {
+        let tls = if url.scheme() == "https" {
+            Some(build_tls_connector()?)
+        } else {
+            None
+        };
+        self.send_head_request(url, &tls, path_and_query).await
+    }
+
     /// HTTP GET request without a `Range` header.
     ///
     /// Returns the full response body (capped at [`MAX_RESPONSE_SIZE`]).
@@ -73,7 +90,7 @@ impl HttpClient {
         } else {
             None
         };
-        self.send_request(url, &tls, path_and_query, None).await
+        self.send_get_request(url, &tls, path_and_query, None).await
     }
 
     /// HTTP GET with a `Range: bytes=start-end` header.
@@ -90,14 +107,40 @@ impl HttpClient {
             None
         };
         let range = Some((range_start, range_end));
-        let raw = self.send_request(url, &tls, path_and_query, range).await?;
+        let raw = self
+            .send_get_request(url, &tls, path_and_query, range)
+            .await?;
         Ok(Self::body_from_response(&raw)?.to_vec())
     }
 
     /// Core request implementation: TCP connect, optional TLS, send
     /// request, read response (capped).
-    async fn send_request(
+    async fn send_get_request(
         &self, url: &Url, tls: &Option<TlsConnector>, path_and_query: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<Vec<u8>, Error> {
+        self.send_http_request("GET", url, tls, path_and_query, range)
+            .await
+    }
+
+    /// Send an HTTP HEAD request and return the raw response (headers only).
+    ///
+    /// Uses the same TCP/TLS connection logic as [`send_get_request`] but
+    /// with the `HEAD` method so the server omits the body.
+    async fn send_head_request(
+        &self, url: &Url, tls: &Option<TlsConnector>, path_and_query: &str,
+    ) -> Result<Vec<u8>, Error> {
+        self.send_http_request("HEAD", url, tls, path_and_query, None)
+            .await
+    }
+
+    /// Shared HTTP request implementation: TCP connect, optional TLS,
+    /// send request line, read response (capped).
+    ///
+    /// `method` is the HTTP method string (e.g. `"GET"`, `"HEAD"`).
+    /// `range` adds a `Range: bytes=start-end` header when `Some`.
+    async fn send_http_request(
+        &self, method: &str, url: &Url, tls: &Option<TlsConnector>, path_and_query: &str,
         range: Option<(u64, u64)>,
     ) -> Result<Vec<u8>, Error> {
         let host = url
@@ -105,6 +148,7 @@ impl HttpClient {
             .ok_or(Error::new(ErrorKind::InvalidInput))?
             .to_owned();
         let port = url.port_or_known_default().unwrap_or(80);
+        let method = method.to_owned();
         let tls = tls.clone();
         let path_and_query = path_and_query.to_owned();
         let timeout = self.timeout;
@@ -146,20 +190,22 @@ impl HttpClient {
                     Ok(ts) => ts,
                     Err(e) => return Err(Error::tracker_failed(e)),
                 };
-
                 Box::new(tls_stream)
             } else {
                 Box::new(tcp_stream)
             };
 
-            // Build the HTTP request
+            // Build the HTTP request line and headers
             let mut request = format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: torrent-rs/0.1.0\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
-                path_and_query, host
+                "{method} {path_and_query} HTTP/1.1\r\n\
+                 Host: {host}\r\n\
+                 User-Agent: torrent-rs/0.1.0\r\n\
+                 Accept-Encoding: identity\r\n\
+                 Connection: close\r\n",
             );
 
             if let Some((start, end)) = range {
-                request.push_str(&format!("Range: bytes={}-{}\r\n", start, end));
+                request.push_str(&format!("Range: bytes={start}-{end}\r\n"));
             }
 
             request.push_str("\r\n");

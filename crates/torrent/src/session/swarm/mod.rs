@@ -30,7 +30,10 @@ use crate::tracker::{AnnounceEvent, Tracker};
 
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
-use super::webseed::{WebSeedConfig, WebSeedTask};
+use super::webseed::{
+    FetchTask, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WebSeedScheduler,
+    WorkItem, WorkResult, deduplicate_urls,
+};
 use super::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 
 use self::types::{UT_PEX, UT_PEX_ID};
@@ -194,6 +197,8 @@ impl TorrentHandle {
             timeout: config.webseed_timeout,
             retry_delay: Duration::from_secs(2),
             max_concurrent: config.webseed_max_concurrent,
+            park_threshold: 5,
+            park_retry_interval: Duration::from_secs(60),
         };
         let webseed_notify = Arc::new(Notify::new());
 
@@ -240,7 +245,8 @@ impl TorrentHandle {
             super_seed_unrevealed: HashSet::new(),
             web_seeds: self.web_seeds.clone(),
             webseed_config,
-            webseed_tasks: Vec::new(),
+            webseed_scheduler: None,
+            webseed_fetchers: Vec::new(),
             webseed_notify,
         };
 
@@ -351,9 +357,11 @@ pub(crate) struct SwarmLoop {
     pub(crate) web_seeds: Vec<String>,
     /// Web seed configuration.
     pub(crate) webseed_config: WebSeedConfig,
-    /// Handles for spawned web seed tasks (one per URL).
-    pub(crate) webseed_tasks: Vec<JoinHandle<()>>,
-    /// Notify web seed tasks when a piece is completed by a peer.
+    /// Handle for the web seed scheduler task (Phase 2).
+    pub(crate) webseed_scheduler: Option<JoinHandle<()>>,
+    /// Handles for spawned fetcher tasks (one per URL).
+    pub(crate) webseed_fetchers: Vec<JoinHandle<()>>,
+    /// Notify the web seed scheduler when a piece is completed by a P2P peer.
     pub(crate) webseed_notify: Arc<Notify>,
 }
 
@@ -370,39 +378,78 @@ impl SwarmLoop {
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
         let mut pex_tick = tokio::time::interval(self.pex_interval);
 
-        // Spawn web seed download tasks (BEP 19).
-        // One task per unique web seed URL.
-        // A shared semaphore caps concurrent HTTP Range requests
-        // for two reasons: (1) prevent TLS-handshake CPU spikes
-        // from starving a current_thread runtime when hundreds of
-        // mirrors are listed, and (2) avoid flooding a single
-        // origin server with too many connections.  Each task
-        // holds the permit only for the download_range() call
-        // (~seconds), not the entire run loop.
+        // Spawn web seed scheduler + fetchers (BEP 19, Phase 2).
+        // The scheduler reads the bitfield, selects gaps, and dispatches
+        // work to fetcher tasks via mpsc channels.  Each fetcher is a
+        // passive worker that downloads whatever the scheduler assigns.
         if !self.web_seeds.is_empty() {
-            let semaphore = Arc::new(Semaphore::new(self.webseed_config.max_concurrent));
-            let mut tasks = Vec::new();
-            for url_str in &self.web_seeds {
-                match Url::parse(url_str) {
-                    Ok(url) => {
-                        let task = WebSeedTask::new(
-                            url,
-                            self.piece_mgr.clone(),
-                            self.storage.clone(),
-                            self.metainfo.clone(),
-                            self.webseed_config.clone(),
-                            self.webseed_notify.clone(),
-                            semaphore.clone(),
-                        );
-                        tracing::debug!("spawning web seed task for {url_str}");
-                        tasks.push(tokio::spawn(async move { task.run().await }));
-                    }
-                    Err(e) => {
-                        tracing::warn!("invalid web seed URL '{}': {}", url_str, e);
-                    }
-                }
+            // Deduplicate URLs pointing to the same origin (BEP 19 mirrors
+            // often list many URLs for the same physical server).
+            let parsed: Vec<Url> = self
+                .web_seeds
+                .iter()
+                .filter_map(|s| {
+                    Url::parse(s)
+                        .map_err(|e| tracing::warn!("invalid web seed URL '{}': {}", s, e))
+                        .ok()
+                })
+                .collect();
+            let (unique, removed) = deduplicate_urls(parsed);
+            if removed > 0 {
+                tracing::info!(
+                    "web seed: {} URLs deduplicated to {} unique origins",
+                    removed + unique.len(),
+                    unique.len(),
+                );
             }
-            self.webseed_tasks = tasks;
+
+            let max_concurrent = self.webseed_config.max_concurrent;
+            let semaphore = Arc::new(Semaphore::new(max_concurrent));
+            let (result_tx, result_rx) = mpsc::channel::<WorkResult>(max_concurrent * 2);
+            let (mut urls, mut fetchers) = (Vec::new(), Vec::new());
+
+            for url in unique {
+                let (work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
+                let result_tx = result_tx.clone();
+
+                let fetcher = FetchTask::new(
+                    url.clone(),
+                    self.piece_mgr.clone(),
+                    self.storage.clone(),
+                    self.metainfo.clone(),
+                    work_rx,
+                    result_tx,
+                    semaphore.clone(),
+                    self.webseed_config.timeout,
+                );
+                tracing::trace!("web seed: spawning fetcher for {url}");
+                fetchers.push(tokio::spawn(async move { fetcher.run().await }));
+
+                urls.push(UrlState {
+                    url: url.clone(),
+                    url_kind: UrlKind::classify(&url),
+                    health: UrlHealth::default(),
+                    work_tx,
+                    activity: UrlActivity::Active,
+                });
+            }
+
+            if !urls.is_empty() {
+                let scheduler = WebSeedScheduler::new(
+                    urls,
+                    self.piece_mgr.clone(),
+                    self.metainfo.clone(),
+                    self.webseed_config.clone(),
+                    result_rx,
+                    self.webseed_notify.clone(),
+                );
+                tracing::debug!(
+                    "spawning web seed scheduler for {} URLs",
+                    self.web_seeds.len()
+                );
+                self.webseed_scheduler = Some(tokio::spawn(async move { scheduler.run().await }));
+            }
+            self.webseed_fetchers = fetchers;
         }
 
         loop {
@@ -419,7 +466,10 @@ impl SwarmLoop {
                         }
                         Some(TorrentCommand::Cancel) | None => {
                             let _ = self.announce_to_tracker(AnnounceEvent::Stopped).await;
-                            for task in self.webseed_tasks.drain(..) {
+                            if let Some(scheduler) = self.webseed_scheduler.take() {
+                                scheduler.abort();
+                            }
+                            for task in self.webseed_fetchers.drain(..) {
                                 task.abort();
                             }
                             break;
