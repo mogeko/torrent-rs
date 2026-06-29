@@ -86,6 +86,7 @@ impl FetchTask {
     /// Download with up to 3 retries on transient errors (exponential backoff).
     async fn download_with_retry(&self, work: WorkItem) -> WorkResult {
         const MAX_RETRIES: u32 = 3;
+        let overall_start = Instant::now();
         let mut retry_delay = Duration::from_secs(2);
         let mut last_error = None;
 
@@ -133,7 +134,7 @@ impl FetchTask {
         WorkResult {
             completed: Vec::new(),
             bytes: 0,
-            elapsed: Instant::now().duration_since(Instant::now()),
+            elapsed: overall_start.elapsed(),
             error: last_error,
         }
     }

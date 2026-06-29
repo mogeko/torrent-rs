@@ -96,6 +96,11 @@ impl WebSeedScheduler {
                     "web seed scheduler: completed {} pieces",
                     result.completed.len(),
                 );
+                // SAFETY: only one URL can be InFlight at a time because
+                // `dispatch_work` sets at most one URL to InFlight per call,
+                // and `tokio::select!` executes exactly one branch per
+                // iteration.  The first InFlight URL is therefore the one
+                // that produced this result.
                 for state in &mut self.urls {
                     if state.activity == UrlActivity::InFlight {
                         state.health.record_success(result.bytes, result.elapsed);

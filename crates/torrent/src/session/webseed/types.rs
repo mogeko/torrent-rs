@@ -13,7 +13,6 @@ use crate::error::ErrorKind;
 pub(crate) struct WebSeedConfig {
     /// Minimum contiguous gap (in pieces) to trigger an HTTP download.
     /// Prevents tiny range requests. Default: 4 pieces.
-    #[allow(dead_code, reason = "used by find_largest_gap; will add filtering")]
     pub min_gap_pieces: u32,
     /// Maximum bytes per Range request.
     /// BEP 19 suggests ~5% of total file size. Default: 5 MB.
@@ -24,7 +23,7 @@ pub(crate) struct WebSeedConfig {
     /// Delay before retrying after a transient error (503, connection
     /// refused). Doubles on each consecutive failure up to 60 s.
     /// Default: 2 s.
-    #[allow(dead_code, reason = "reserved for per-URL backoff in scheduler")]
+    #[expect(dead_code, reason = "reserved for per-URL backoff in scheduler")]
     pub retry_delay: Duration,
     /// Maximum concurrent in-flight HTTP Range requests across all
     /// web seed tasks.
