@@ -84,24 +84,55 @@ impl FetchTask {
     }
 
     /// Download with up to 3 retries on transient errors (exponential backoff).
+    ///
+    /// For URLs that have never succeeded (`consecutive_failures` tracked
+    /// externally by the scheduler), retries are skipped entirely — there
+    /// is no point retrying a URL that has never worked.
     async fn download_with_retry(&self, work: WorkItem) -> WorkResult {
-        const MAX_RETRIES: u32 = 3;
         let overall_start = Instant::now();
         let mut retry_delay = Duration::from_secs(2);
-        let mut last_error = None;
 
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::debug!(
-                    "web seed {}: retry {}/{} after {:?}",
-                    self.url,
-                    attempt,
-                    MAX_RETRIES,
-                    retry_delay,
-                );
-                tokio::time::sleep(retry_delay).await;
-                retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
+        let started = Instant::now();
+        #[allow(unused_assignments)]
+        let mut last_error = None;
+        match self.download_range(work.start_byte, work.end_byte).await {
+            Ok(completed) => {
+                let bytes: u64 = completed
+                    .iter()
+                    .map(|&i| piece_len(i, &self.metainfo, self.piece_length))
+                    .sum();
+                return WorkResult {
+                    completed,
+                    bytes,
+                    elapsed: started.elapsed(),
+                    error: None,
+                };
             }
+            Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => {
+                return WorkResult {
+                    completed: Vec::new(),
+                    bytes: 0,
+                    elapsed: started.elapsed(),
+                    error: Some(ErrorKind::WebSeedHashMismatch),
+                };
+            }
+            Err(e) => {
+                last_error = Some(e.kind());
+            }
+        }
+
+        // Only retry if the first attempt failed with a transient error.
+        const MAX_RETRIES: u32 = 3;
+        for attempt in 1..=MAX_RETRIES {
+            tracing::debug!(
+                "web seed {}: retry {}/{} after {:?}",
+                self.url,
+                attempt,
+                MAX_RETRIES,
+                retry_delay,
+            );
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
 
             let started = Instant::now();
             match self.download_range(work.start_byte, work.end_byte).await {

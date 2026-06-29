@@ -140,6 +140,19 @@ impl WebSeedScheduler {
     }
 
     async fn dispatch_work(&mut self) {
+        // Don't dispatch when the Semaphore is saturated — InFlight
+        // URLs already hold all permits.  Dispatching more would just
+        // grow the Semaphore wait queue, starving proven-fast URLs
+        // behind slow/timeout URLs.
+        let in_flight = self
+            .urls
+            .iter()
+            .filter(|s| s.activity == UrlActivity::InFlight)
+            .count();
+        if in_flight >= self.config.max_concurrent {
+            return;
+        }
+
         let bitfield = {
             let pm = self.piece_mgr.read().await;
             pm.bitfield().to_vec()
@@ -173,12 +186,21 @@ impl WebSeedScheduler {
             .max_by(|(_, a), (_, b)| {
                 let a_prio = u8::from(a.url_kind == UrlKind::Script);
                 let b_prio = u8::from(b.url_kind == UrlKind::Script);
-                a_prio.cmp(&b_prio).then_with(|| {
-                    a.health
-                        .ema_throughput()
-                        .partial_cmp(&b.health.ema_throughput())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+                a_prio
+                    .cmp(&b_prio)
+                    .then_with(|| {
+                        a.health
+                            .ema_throughput()
+                            .partial_cmp(&b.health.ema_throughput())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| {
+                        // Prefer URLs that haven't failed yet (try all
+                        // URLs once before retrying any that failed).
+                        b.health
+                            .consecutive_failures
+                            .cmp(&a.health.consecutive_failures)
+                    })
             });
 
         let Some((idx, _state)) = best_idx else {
