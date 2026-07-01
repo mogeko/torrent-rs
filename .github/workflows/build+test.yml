@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.0
-      - uses: actions/cache@v6.0.0
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/bin/
