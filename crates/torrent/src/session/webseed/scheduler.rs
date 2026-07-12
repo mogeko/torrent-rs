@@ -17,10 +17,19 @@ use super::types::{
 
 // ── WebSeedScheduler ──────────────────────────────────────────────
 
+/// Exploration weight for the UCB bandit formula (bytes/sec).
+///
+/// Controls how aggressively untested URLs compete against
+/// proven-fast URLs.  At 100 KB/s, an untested URL with 0
+/// attempts scores ~214 KB/s against a pool of 100 total
+/// attempts — enough to beat marginal URLs but not to
+/// displace a proven 1 MB/s URL.
+const UCB_EXPLORATION_FACTOR: f64 = 100_000.0;
+
 /// Centralized scheduler for web seed downloads (Phase 2).
 ///
 /// Reads the piece bitfield, selects the largest gap, picks the
-/// fastest available URL (by [`UrlHealth::ema_throughput`]), and
+/// fastest available URL (by [`UrlHealth::ucb_score`]), and
 /// dispatches [`WorkItem`]s to [`FetchTask`]s via mpsc channels.
 pub(crate) struct WebSeedScheduler {
     urls: Vec<UrlState>,
@@ -191,6 +200,11 @@ impl WebSeedScheduler {
             let start_byte = gap_start as u64 * piece_length;
             let end_byte = (start_byte + max_range).min(total_size).saturating_sub(1);
 
+            // Compute total download attempts across all URLs for the
+            // UCB exploration bonus.  Cached once per dispatch batch
+            // to avoid repeated summation.
+            let total_attempts: u64 = self.urls.iter().map(|s| s.health.download_attempts()).sum();
+
             let best_idx = self
                 .urls
                 .iter()
@@ -211,9 +225,15 @@ impl WebSeedScheduler {
                     a_prio
                         .cmp(&b_prio)
                         .then_with(|| {
+                            // UCB-weighted score: EMA throughput + exploration bonus.
+                            // Untested URLs (download_attempts=0) get a large bonus,
+                            // ensuring they compete against proven URLs.  As attempts
+                            // accumulate, the bonus shrinks and EMA dominates.
                             a.health
-                                .ema_throughput()
-                                .partial_cmp(&b.health.ema_throughput())
+                                .ucb_score(total_attempts, UCB_EXPLORATION_FACTOR)
+                                .partial_cmp(
+                                    &b.health.ucb_score(total_attempts, UCB_EXPLORATION_FACTOR),
+                                )
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         })
                         .then_with(|| {

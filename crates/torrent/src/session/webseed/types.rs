@@ -83,6 +83,9 @@ pub(crate) struct UrlHealth {
     pub(crate) consecutive_failures: u32,
     /// Total number of successful download requests.
     success_count: u64,
+    /// Total number of download attempts (success + transient failure).
+    /// Used by UCB exploration bonus: more attempts → smaller bonus.
+    download_attempts: u64,
     /// When the last successful download completed.
     last_success: Option<Instant>,
 }
@@ -93,6 +96,7 @@ impl Default for UrlHealth {
             ema_throughput: 0.0,
             consecutive_failures: 0,
             success_count: 0,
+            download_attempts: 0,
             last_success: None,
         }
     }
@@ -113,12 +117,14 @@ impl UrlHealth {
         }
         self.consecutive_failures = 0;
         self.success_count += 1;
+        self.download_attempts += 1;
         self.last_success = Some(Instant::now());
     }
 
     /// Record a failed download attempt.
     pub(crate) fn record_failure(&mut self) {
         self.consecutive_failures += 1;
+        self.download_attempts += 1;
     }
 
     /// Whether this URL should be parked (too many consecutive failures).
@@ -138,6 +144,32 @@ impl UrlHealth {
     /// to rank URLs by speed.
     pub(crate) fn ema_throughput(&self) -> f64 {
         self.ema_throughput
+    }
+
+    /// Total download attempts (success + transient failure).
+    pub(crate) fn download_attempts(&self) -> u64 {
+        self.download_attempts
+    }
+
+    /// UCB-weighted score for multi-armed bandit URL selection.
+    ///
+    /// Combines the EMA throughput estimate with an exploration bonus
+    /// that decays as the URL accumulates download attempts:
+    ///
+    /// ```text
+    /// score = ema_throughput + c × √(ln(N_total) / (N_i + 1))
+    /// ```
+    ///
+    /// Untested URLs (`N_i = 0`) receive a large bonus, ensuring
+    /// they get a chance against proven-fast URLs.  As `N_i` grows,
+    /// the bonus shrinks and the EMA estimate dominates.
+    ///
+    /// `total_attempts`: sum of [`download_attempts`] across all URLs.
+    /// `c`: exploration weight in bytes/sec (default: 100,000 ≈ 100 KB/s).
+    pub(crate) fn ucb_score(&self, total_attempts: u64, c: f64) -> f64 {
+        let n = (self.download_attempts + 1) as f64;
+        let bonus = c * ((total_attempts.max(1) + 1) as f64).ln().sqrt() / n.sqrt();
+        self.ema_throughput() + bonus
     }
 }
 
