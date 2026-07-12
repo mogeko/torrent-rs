@@ -28,6 +28,8 @@ use super::types::{UrlKind, WorkItem, WorkResult};
 pub(crate) struct FetchTask {
     /// Human-readable URL for logging.
     url: Url,
+    /// Index of this URL in the scheduler's `urls` vector.
+    url_index: usize,
     /// HTTP client for this fetcher.
     http: HttpClient,
     /// Shared piece manager to skip already-completed pieces.
@@ -51,9 +53,9 @@ impl FetchTask {
     /// that connect this fetcher to the [`WebSeedScheduler`].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        url: Url, piece_mgr: Arc<RwLock<PieceManager>>, storage: Arc<dyn Storage>,
-        metainfo: Metainfo, work_rx: mpsc::Receiver<WorkItem>, result_tx: mpsc::Sender<WorkResult>,
-        semaphore: Arc<Semaphore>, timeout: Duration,
+        url: Url, url_index: usize, piece_mgr: Arc<RwLock<PieceManager>>,
+        storage: Arc<dyn Storage>, metainfo: Metainfo, work_rx: mpsc::Receiver<WorkItem>,
+        result_tx: mpsc::Sender<WorkResult>, semaphore: Arc<Semaphore>, timeout: Duration,
     ) -> Self {
         let piece_length = metainfo.info.piece_length;
         let max_response = timeout.as_secs() * 1024 * 1024;
@@ -61,6 +63,7 @@ impl FetchTask {
 
         FetchTask {
             url,
+            url_index,
             http,
             piece_mgr,
             storage,
@@ -102,6 +105,7 @@ impl FetchTask {
                     .map(|&i| piece_len(i, &self.metainfo, self.piece_length))
                     .sum();
                 return WorkResult {
+                    url_index: self.url_index,
                     completed,
                     bytes,
                     elapsed: started.elapsed(),
@@ -110,6 +114,7 @@ impl FetchTask {
             }
             Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => {
                 return WorkResult {
+                    url_index: self.url_index,
                     completed: Vec::new(),
                     bytes: 0,
                     elapsed: started.elapsed(),
@@ -142,6 +147,7 @@ impl FetchTask {
                         .map(|&i| piece_len(i, &self.metainfo, self.piece_length))
                         .sum();
                     return WorkResult {
+                        url_index: self.url_index,
                         completed,
                         bytes,
                         elapsed: started.elapsed(),
@@ -150,6 +156,7 @@ impl FetchTask {
                 }
                 Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => {
                     return WorkResult {
+                        url_index: self.url_index,
                         completed: Vec::new(),
                         bytes: 0,
                         elapsed: started.elapsed(),
@@ -163,6 +170,7 @@ impl FetchTask {
         }
 
         WorkResult {
+            url_index: self.url_index,
             completed: Vec::new(),
             bytes: 0,
             elapsed: overall_start.elapsed(),
@@ -429,6 +437,7 @@ mod tests {
 
         let task = FetchTask::new(
             url2,
+            0,
             piece_mgr.clone(),
             storage.clone(),
             metainfo.clone(),
@@ -468,6 +477,7 @@ mod tests {
         let (result_tx, _result_rx) = mpsc::channel::<WorkResult>(1);
         let task = FetchTask::new(
             url2,
+            0,
             piece_mgr.clone(),
             storage.clone(),
             metainfo.clone(),
@@ -503,6 +513,7 @@ mod tests {
 
         let fetcher = FetchTask::new(
             url,
+            0,
             piece_mgr.clone(),
             storage.clone(),
             metainfo.clone(),

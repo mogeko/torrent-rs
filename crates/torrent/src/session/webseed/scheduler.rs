@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Notify, RwLock, mpsc};
+use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
 use url::Url;
 
 use crate::error::ErrorKind;
@@ -12,7 +12,7 @@ use crate::piece::PieceManager;
 
 use super::fetcher::{file_path_at_byte, probe_url};
 use super::types::{
-    UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WorkItem, WorkResult,
+    ProbeResult, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WorkItem, WorkResult,
 };
 
 // ── WebSeedScheduler ──────────────────────────────────────────────
@@ -28,13 +28,19 @@ pub(crate) struct WebSeedScheduler {
     metainfo: Metainfo,
     config: WebSeedConfig,
     result_rx: mpsc::Receiver<WorkResult>,
+    probe_result_rx: mpsc::Receiver<ProbeResult>,
+    probe_result_tx: mpsc::Sender<ProbeResult>,
+    probe_semaphore: Arc<Semaphore>,
     notify: Arc<Notify>,
 }
 
 impl WebSeedScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         urls: Vec<UrlState>, piece_mgr: Arc<RwLock<PieceManager>>, metainfo: Metainfo,
-        config: WebSeedConfig, result_rx: mpsc::Receiver<WorkResult>, notify: Arc<Notify>,
+        config: WebSeedConfig, result_rx: mpsc::Receiver<WorkResult>,
+        probe_result_rx: mpsc::Receiver<ProbeResult>, probe_result_tx: mpsc::Sender<ProbeResult>,
+        probe_semaphore: Arc<Semaphore>, notify: Arc<Notify>,
     ) -> Self {
         WebSeedScheduler {
             urls,
@@ -42,32 +48,33 @@ impl WebSeedScheduler {
             metainfo,
             config,
             result_rx,
+            probe_result_rx,
+            probe_result_tx,
+            probe_semaphore,
             notify,
         }
     }
 
     /// Run the scheduler loop: optimistic start → dispatch/revive/handle.
     ///
-    /// All URLs are initially Active — the scheduler does not probe
-    /// upfront.  Instead, FetchTasks try to download immediately;
-    /// failures are caught by [`handle_result`] and unreachable URLs
-    /// are parked after `park_threshold` consecutive errors.
-    /// Parked URLs are periodically re-probed via [`revive_parked`].
+    /// All URLs start as [`UrlActivity::Untested`] — the scheduler
+    /// immediately spawns probe tasks via `discover_tick` (fires
+    /// instantly on first iteration).  Once probed, URLs become
+    /// [`UrlActivity::Active`] and are eligible for download dispatch.
+    ///
+    /// Parked URLs are re-probed via `revive_tick`; untested URLs
+    /// are explored via `discover_tick`.  Both use spawn-based
+    /// asynchronous probes that never block the scheduler loop.
     pub async fn run(mut self) {
         tracing::info!(
-            "web seed scheduler: starting with {} URLs (optimistic)",
+            "web seed scheduler: starting with {} URLs (optimistic discovery)",
             self.urls.len(),
         );
 
-        // All URLs start Active — let the Fetcher retry logic and
-        // handle_result's park mechanism filter out dead URLs.
-        for state in &mut self.urls {
-            state.activity = UrlActivity::Active;
-        }
-
-        let probe_timeout = Duration::from_secs(5);
         let mut dispatch_tick = tokio::time::interval(Duration::from_secs(1));
         let mut revive_tick = tokio::time::interval(self.config.park_retry_interval);
+        // discover_tick fires immediately on first iteration (optimistic start)
+        let mut discover_tick = tokio::time::interval(self.config.discover_interval);
 
         loop {
             {
@@ -81,14 +88,23 @@ impl WebSeedScheduler {
             tokio::select! {
                 Some(result) = self.result_rx.recv() => {
                     self.handle_result(result).await;
+                    // Immediately re-fill any freed download slot (Phase 4c).
+                    self.dispatch_work().await;
+                }
+                Some(probe) = self.probe_result_rx.recv() => {
+                    self.handle_probe(probe);
                 }
                 _ = dispatch_tick.tick() => {
                     self.dispatch_work().await;
                 }
                 _ = revive_tick.tick() => {
-                    self.revive_parked(&probe_timeout).await;
+                    self.spawn_probe_tasks(UrlActivity::Parked);
+                }
+                _ = discover_tick.tick() => {
+                    self.spawn_probe_tasks(UrlActivity::Untested);
                 }
                 _ = self.notify.notified() => {
+                    // P2P completed a piece — re-evaluate gaps.
                     self.dispatch_work().await;
                 }
             }
@@ -96,153 +112,237 @@ impl WebSeedScheduler {
     }
 
     async fn handle_result(&mut self, result: WorkResult) {
+        let idx = result.url_index;
+        let Some(state) = self.urls.get_mut(idx) else {
+            return;
+        };
+
         match result.error {
             None => {
                 tracing::debug!(
-                    "web seed scheduler: completed {} pieces",
+                    "web seed scheduler: {} completed {} pieces",
+                    state.url,
                     result.completed.len(),
                 );
-                // SAFETY: only one URL can be InFlight at a time because
-                // `dispatch_work` sets at most one URL to InFlight per call,
-                // and `tokio::select!` executes exactly one branch per
-                // iteration.  The first InFlight URL is therefore the one
-                // that produced this result.
-                for state in &mut self.urls {
-                    if state.activity == UrlActivity::InFlight {
-                        state.health.record_success(result.bytes, result.elapsed);
-                        state.activity = UrlActivity::Active;
-                        break;
-                    }
-                }
+                state.health.record_success(result.bytes, result.elapsed);
+                state.activity = UrlActivity::Active;
             }
             Some(ErrorKind::WebSeedHashMismatch) => {
-                self.urls.retain(|s| s.activity != UrlActivity::InFlight);
+                tracing::warn!(
+                    "web seed {}: SHA-1 mismatch — discarding permanently",
+                    state.url,
+                );
+                self.urls.remove(idx);
+                // Adjust probe_result indices for all URLs after idx
+                // (probe tasks use absolute indices, but removal shifts
+                // the vector — see handle_probe for the guard).
             }
             Some(_) => {
-                for state in &mut self.urls {
-                    if state.activity == UrlActivity::InFlight {
-                        state.health.record_failure();
-                        if state.health.should_park(self.config.park_threshold) {
-                            tracing::warn!(
-                                "web seed {}: {} consecutive failures, parking",
-                                state.url,
-                                state.health.consecutive_failures,
-                            );
-                            state.activity = UrlActivity::Parked;
-                        } else {
-                            state.activity = UrlActivity::Active;
-                        }
-                        break;
-                    }
+                state.health.record_failure();
+                if state.health.should_park(self.config.park_threshold) {
+                    tracing::warn!(
+                        "web seed {}: {} consecutive failures, parking",
+                        state.url,
+                        state.health.consecutive_failures,
+                    );
+                    state.activity = UrlActivity::Parked;
+                } else {
+                    state.activity = UrlActivity::Active;
                 }
             }
         }
     }
 
+    /// Dispatch work to fill all available download slots.
+    ///
+    /// Reads the bitfield once, then loops: find a gap, pick the best
+    /// available URL, send a [`WorkItem`], and mark the gap as taken
+    /// in a local copy of the bitfield to avoid re-dispatching the
+    /// same range to another URL.  Stops when no more slots, gaps, or
+    /// eligible URLs are available.
     async fn dispatch_work(&mut self) {
-        // Don't dispatch when the Semaphore is saturated — InFlight
-        // URLs already hold all permits.  Dispatching more would just
-        // grow the Semaphore wait queue, starving proven-fast URLs
-        // behind slow/timeout URLs.
-        let in_flight = self
-            .urls
-            .iter()
-            .filter(|s| s.activity == UrlActivity::InFlight)
-            .count();
-        if in_flight >= self.config.max_concurrent {
-            return;
-        }
-
-        let bitfield = {
+        let mut bitfield = {
             let pm = self.piece_mgr.read().await;
             pm.bitfield().to_vec()
         };
 
         let piece_length = self.metainfo.info.piece_length;
         let min_gap = self.config.min_gap_pieces;
-
-        let gap = find_largest_gap(&bitfield)
-            .or_else(|| gap_within_file(&bitfield, &self.metainfo, piece_length, min_gap));
-
-        let Some((gap_start, _gap_size)) = gap else {
-            return;
-        };
-
-        let best_idx = self
-            .urls
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                if s.activity != UrlActivity::Active || s.work_tx.is_closed() {
-                    return false;
-                }
-                if s.url_kind == UrlKind::Directory {
-                    let start_byte = gap_start as u64 * piece_length;
-                    file_path_at_byte(&self.metainfo, start_byte).is_some()
-                } else {
-                    true
-                }
-            })
-            .max_by(|(_, a), (_, b)| {
-                let a_prio = u8::from(a.url_kind == UrlKind::Script);
-                let b_prio = u8::from(b.url_kind == UrlKind::Script);
-                a_prio
-                    .cmp(&b_prio)
-                    .then_with(|| {
-                        a.health
-                            .ema_throughput()
-                            .partial_cmp(&b.health.ema_throughput())
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .then_with(|| {
-                        // Prefer URLs that haven't failed yet (try all
-                        // URLs once before retrying any that failed).
-                        b.health
-                            .consecutive_failures
-                            .cmp(&a.health.consecutive_failures)
-                    })
-            });
-
-        let Some((idx, state)) = best_idx else {
-            return;
-        };
-
-        let start_byte = gap_start as u64 * piece_length;
         let total_size = self.metainfo.info.total_size();
-        let end_byte = (start_byte + self.config.max_range_bytes)
-            .min(total_size)
-            .saturating_sub(1);
+        let max_range = self.config.max_range_bytes;
 
-        tracing::debug!(
-            "web seed scheduler: dispatch piece {} ({:.1} MB) to {}",
-            gap_start,
-            (end_byte - start_byte + 1) as f64 / (1024.0 * 1024.0),
-            state.url,
-        );
+        loop {
+            let in_flight = self
+                .urls
+                .iter()
+                .filter(|s| s.activity == UrlActivity::InFlight)
+                .count();
+            if in_flight >= self.config.max_concurrent {
+                return;
+            }
 
-        if self.urls[idx]
-            .work_tx
-            .try_send(WorkItem {
-                start_byte,
-                end_byte,
-            })
-            .is_ok()
-        {
-            self.urls[idx].activity = UrlActivity::InFlight;
+            let gap = find_largest_gap(&bitfield)
+                .or_else(|| gap_within_file(&bitfield, &self.metainfo, piece_length, min_gap));
+
+            let Some((gap_start, _gap_size)) = gap else {
+                return;
+            };
+
+            let start_byte = gap_start as u64 * piece_length;
+            let end_byte = (start_byte + max_range).min(total_size).saturating_sub(1);
+
+            let best_idx = self
+                .urls
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    if s.activity != UrlActivity::Active || s.work_tx.is_closed() {
+                        return false;
+                    }
+                    if s.url_kind == UrlKind::Directory {
+                        file_path_at_byte(&self.metainfo, start_byte).is_some()
+                    } else {
+                        true
+                    }
+                })
+                .max_by(|(_, a), (_, b)| {
+                    let a_prio = u8::from(a.url_kind == UrlKind::Script);
+                    let b_prio = u8::from(b.url_kind == UrlKind::Script);
+                    a_prio
+                        .cmp(&b_prio)
+                        .then_with(|| {
+                            a.health
+                                .ema_throughput()
+                                .partial_cmp(&b.health.ema_throughput())
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .then_with(|| {
+                            b.health
+                                .consecutive_failures
+                                .cmp(&a.health.consecutive_failures)
+                        })
+                });
+
+            let Some((idx, _state)) = best_idx else {
+                return;
+            };
+
+            tracing::debug!(
+                "web seed scheduler: dispatch piece {} ({:.1} MB) to {}",
+                gap_start,
+                (end_byte - start_byte + 1) as f64 / (1024.0 * 1024.0),
+                self.urls[idx].url,
+            );
+
+            if self.urls[idx]
+                .work_tx
+                .try_send(WorkItem {
+                    start_byte,
+                    end_byte,
+                })
+                .is_ok()
+            {
+                self.urls[idx].activity = UrlActivity::InFlight;
+
+                // Mark the dispatched range as "taken" in our local
+                // bitfield copy so the next loop iteration finds a
+                // different gap.
+                let first_piece = gap_start;
+                let last_piece =
+                    ((end_byte / piece_length) as u32).min(bitfield.len().saturating_sub(1) as u32);
+                for p in first_piece..=last_piece {
+                    if (p as usize) < bitfield.len() {
+                        bitfield[p as usize] = true;
+                    }
+                }
+            }
+            // If try_send failed, the URL's channel is full (cap=1).
+            // Continue the loop to try the next-best URL.
         }
     }
 
-    async fn revive_parked(&mut self, probe_timeout: &Duration) {
-        for state in &mut self.urls {
-            if state.activity == UrlActivity::Parked
-                && state
+    /// Spawn fire-and-forget probe tasks for URLs matching `target`.
+    ///
+    /// For each URL in state `target` (either [`UrlActivity::Parked`]
+    /// or [`UrlActivity::Untested`]), spawns a `tokio::spawn` probe
+    /// task that runs [`probe_url`] and reports back via
+    /// `probe_result_tx`.  Concurrency is capped by `probe_semaphore`.
+    ///
+    /// This method never blocks — it only spawns tasks and returns.
+    fn spawn_probe_tasks(&mut self, target: UrlActivity) {
+        debug_assert!(
+            target == UrlActivity::Parked || target == UrlActivity::Untested,
+            "spawn_probe_tasks called with unexpected target: {:?}",
+            target,
+        );
+
+        let probe_timeout = Duration::from_secs(5);
+
+        for (idx, state) in self.urls.iter_mut().enumerate() {
+            if state.activity != target {
+                continue;
+            }
+            // Parked URLs must wait for the retry interval
+            if target == UrlActivity::Parked
+                && !state
                     .health
                     .ready_for_retry(self.config.park_retry_interval)
-                && probe_url(&state.url, &state.url_kind, &self.metainfo, *probe_timeout).await
             {
-                tracing::info!("web seed {}: re-probe succeeded, reviving", state.url);
-                state.activity = UrlActivity::Active;
-                state.health = UrlHealth::default();
+                continue;
+            }
+
+            let Ok(permit) = self.probe_semaphore.clone().try_acquire_owned() else {
+                // No more probe concurrency slots — try again next tick.
+                break;
+            };
+
+            state.activity = UrlActivity::Probing;
+            let url = state.url.clone();
+            let url_kind = state.url_kind.clone();
+            let metainfo = self.metainfo.clone();
+            let tx = self.probe_result_tx.clone();
+
+            tokio::spawn(async move {
+                let _permit = permit;
+                let reachable = probe_url(&url, &url_kind, &metainfo, probe_timeout).await;
+                let _ = tx
+                    .send(ProbeResult {
+                        url_index: idx,
+                        reachable,
+                    })
+                    .await;
+            });
+        }
+    }
+
+    /// Handle a completed probe result from a spawned probe task.
+    ///
+    /// On success: promotes the URL to [`UrlActivity::Active`] with
+    /// fresh health.  On failure: returns to the previous state
+    /// ([`UrlActivity::Parked`] if there were prior failures,
+    /// [`UrlActivity::Untested`] otherwise).
+    fn handle_probe(&mut self, result: ProbeResult) {
+        let Some(state) = self.urls.get_mut(result.url_index) else {
+            // URL was removed (e.g. hash mismatch) while probe was in flight.
+            return;
+        };
+        if state.activity != UrlActivity::Probing {
+            // State changed since the probe was spawned (unlikely but safe).
+            return;
+        }
+
+        if result.reachable {
+            tracing::debug!("web seed {}: probe succeeded, activating", state.url);
+            state.activity = UrlActivity::Active;
+            state.health = UrlHealth::default();
+        } else {
+            tracing::debug!("web seed {}: probe failed", state.url);
+            // Return to the previous state inferred from health:
+            // Parked URLs have prior failures; Untested URLs don't.
+            if state.health.consecutive_failures > 0 {
+                state.activity = UrlActivity::Parked;
+            } else {
+                state.activity = UrlActivity::Untested;
             }
         }
     }

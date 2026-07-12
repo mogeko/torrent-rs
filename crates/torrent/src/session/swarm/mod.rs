@@ -31,8 +31,8 @@ use crate::tracker::{AnnounceEvent, Tracker};
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
 use super::webseed::{
-    FetchTask, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WebSeedScheduler,
-    WorkItem, WorkResult, deduplicate_urls,
+    FetchTask, ProbeResult, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig,
+    WebSeedScheduler, WorkItem, WorkResult, deduplicate_urls,
 };
 use super::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
 
@@ -199,6 +199,8 @@ impl TorrentHandle {
             max_concurrent: config.webseed_max_concurrent,
             park_threshold: 5,
             park_retry_interval: Duration::from_secs(60),
+            probe_max_concurrent: 3,
+            discover_interval: Duration::from_secs(5),
         };
         let webseed_notify = Arc::new(Notify::new());
 
@@ -406,14 +408,18 @@ impl SwarmLoop {
             let max_concurrent = self.webseed_config.max_concurrent;
             let semaphore = Arc::new(Semaphore::new(max_concurrent));
             let (result_tx, result_rx) = mpsc::channel::<WorkResult>(max_concurrent * 2);
+            let (probe_result_tx, probe_result_rx) = mpsc::channel::<ProbeResult>(16);
+            let probe_semaphore =
+                Arc::new(Semaphore::new(self.webseed_config.probe_max_concurrent));
             let (mut urls, mut fetchers) = (Vec::new(), Vec::new());
 
-            for url in unique {
+            for (url_index, url) in unique.into_iter().enumerate() {
                 let (work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
                 let result_tx = result_tx.clone();
 
                 let fetcher = FetchTask::new(
                     url.clone(),
+                    url_index,
                     self.piece_mgr.clone(),
                     self.storage.clone(),
                     self.metainfo.clone(),
@@ -430,7 +436,7 @@ impl SwarmLoop {
                     url_kind: UrlKind::classify(&url),
                     health: UrlHealth::default(),
                     work_tx,
-                    activity: UrlActivity::Active,
+                    activity: UrlActivity::Untested,
                 });
             }
 
@@ -441,6 +447,9 @@ impl SwarmLoop {
                     self.metainfo.clone(),
                     self.webseed_config.clone(),
                     result_rx,
+                    probe_result_rx,
+                    probe_result_tx,
+                    probe_semaphore,
                     self.webseed_notify.clone(),
                 );
                 tracing::debug!(

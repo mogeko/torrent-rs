@@ -39,6 +39,16 @@ pub(crate) struct WebSeedConfig {
     ///
     /// Default: `60` s.
     pub park_retry_interval: Duration,
+    /// Maximum concurrent HTTP probe requests (HEAD / tiny Range).
+    /// Probes are lightweight and independent of download concurrency.
+    ///
+    /// Default: `3`.
+    pub probe_max_concurrent: usize,
+    /// Interval between discovery ticks for untested URLs.
+    /// Each tick spawns up to [`probe_max_concurrent`] probe tasks.
+    ///
+    /// Default: `5` s.
+    pub discover_interval: Duration,
 }
 
 impl Default for WebSeedConfig {
@@ -51,6 +61,8 @@ impl Default for WebSeedConfig {
             max_concurrent: 16,
             park_threshold: 5,
             park_retry_interval: Duration::from_secs(60),
+            probe_max_concurrent: 3,
+            discover_interval: Duration::from_secs(5),
         }
     }
 }
@@ -142,6 +154,10 @@ pub(crate) struct WorkItem {
 
 /// Result of a [`WorkItem`] reported back to the scheduler.
 pub(crate) struct WorkResult {
+    /// Index into the scheduler's `urls` vector identifying which
+    /// URL produced this result.  Required because batch dispatch
+    /// may have multiple URLs [`UrlActivity::InFlight`] simultaneously.
+    pub(crate) url_index: usize,
     /// Indices of pieces successfully verified and written.
     pub(crate) completed: Vec<u32>,
     /// Total bytes downloaded (for throughput scoring).
@@ -156,12 +172,19 @@ pub(crate) struct WorkResult {
 /// Whether a URL is actively downloading, parked, or currently busy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UrlActivity {
-    /// Available for work dispatch.
+    /// Available for work dispatch (verified reachable).
     Active,
     /// Too many consecutive failures; only periodic re-probing.
     Parked,
     /// Currently has an in-flight download (work_tx has been sent to).
     InFlight,
+    /// A probe task has been spawned and is awaiting a result.
+    /// Prevents duplicate probe spawns for the same URL.
+    Probing,
+    /// Never tested — neither download nor probe has been attempted.
+    /// Discovered URLs start here; promoted to [`Active`] on
+    /// successful probe.
+    Untested,
 }
 
 /// Whether a web seed URL is a directory (append file path) or
@@ -182,6 +205,18 @@ impl UrlKind {
             UrlKind::Script
         }
     }
+}
+
+/// Result of a lightweight HTTP probe (HEAD / tiny Range).
+///
+/// Sent from spawned probe tasks back to the scheduler via
+/// a dedicated mpsc channel so probing never blocks the
+/// scheduler's event loop.
+pub(crate) struct ProbeResult {
+    /// Index into the scheduler's `urls` vector.
+    pub(crate) url_index: usize,
+    /// Whether the probe succeeded (server responded).
+    pub(crate) reachable: bool,
 }
 
 /// A web seed URL with its health score and work channel.
