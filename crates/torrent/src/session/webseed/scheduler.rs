@@ -3,17 +3,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
+use tokio::sync::{Notify, RwLock, mpsc};
 use url::Url;
 
 use crate::error::ErrorKind;
 use crate::metainfo::Metainfo;
 use crate::piece::PieceManager;
 
-use super::fetcher::{file_path_at_byte, probe_url};
-use super::types::{
-    ProbeResult, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WorkItem, WorkResult,
-};
+use super::fetcher::file_path_at_byte;
+use super::types::{UrlActivity, UrlKind, UrlState, WebSeedConfig, WorkItem, WorkResult};
 
 // ── WebSeedScheduler ──────────────────────────────────────────────
 
@@ -37,19 +35,13 @@ pub(crate) struct WebSeedScheduler {
     metainfo: Metainfo,
     config: WebSeedConfig,
     result_rx: mpsc::Receiver<WorkResult>,
-    probe_result_rx: mpsc::Receiver<ProbeResult>,
-    probe_result_tx: mpsc::Sender<ProbeResult>,
-    probe_semaphore: Arc<Semaphore>,
     notify: Arc<Notify>,
 }
 
 impl WebSeedScheduler {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         urls: Vec<UrlState>, piece_mgr: Arc<RwLock<PieceManager>>, metainfo: Metainfo,
-        config: WebSeedConfig, result_rx: mpsc::Receiver<WorkResult>,
-        probe_result_rx: mpsc::Receiver<ProbeResult>, probe_result_tx: mpsc::Sender<ProbeResult>,
-        probe_semaphore: Arc<Semaphore>, notify: Arc<Notify>,
+        config: WebSeedConfig, result_rx: mpsc::Receiver<WorkResult>, notify: Arc<Notify>,
     ) -> Self {
         WebSeedScheduler {
             urls,
@@ -57,33 +49,22 @@ impl WebSeedScheduler {
             metainfo,
             config,
             result_rx,
-            probe_result_rx,
-            probe_result_tx,
-            probe_semaphore,
             notify,
         }
     }
 
-    /// Run the scheduler loop: optimistic start → dispatch/revive/handle.
+    /// Run the scheduler loop: optimistic dispatch → handle → repeat.
     ///
-    /// All URLs start as [`UrlActivity::Untested`] — the scheduler
-    /// immediately spawns probe tasks via `discover_tick` (fires
-    /// instantly on first iteration).  Once probed, URLs become
-    /// [`UrlActivity::Active`] and are eligible for download dispatch.
-    ///
-    /// Parked URLs are re-probed via `revive_tick`; untested URLs
-    /// are explored via `discover_tick`.  Both use spawn-based
-    /// asynchronous probes that never block the scheduler loop.
+    /// All URLs start [`UrlActivity::Active`] — the scheduler
+    /// dispatches download work immediately.  Dead URLs are caught
+    /// by [`handle_result`] and parked after `park_threshold`
+    /// consecutive failures.  Parked URLs are automatically
+    /// reconsidered by [`dispatch_work`] once
+    /// [`UrlHealth::ready_for_retry`] returns `true`.
     pub async fn run(mut self) {
-        tracing::info!(
-            "web seed scheduler: starting with {} URLs (optimistic discovery)",
-            self.urls.len(),
-        );
+        tracing::info!("web seed scheduler: starting with {} URLs", self.urls.len(),);
 
         let mut dispatch_tick = tokio::time::interval(Duration::from_secs(1));
-        let mut revive_tick = tokio::time::interval(self.config.park_retry_interval);
-        // discover_tick fires immediately on first iteration (optimistic start)
-        let mut discover_tick = tokio::time::interval(self.config.discover_interval);
 
         loop {
             {
@@ -97,23 +78,12 @@ impl WebSeedScheduler {
             tokio::select! {
                 Some(result) = self.result_rx.recv() => {
                     self.handle_result(result).await;
-                    // Immediately re-fill any freed download slot (Phase 4c).
                     self.dispatch_work().await;
-                }
-                Some(probe) = self.probe_result_rx.recv() => {
-                    self.handle_probe(probe);
                 }
                 _ = dispatch_tick.tick() => {
                     self.dispatch_work().await;
                 }
-                _ = revive_tick.tick() => {
-                    self.spawn_probe_tasks(UrlActivity::Parked);
-                }
-                _ = discover_tick.tick() => {
-                    self.spawn_probe_tasks(UrlActivity::Untested);
-                }
                 _ = self.notify.notified() => {
-                    // P2P completed a piece — re-evaluate gaps.
                     self.dispatch_work().await;
                 }
             }
@@ -142,9 +112,6 @@ impl WebSeedScheduler {
                     state.url,
                 );
                 self.urls.remove(idx);
-                // Adjust probe_result indices for all URLs after idx
-                // (probe tasks use absolute indices, but removal shifts
-                // the vector — see handle_probe for the guard).
             }
             Some(_) => {
                 state.health.record_failure();
@@ -210,7 +177,14 @@ impl WebSeedScheduler {
                 .iter()
                 .enumerate()
                 .filter(|(_, s)| {
-                    if s.activity != UrlActivity::Active || s.work_tx.is_closed() {
+                    let eligible = match s.activity {
+                        UrlActivity::Active => true,
+                        UrlActivity::Parked => {
+                            s.health.ready_for_retry(self.config.park_retry_interval)
+                        }
+                        UrlActivity::InFlight => false,
+                    };
+                    if !eligible || s.work_tx.is_closed() {
                         return false;
                     }
                     if s.url_kind == UrlKind::Directory {
@@ -278,92 +252,6 @@ impl WebSeedScheduler {
             }
             // If try_send failed, the URL's channel is full (cap=1).
             // Continue the loop to try the next-best URL.
-        }
-    }
-
-    /// Spawn fire-and-forget probe tasks for URLs matching `target`.
-    ///
-    /// For each URL in state `target` (either [`UrlActivity::Parked`]
-    /// or [`UrlActivity::Untested`]), spawns a `tokio::spawn` probe
-    /// task that runs [`probe_url`] and reports back via
-    /// `probe_result_tx`.  Concurrency is capped by `probe_semaphore`.
-    ///
-    /// This method never blocks — it only spawns tasks and returns.
-    fn spawn_probe_tasks(&mut self, target: UrlActivity) {
-        debug_assert!(
-            target == UrlActivity::Parked || target == UrlActivity::Untested,
-            "spawn_probe_tasks called with unexpected target: {:?}",
-            target,
-        );
-
-        let probe_timeout = Duration::from_secs(5);
-
-        for (idx, state) in self.urls.iter_mut().enumerate() {
-            if state.activity != target {
-                continue;
-            }
-            // Parked URLs must wait for the retry interval
-            if target == UrlActivity::Parked
-                && !state
-                    .health
-                    .ready_for_retry(self.config.park_retry_interval)
-            {
-                continue;
-            }
-
-            let Ok(permit) = self.probe_semaphore.clone().try_acquire_owned() else {
-                // No more probe concurrency slots — try again next tick.
-                break;
-            };
-
-            state.activity = UrlActivity::Probing;
-            let url = state.url.clone();
-            let url_kind = state.url_kind.clone();
-            let metainfo = self.metainfo.clone();
-            let tx = self.probe_result_tx.clone();
-
-            tokio::spawn(async move {
-                let _permit = permit;
-                let reachable = probe_url(&url, &url_kind, &metainfo, probe_timeout).await;
-                let _ = tx
-                    .send(ProbeResult {
-                        url_index: idx,
-                        reachable,
-                    })
-                    .await;
-            });
-        }
-    }
-
-    /// Handle a completed probe result from a spawned probe task.
-    ///
-    /// On success: promotes the URL to [`UrlActivity::Active`] with
-    /// fresh health.  On failure: returns to the previous state
-    /// ([`UrlActivity::Parked`] if there were prior failures,
-    /// [`UrlActivity::Untested`] otherwise).
-    fn handle_probe(&mut self, result: ProbeResult) {
-        let Some(state) = self.urls.get_mut(result.url_index) else {
-            // URL was removed (e.g. hash mismatch) while probe was in flight.
-            return;
-        };
-        if state.activity != UrlActivity::Probing {
-            // State changed since the probe was spawned (unlikely but safe).
-            return;
-        }
-
-        if result.reachable {
-            tracing::debug!("web seed {}: probe succeeded, activating", state.url);
-            state.activity = UrlActivity::Active;
-            state.health = UrlHealth::default();
-        } else {
-            tracing::debug!("web seed {}: probe failed", state.url);
-            // Return to the previous state inferred from health:
-            // Parked URLs have prior failures; Untested URLs don't.
-            if state.health.consecutive_failures > 0 {
-                state.activity = UrlActivity::Parked;
-            } else {
-                state.activity = UrlActivity::Untested;
-            }
         }
     }
 }

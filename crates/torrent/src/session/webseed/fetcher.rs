@@ -80,101 +80,48 @@ impl FetchTask {
         tracing::trace!("web seed {}: started", self.url);
         while let Some(work) = self.work_rx.recv().await {
             let _permit = self.semaphore.clone().acquire_owned().await;
-            let result = self.download_with_retry(work).await;
+            let result = self.download_once(work).await;
             let _ = self.result_tx.send(result).await;
         }
         tracing::trace!("web seed {}: exiting", self.url);
     }
 
-    /// Download with up to 3 retries on transient errors (exponential backoff).
+    /// Single-attempt download — no internal retry.
     ///
-    /// For URLs that have never succeeded (`consecutive_failures` tracked
-    /// externally by the scheduler), retries are skipped entirely — there
-    /// is no point retrying a URL that has never worked.
-    async fn download_with_retry(&self, work: WorkItem) -> WorkResult {
-        let overall_start = Instant::now();
-        let mut retry_delay = Duration::from_secs(2);
-
+    /// Transient errors are reported back to the scheduler, which
+    /// handles retries at the dispatch level (via
+    /// [`WebSeedScheduler::dispatch_work`]).  Hash mismatches are
+    /// reported immediately for permanent URL removal.
+    async fn download_once(&self, work: WorkItem) -> WorkResult {
         let started = Instant::now();
-        #[allow(unused_assignments)]
-        let mut last_error = None;
         match self.download_range(work.start_byte, work.end_byte).await {
             Ok(completed) => {
                 let bytes: u64 = completed
                     .iter()
                     .map(|&i| piece_len(i, &self.metainfo, self.piece_length))
                     .sum();
-                return WorkResult {
+                WorkResult {
                     url_index: self.url_index,
                     completed,
                     bytes,
                     elapsed: started.elapsed(),
                     error: None,
-                };
-            }
-            Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => {
-                return WorkResult {
-                    url_index: self.url_index,
-                    completed: Vec::new(),
-                    bytes: 0,
-                    elapsed: started.elapsed(),
-                    error: Some(ErrorKind::WebSeedHashMismatch),
-                };
-            }
-            Err(e) => {
-                last_error = Some(e.kind());
-            }
-        }
-
-        // Only retry if the first attempt failed with a transient error.
-        const MAX_RETRIES: u32 = 3;
-        for attempt in 1..=MAX_RETRIES {
-            tracing::debug!(
-                "web seed {}: retry {}/{} after {:?}",
-                self.url,
-                attempt,
-                MAX_RETRIES,
-                retry_delay,
-            );
-            tokio::time::sleep(retry_delay).await;
-            retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
-
-            let started = Instant::now();
-            match self.download_range(work.start_byte, work.end_byte).await {
-                Ok(completed) => {
-                    let bytes: u64 = completed
-                        .iter()
-                        .map(|&i| piece_len(i, &self.metainfo, self.piece_length))
-                        .sum();
-                    return WorkResult {
-                        url_index: self.url_index,
-                        completed,
-                        bytes,
-                        elapsed: started.elapsed(),
-                        error: None,
-                    };
-                }
-                Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => {
-                    return WorkResult {
-                        url_index: self.url_index,
-                        completed: Vec::new(),
-                        bytes: 0,
-                        elapsed: started.elapsed(),
-                        error: Some(ErrorKind::WebSeedHashMismatch),
-                    };
-                }
-                Err(e) => {
-                    last_error = Some(e.kind());
                 }
             }
-        }
-
-        WorkResult {
-            url_index: self.url_index,
-            completed: Vec::new(),
-            bytes: 0,
-            elapsed: overall_start.elapsed(),
-            error: last_error,
+            Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => WorkResult {
+                url_index: self.url_index,
+                completed: Vec::new(),
+                bytes: 0,
+                elapsed: started.elapsed(),
+                error: Some(ErrorKind::WebSeedHashMismatch),
+            },
+            Err(e) => WorkResult {
+                url_index: self.url_index,
+                completed: Vec::new(),
+                bytes: 0,
+                elapsed: started.elapsed(),
+                error: Some(e.kind()),
+            },
         }
     }
 
@@ -297,52 +244,6 @@ pub(super) fn piece_len(index: u32, metainfo: &Metainfo, piece_length: u64) -> u
     } else {
         0
     }
-}
-
-/// Probe a web seed URL with a three-level fallback.
-pub(super) async fn probe_url(
-    url: &Url, url_kind: &UrlKind, metainfo: &Metainfo, probe_timeout: Duration,
-) -> bool {
-    let request_url = match build_request_url(url, metainfo, url_kind, 0) {
-        Ok(u) => u,
-        Err(_) => return false,
-    };
-    let path = request_url.path().to_string();
-
-    if try_head(&request_url, &path, probe_timeout).await {
-        tracing::trace!("web seed {url}: HEAD probe OK");
-        return true;
-    }
-    if try_tiny_range(&request_url, &path, probe_timeout).await {
-        tracing::trace!("web seed {url}: tiny Range probe OK");
-        return true;
-    }
-    let total_size = metainfo.info.total_size();
-    if try_short_get(&request_url, &path, total_size, probe_timeout).await {
-        tracing::trace!("web seed {url}: short GET probe OK");
-        return true;
-    }
-    tracing::debug!("web seed {url}: probe failed");
-    false
-}
-
-async fn try_head(url: &Url, path: &str, timeout: Duration) -> bool {
-    HttpClient::new(timeout).head(url, path).await.is_ok()
-}
-
-async fn try_tiny_range(url: &Url, path: &str, timeout: Duration) -> bool {
-    HttpClient::new(timeout)
-        .get_with_range(url, path, 0, 0)
-        .await
-        .is_ok()
-}
-
-async fn try_short_get(url: &Url, path: &str, total_size: u64, timeout: Duration) -> bool {
-    let end = 4095u64.min(total_size.saturating_sub(1));
-    HttpClient::new(timeout)
-        .get_with_range(url, path, 0, end)
-        .await
-        .is_ok()
 }
 
 #[cfg(test)]

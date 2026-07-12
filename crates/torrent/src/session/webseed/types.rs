@@ -39,16 +39,6 @@ pub(crate) struct WebSeedConfig {
     ///
     /// Default: `60` s.
     pub park_retry_interval: Duration,
-    /// Maximum concurrent HTTP probe requests (HEAD / tiny Range).
-    /// Probes are lightweight and independent of download concurrency.
-    ///
-    /// Default: `3`.
-    pub probe_max_concurrent: usize,
-    /// Interval between discovery ticks for untested URLs.
-    /// Each tick spawns up to [`probe_max_concurrent`] probe tasks.
-    ///
-    /// Default: `5` s.
-    pub discover_interval: Duration,
 }
 
 impl Default for WebSeedConfig {
@@ -61,8 +51,6 @@ impl Default for WebSeedConfig {
             max_concurrent: 16,
             park_threshold: 5,
             park_retry_interval: Duration::from_secs(60),
-            probe_max_concurrent: 3,
-            discover_interval: Duration::from_secs(5),
         }
     }
 }
@@ -86,8 +74,10 @@ pub(crate) struct UrlHealth {
     /// Total number of download attempts (success + transient failure).
     /// Used by UCB exploration bonus: more attempts → smaller bonus.
     download_attempts: u64,
-    /// When the last successful download completed.
-    last_success: Option<Instant>,
+    /// When the last download attempt (success or failure) completed.
+    /// Used by [`ready_for_retry`] to ensure a Parked URL waits the
+    /// full retry interval even if it has never succeeded.
+    last_attempt: Option<Instant>,
 }
 
 impl Default for UrlHealth {
@@ -97,7 +87,7 @@ impl Default for UrlHealth {
             consecutive_failures: 0,
             success_count: 0,
             download_attempts: 0,
-            last_success: None,
+            last_attempt: None,
         }
     }
 }
@@ -118,13 +108,14 @@ impl UrlHealth {
         self.consecutive_failures = 0;
         self.success_count += 1;
         self.download_attempts += 1;
-        self.last_success = Some(Instant::now());
+        self.last_attempt = Some(Instant::now());
     }
 
     /// Record a failed download attempt.
     pub(crate) fn record_failure(&mut self) {
         self.consecutive_failures += 1;
         self.download_attempts += 1;
+        self.last_attempt = Some(Instant::now());
     }
 
     /// Whether this URL should be parked (too many consecutive failures).
@@ -133,10 +124,13 @@ impl UrlHealth {
     }
 
     /// Whether enough time has passed to retry a parked URL.
+    ///
+    /// Uses [`last_attempt`] so that a URL that has never succeeded
+    /// still waits the full `interval` before being reconsidered.
     pub(crate) fn ready_for_retry(&self, interval: Duration) -> bool {
-        match self.last_success {
+        match self.last_attempt {
             Some(t) => t.elapsed() >= interval,
-            None => true,
+            None => false,
         }
     }
 
@@ -204,19 +198,13 @@ pub(crate) struct WorkResult {
 /// Whether a URL is actively downloading, parked, or currently busy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UrlActivity {
-    /// Available for work dispatch (verified reachable).
+    /// Available for work dispatch.
     Active,
-    /// Too many consecutive failures; only periodic re-probing.
+    /// Too many consecutive failures; retried after
+    /// [`WebSeedConfig::park_retry_interval`] elapses.
     Parked,
     /// Currently has an in-flight download (work_tx has been sent to).
     InFlight,
-    /// A probe task has been spawned and is awaiting a result.
-    /// Prevents duplicate probe spawns for the same URL.
-    Probing,
-    /// Never tested — neither download nor probe has been attempted.
-    /// Discovered URLs start here; promoted to [`Active`] on
-    /// successful probe.
-    Untested,
 }
 
 /// Whether a web seed URL is a directory (append file path) or
@@ -237,18 +225,6 @@ impl UrlKind {
             UrlKind::Script
         }
     }
-}
-
-/// Result of a lightweight HTTP probe (HEAD / tiny Range).
-///
-/// Sent from spawned probe tasks back to the scheduler via
-/// a dedicated mpsc channel so probing never blocks the
-/// scheduler's event loop.
-pub(crate) struct ProbeResult {
-    /// Index into the scheduler's `urls` vector.
-    pub(crate) url_index: usize,
-    /// Whether the probe succeeded (server responded).
-    pub(crate) reachable: bool,
 }
 
 /// A web seed URL with its health score and work channel.
@@ -272,9 +248,9 @@ mod tests {
         assert_eq!(h.consecutive_failures, 0);
         assert_eq!(h.success_count, 0);
         assert_eq!(h.ema_throughput(), 0.0);
-        assert!(h.last_success.is_none());
+        assert!(h.last_attempt.is_none());
         assert!(!h.should_park(5));
-        assert!(h.ready_for_retry(Duration::from_secs(60)));
+        assert!(!h.ready_for_retry(Duration::from_secs(60)));
     }
 
     #[test]

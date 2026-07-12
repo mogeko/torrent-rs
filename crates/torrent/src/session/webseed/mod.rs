@@ -24,5 +24,5 @@ mod types;
 pub(crate) use self::fetcher::FetchTask;
 pub(crate) use self::scheduler::{WebSeedScheduler, deduplicate_urls};
 pub(crate) use self::types::{
-    ProbeResult, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WorkItem, WorkResult,
+    UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WorkItem, WorkResult,
 };
