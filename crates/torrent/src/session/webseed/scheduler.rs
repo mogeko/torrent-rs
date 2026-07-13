@@ -27,8 +27,17 @@ const UCB_EXPLORATION_FACTOR: f64 = 100_000.0;
 /// Centralized scheduler for web seed downloads (Phase 2).
 ///
 /// Reads the piece bitfield, selects the largest gap, picks the
-/// fastest available URL (by [`UrlHealth::ucb_score`]), and
-/// dispatches [`WorkItem`]s to [`FetchTask`]s via mpsc channels.
+/// best URL by UCB-weighted throughput score, and dispatches
+/// [`WorkItem`]s to [`FetchTask`]s via mpsc channels.
+///
+/// # Known limitation: index shift after hash-mismatch removal
+///
+/// When a URL is permanently discarded via
+/// [`handle_result`], its [`WorkResult::url_index`]-based
+/// identification may become stale for in-flight fetchers of
+/// URLs at higher indices.  This is rare (multiple hash
+/// mismatches) and non-catastrophic (the guard in
+/// [`handle_result`] bounds-checks the index).
 pub(crate) struct WebSeedScheduler {
     urls: Vec<UrlState>,
     piece_mgr: Arc<RwLock<PieceManager>>,

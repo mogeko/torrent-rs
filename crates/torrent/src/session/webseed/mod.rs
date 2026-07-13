@@ -13,7 +13,7 @@
 //! # Architecture
 //!
 //! The scheduler reads the piece bitfield, selects the largest gap,
-//! picks the fastest available URL by throughput, and dispatches
+//! picks the best URL by UCB-weighted throughput score, and dispatches
 //! [`WorkItem`]s to fetcher tasks via mpsc channels.  Fetchers handle
 //! HTTP Range requests, SHA-1 verification, and storage writes.
 

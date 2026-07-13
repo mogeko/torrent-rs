@@ -29,7 +29,7 @@ pub(crate) struct WebSeedConfig {
     ///
     /// Default: `5`.
     pub park_threshold: u32,
-    /// How long to wait before re-probing a parked URL.
+    /// How long to wait before retrying a parked URL.
     ///
     /// Default: `60` s.
     pub park_retry_interval: Duration,
