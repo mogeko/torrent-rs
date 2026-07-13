@@ -165,7 +165,6 @@ impl WebSeedScheduler {
             };
 
             let start_byte = gap_start as u64 * piece_length;
-            let end_byte = (start_byte + max_range).min(total_size).saturating_sub(1);
 
             // Compute total download attempts across all URLs for the
             // UCB exploration bonus.  Cached once per dispatch batch
@@ -220,7 +219,26 @@ impl WebSeedScheduler {
             let Some((idx, _state)) = best_idx else {
                 return;
             };
-
+            // Adaptive range: size the request to fit within the timeout
+            // based on this URL's observed throughput.  Slow URLs get
+            // smaller ranges so they don't trigger a timeout; fast URLs
+            // get the full max_range_bytes.  Untested URLs (EMA=0) get
+            // the floor: min_gap_pieces × piece_length.
+            let range_from_throughput = (self.urls[idx].health.ema_throughput()
+                * self.config.timeout.as_secs_f64()
+                * 0.8) as u64;
+            let floor_range = min_gap as u64 * piece_length;
+            let adaptive_max = range_from_throughput.max(floor_range).min(max_range);
+            let end_byte = (start_byte + adaptive_max)
+                .min(total_size)
+                .saturating_sub(1);
+            // Dynamic timeout: proportional to range size.
+            // Floor: 50 KB/s = 20 s/MB. If a URL can't deliver
+            // 1 MB in 20 s, it's effectively dead.
+            let range_size = end_byte - start_byte + 1;
+            let min_throughput: f64 = 51_200.0; // 50 KB/s
+            let dynamic_timeout =
+                Duration::from_secs_f64((range_size as f64 / min_throughput).max(5.0));
             tracing::debug!(
                 "web seed scheduler: dispatch piece {} ({:.1} MB) to {}",
                 gap_start,
@@ -233,6 +251,7 @@ impl WebSeedScheduler {
                 .try_send(WorkItem {
                     start_byte,
                     end_byte,
+                    timeout: dynamic_timeout,
                 })
                 .is_ok()
             {

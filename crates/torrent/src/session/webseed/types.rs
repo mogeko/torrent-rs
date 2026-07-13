@@ -176,6 +176,10 @@ pub(crate) struct WorkItem {
     pub(crate) start_byte: u64,
     /// Byte offset to end downloading at (inclusive).
     pub(crate) end_byte: u64,
+    /// Per-request timeout computed from the range size.
+    /// Larger ranges get proportionally longer timeouts
+    /// (≈ 20 s/MB at 50 KB/s floor).
+    pub(crate) timeout: Duration,
 }
 
 /// Result of a [`WorkItem`] reported back to the scheduler.

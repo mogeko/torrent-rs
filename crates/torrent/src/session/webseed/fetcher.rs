@@ -88,14 +88,19 @@ impl FetchTask {
 
     /// Single-attempt download — no internal retry.
     ///
-    /// Transient errors are reported back to the scheduler, which
-    /// handles retries at the dispatch level (via
-    /// [`WebSeedScheduler::dispatch_work`]).  Hash mismatches are
-    /// reported immediately for permanent URL removal.
+    /// Uses [`WorkItem::timeout`] as a per-request deadline via
+    /// [`tokio::time::timeout`].  The fixed HTTP client timeout is
+    /// kept as a generous upper bound.
     async fn download_once(&self, work: WorkItem) -> WorkResult {
         let started = Instant::now();
-        match self.download_range(work.start_byte, work.end_byte).await {
-            Ok(completed) => {
+        let result = tokio::time::timeout(
+            work.timeout,
+            self.download_range(work.start_byte, work.end_byte),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(completed)) => {
                 let bytes: u64 = completed
                     .iter()
                     .map(|&i| piece_len(i, &self.metainfo, self.piece_length))
@@ -108,19 +113,26 @@ impl FetchTask {
                     error: None,
                 }
             }
-            Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => WorkResult {
+            Ok(Err(ref e)) if e.kind() == ErrorKind::WebSeedHashMismatch => WorkResult {
                 url_index: self.url_index,
                 completed: Vec::new(),
                 bytes: 0,
                 elapsed: started.elapsed(),
                 error: Some(ErrorKind::WebSeedHashMismatch),
             },
-            Err(e) => WorkResult {
+            Ok(Err(e)) => WorkResult {
                 url_index: self.url_index,
                 completed: Vec::new(),
                 bytes: 0,
                 elapsed: started.elapsed(),
                 error: Some(e.kind()),
+            },
+            Err(_elapsed) => WorkResult {
+                url_index: self.url_index,
+                completed: Vec::new(),
+                bytes: 0,
+                elapsed: started.elapsed(),
+                error: Some(ErrorKind::Io),
             },
         }
     }
@@ -429,6 +441,7 @@ mod tests {
             .send(WorkItem {
                 start_byte: 0,
                 end_byte: 255,
+                timeout: Duration::from_secs(5),
             })
             .await;
 
