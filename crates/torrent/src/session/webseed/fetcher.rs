@@ -127,13 +127,21 @@ impl FetchTask {
                 elapsed: started.elapsed(),
                 error: Some(e.kind()),
             },
-            Err(_elapsed) => WorkResult {
-                url_index: self.url_index,
-                completed: Vec::new(),
-                bytes: 0,
-                elapsed: started.elapsed(),
-                error: Some(ErrorKind::Io),
-            },
+            Err(_elapsed) => {
+                tracing::debug!(
+                    "web seed {}: timeout after {:.1}s (limit={:.1}s)",
+                    self.url,
+                    started.elapsed().as_secs_f64(),
+                    work.timeout.as_secs_f64(),
+                );
+                WorkResult {
+                    url_index: self.url_index,
+                    completed: Vec::new(),
+                    bytes: 0,
+                    elapsed: started.elapsed(),
+                    error: Some(ErrorKind::Io),
+                }
+            }
         }
     }
 
@@ -144,12 +152,14 @@ impl FetchTask {
         let url_kind = UrlKind::classify(&self.url);
         let request_url = build_request_url(&self.url, &self.metainfo, &url_kind, start_byte)?;
 
+        let range_size = end_byte - start_byte + 1;
         tracing::debug!(
-            "web seed {}: GET {} (bytes {}-{})",
+            "web seed {}: GET {} [{}-{}] ({:.1}KB)",
             self.url,
             request_url,
             start_byte,
             end_byte,
+            range_size as f64 / 1024.0,
         );
 
         let body = self
@@ -184,8 +194,8 @@ impl FetchTask {
 
                 let actual_hash: [u8; 20] = Sha1::digest(chunk).into();
                 if actual_hash != expected_hash {
-                    tracing::warn!(
-                        "web seed {}: SHA-1 mismatch for piece {} — discarding URL",
+                    tracing::debug!(
+                        "web seed {}: SHA-1 mismatch on piece {} (will be discarded by scheduler)",
                         self.url,
                         piece_index,
                     );

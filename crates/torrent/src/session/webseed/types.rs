@@ -121,10 +121,15 @@ impl UrlHealth {
     /// Uses [`last_attempt`] so that a URL that has never succeeded
     /// still waits the full `interval` before being reconsidered.
     pub(crate) fn ready_for_retry(&self, interval: Duration) -> bool {
-        match self.last_attempt {
-            Some(t) => t.elapsed() >= interval,
-            None => false,
-        }
+        self.ready_for_retry_elapsed() >= interval.as_secs_f64()
+    }
+
+    /// Seconds since the last download attempt (success or failure).
+    /// Returns `0.0` if the URL has never been attempted.
+    pub(crate) fn ready_for_retry_elapsed(&self) -> f64 {
+        self.last_attempt
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0)
     }
 
     /// Current EMA throughput (bytes/sec).  Used by the scheduler

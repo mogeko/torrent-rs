@@ -62,7 +62,11 @@ impl WebSeedScheduler {
     /// reconsidered by [`dispatch_work`] once
     /// [`UrlHealth::ready_for_retry`] returns `true`.
     pub async fn run(mut self) {
-        tracing::info!("web seed scheduler: starting with {} URLs", self.urls.len(),);
+        tracing::info!(
+            "web seed: {} URLs, max {} concurrent downloads",
+            self.urls.len(),
+            self.config.max_concurrent,
+        );
 
         let mut dispatch_tick = tokio::time::interval(Duration::from_secs(1));
 
@@ -70,7 +74,7 @@ impl WebSeedScheduler {
             {
                 let pm = self.piece_mgr.read().await;
                 if pm.bitfield().iter().all(|&b| b) {
-                    tracing::info!("web seed scheduler: torrent complete, exiting");
+                    tracing::info!("web seed: download complete, exiting");
                     return;
                 }
             }
@@ -98,17 +102,21 @@ impl WebSeedScheduler {
 
         match result.error {
             None => {
+                let throughput = result.bytes as f64 / result.elapsed.as_secs_f64().max(0.001);
                 tracing::debug!(
-                    "web seed scheduler: {} completed {} pieces",
+                    "web seed {}: {} pieces ({:.1} KB) in {:.1}s ({:.1} KB/s)",
                     state.url,
                     result.completed.len(),
+                    result.bytes as f64 / 1024.0,
+                    result.elapsed.as_secs_f64(),
+                    throughput / 1024.0,
                 );
                 state.health.record_success(result.bytes, result.elapsed);
                 state.activity = UrlActivity::Active;
             }
             Some(ErrorKind::WebSeedHashMismatch) => {
                 tracing::warn!(
-                    "web seed {}: SHA-1 mismatch — discarding permanently",
+                    "web seed {}: SHA-1 mismatch, discarding permanently",
                     state.url,
                 );
                 self.urls.remove(idx);
@@ -117,12 +125,19 @@ impl WebSeedScheduler {
                 state.health.record_failure();
                 if state.health.should_park(self.config.park_threshold) {
                     tracing::warn!(
-                        "web seed {}: {} consecutive failures, parking",
+                        "web seed {}: {} consecutive failures, parking for {}s",
                         state.url,
                         state.health.consecutive_failures,
+                        self.config.park_retry_interval.as_secs(),
                     );
                     state.activity = UrlActivity::Parked;
                 } else {
+                    tracing::debug!(
+                        "web seed {}: download failed ({}/{} consecutive)",
+                        state.url,
+                        state.health.consecutive_failures,
+                        self.config.park_threshold,
+                    );
                     state.activity = UrlActivity::Active;
                 }
             }
@@ -239,11 +254,31 @@ impl WebSeedScheduler {
             let min_throughput: f64 = 51_200.0; // 50 KB/s
             let dynamic_timeout =
                 Duration::from_secs_f64((range_size as f64 / min_throughput).max(5.0));
+            let range_mb = (end_byte - start_byte + 1) as f64 / (1024.0 * 1024.0);
+            let timeout_s = dynamic_timeout.as_secs_f64();
+            let ema_kbs = self.urls[idx].health.ema_throughput() / 1024.0;
+            let ucb_kbs = self.urls[idx]
+                .health
+                .ucb_score(total_attempts, UCB_EXPLORATION_FACTOR)
+                / 1024.0;
+
+            let revival = matches!(self.urls[idx].activity, UrlActivity::Parked);
+            if revival {
+                let elapsed = self.urls[idx].health.ready_for_retry_elapsed();
+                tracing::info!(
+                    "web seed {}: revived after {:.0}s parked",
+                    self.urls[idx].url,
+                    elapsed,
+                );
+            }
+
             tracing::debug!(
-                "web seed scheduler: dispatch piece {} ({:.1} MB) to {}",
-                gap_start,
-                (end_byte - start_byte + 1) as f64 / (1024.0 * 1024.0),
+                "web seed dispatch → {} [{:.1}MB, {:.0}s timeout] (EMA={:.0}KB/s, UCB={:.0}KB/s)",
                 self.urls[idx].url,
+                range_mb,
+                timeout_s,
+                ema_kbs,
+                ucb_kbs,
             );
 
             if self.urls[idx]
