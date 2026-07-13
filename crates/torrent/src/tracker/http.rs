@@ -6,9 +6,8 @@ use tokio_rustls::TlsConnector;
 use crate::error::{Error, ErrorKind};
 use crate::net::http::{HttpClient, MAX_REDIRECTS, resolve_redirect_url};
 use crate::net::tls::build_tls_connector;
-use crate::net::{IntoUrl, Url};
 
-use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
+use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
 /// Timeout for HTTP tracker connect + request + response read.
 use super::DEFAULT_TIMEOUT;

@@ -6,9 +6,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{UdpSocket, lookup_host};
 
 use crate::error::{Error, ErrorKind};
-use crate::net::{IntoUrl, Url};
 
-use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
+use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 
 /// Per-request timeout (connect + announce).
 use super::DEFAULT_TIMEOUT;
