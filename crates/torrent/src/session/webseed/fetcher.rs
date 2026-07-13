@@ -143,7 +143,6 @@ impl FetchTask {
     ) -> Result<Vec<u32>, Error> {
         let url_kind = UrlKind::classify(&self.url);
         let request_url = build_request_url(&self.url, &self.metainfo, &url_kind, start_byte)?;
-        let path_and_query = request_url.path().to_string();
 
         tracing::debug!(
             "web seed {}: GET {} (bytes {}-{})",
@@ -155,7 +154,7 @@ impl FetchTask {
 
         let body = self
             .http
-            .get_with_range(&request_url, &path_and_query, start_byte, end_byte)
+            .get_with_range(request_url, start_byte, end_byte)
             .await?;
 
         let mut completed = Vec::new();
@@ -333,7 +332,7 @@ mod tests {
         let (server_url, _server) = mock_http_server(data.clone()).await;
         let url = Url::parse(&server_url).unwrap();
         let client = HttpClient::new(Duration::from_secs(5));
-        let body = client.get_with_range(&url, "/", 0, 255).await.unwrap();
+        let body = client.get_with_range(url, 0, 255).await.unwrap();
         assert_eq!(body.len(), 256);
 
         let (server_url2, _server2) = mock_http_server(data.clone()).await;
@@ -374,7 +373,7 @@ mod tests {
         let (server_url, _server) = mock_http_server(data.clone()).await;
         let url = Url::parse(&server_url).unwrap();
         let client = HttpClient::new(Duration::from_secs(5));
-        let body = client.get_with_range(&url, "/", 0, 383).await.unwrap();
+        let body = client.get_with_range(url, 0, 383).await.unwrap();
         assert_eq!(body.len(), 384);
         assert_eq!(&body[..128], &data[0..128]);
 
