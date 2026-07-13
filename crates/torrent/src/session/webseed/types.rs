@@ -14,17 +14,11 @@ pub(crate) struct WebSeedConfig {
     /// Minimum contiguous gap (in pieces) to trigger an HTTP download.
     /// Prevents tiny range requests. Default: 4 pieces.
     pub min_gap_pieces: u32,
-    /// Maximum bytes per Range request.
-    /// BEP 19 suggests ~5% of total file size. Default: 5 MB.
+    /// Upper bound for adaptive Range request size. Default: 5 MB.
     pub max_range_bytes: u64,
     /// Timeout for HTTP connect + download.
     /// Default: 30 s.
     pub timeout: Duration,
-    /// Delay before retrying after a transient error (503, connection
-    /// refused). Doubles on each consecutive failure up to 60 s.
-    /// Default: 2 s.
-    #[expect(dead_code, reason = "reserved for per-URL backoff in scheduler")]
-    pub retry_delay: Duration,
     /// Maximum concurrent in-flight HTTP Range requests across all
     /// web seed tasks.
     ///
@@ -47,7 +41,6 @@ impl Default for WebSeedConfig {
             min_gap_pieces: 4,
             max_range_bytes: 5 * 1024 * 1024, // 5 MB
             timeout: Duration::from_secs(30),
-            retry_delay: Duration::from_secs(2),
             max_concurrent: 16,
             park_threshold: 5,
             park_retry_interval: Duration::from_secs(60),

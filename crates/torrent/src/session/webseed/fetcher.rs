@@ -23,8 +23,8 @@ use super::types::{UrlKind, WorkItem, WorkResult};
 /// requested byte range, verifies SHA-1 hashes, writes pieces to
 /// storage, and reports the result back via `result_tx`.
 ///
-/// Unlike Phase 1's `WebSeedTask`, the fetcher does NOT scan the
-/// bitfield or decide what to download — that is the scheduler's job.
+/// The fetcher does NOT scan the bitfield or decide what to download
+/// — that is the scheduler's job.
 pub(crate) struct FetchTask {
     /// Human-readable URL for logging.
     url: Url,

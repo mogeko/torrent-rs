@@ -195,7 +195,6 @@ impl TorrentHandle {
             min_gap_pieces: config.webseed_min_gap_pieces,
             max_range_bytes: config.webseed_max_range_bytes,
             timeout: config.webseed_timeout,
-            retry_delay: Duration::from_secs(2),
             max_concurrent: config.webseed_max_concurrent,
             park_threshold: 5,
             park_retry_interval: Duration::from_secs(60),
@@ -357,7 +356,7 @@ pub(crate) struct SwarmLoop {
     pub(crate) web_seeds: Vec<String>,
     /// Web seed configuration.
     pub(crate) webseed_config: WebSeedConfig,
-    /// Handle for the web seed scheduler task (Phase 2).
+    /// Handle for the web seed scheduler task.
     pub(crate) webseed_scheduler: Option<JoinHandle<()>>,
     /// Handles for spawned fetcher tasks (one per URL).
     pub(crate) webseed_fetchers: Vec<JoinHandle<()>>,
@@ -378,7 +377,7 @@ impl SwarmLoop {
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
         let mut pex_tick = tokio::time::interval(self.pex_interval);
 
-        // Spawn web seed scheduler + fetchers (BEP 19, Phase 2).
+        // Spawn web seed scheduler + fetchers (BEP 19).
         // The scheduler reads the bitfield, selects gaps, and dispatches
         // work to fetcher tasks via mpsc channels.  Each fetcher is a
         // passive worker that downloads whatever the scheduler assigns.
