@@ -39,7 +39,7 @@ impl PieceManager {
         let i = index as usize;
         if i < self.num_pieces {
             self.bitfield[i] = true;
-            tracing::info!(
+            tracing::debug!(
                 "piece {} completed ({}/{}, {:.1}%)",
                 index,
                 self.completed_pieces().len(),

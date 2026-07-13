@@ -10,4 +10,9 @@
 //! - [`http`] — purpose-built HTTP/1.1 client
 
 pub(crate) mod http;
+mod into_url;
 pub(crate) mod tls;
+
+pub use url::Url;
+
+pub use self::into_url::IntoUrl;

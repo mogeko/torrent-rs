@@ -269,6 +269,57 @@ impl Info {
     pub fn num_pieces(&self) -> usize {
         self.pieces.len()
     }
+
+    /// Map each file to its byte offset in the torrent byte stream.
+    ///
+    /// For single-file torrents, returns a single [`FileOffset`] at offset 0.
+    /// For multi-file torrents, each file's offset is the sum of previous
+    /// file lengths.
+    ///
+    /// Used by web seed (BEP 19) to construct per-file HTTP URLs for
+    /// directory-style web seed URLs.
+    pub fn file_offsets(&self) -> Vec<FileOffset> {
+        match &self.mode {
+            Mode::Single { name, length } => {
+                vec![FileOffset {
+                    offset: 0,
+                    length: *length,
+                    path: vec![name.clone()],
+                }]
+            }
+            Mode::Multiple { files, .. } => {
+                let mut offset = 0u64;
+                files
+                    .iter()
+                    .map(|f| {
+                        let fo = FileOffset {
+                            offset,
+                            length: f.length,
+                            path: f.path.clone(),
+                        };
+                        offset += f.length;
+                        fo
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+/// A file's position and identity within a torrent's byte stream.
+///
+/// Used by web seed (BEP 19) to map byte ranges to HTTP request URLs.
+/// For single-file torrents, there is one entry at offset 0 with the
+/// file's name. For multi-file torrents, each entry represents a file
+/// in the torrent with its byte offset and path components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOffset {
+    /// Byte offset of this file in the torrent byte stream.
+    pub offset: u64,
+    /// Length of this file in bytes.
+    pub length: u64,
+    /// Path components (e.g. `["dir", "file.txt"]`).
+    pub path: Vec<String>,
 }
 
 /// Try to parse [`Metainfo`] from raw bencoded bytes (BEP 3).
@@ -593,5 +644,62 @@ mod serde_tests {
         assert_eq!(back.info_hash(), meta.info_hash());
         assert_eq!(back.announce, "");
         assert_eq!(back.announce_list.len(), 0);
+    }
+
+    // ── file_offsets tests (BEP 19 web seed) ─────────────────────
+
+    #[test]
+    fn file_offsets_single_file() {
+        let info = Info {
+            piece_length: 256,
+            pieces: vec![[0u8; 20]; 4],
+            mode: Mode::Single {
+                name: "data.bin".into(),
+                length: 1000,
+            },
+            raw_info: RawInfo::Hash([0u8; 20]),
+        };
+        let offsets = info.file_offsets();
+        assert_eq!(offsets.len(), 1);
+        assert_eq!(offsets[0].offset, 0);
+        assert_eq!(offsets[0].length, 1000);
+        assert_eq!(offsets[0].path, vec!["data.bin"]);
+    }
+
+    #[test]
+    fn file_offsets_multi_file() {
+        let info = Info {
+            piece_length: 256,
+            pieces: vec![[0u8; 20]; 3],
+            mode: Mode::Multiple {
+                name: "root".into(),
+                files: vec![
+                    FileInfo {
+                        length: 100,
+                        path: vec!["a.txt".into()],
+                    },
+                    FileInfo {
+                        length: 200,
+                        path: vec!["sub".into(), "b.txt".into()],
+                    },
+                    FileInfo {
+                        length: 50,
+                        path: vec!["c.txt".into()],
+                    },
+                ],
+            },
+            raw_info: RawInfo::Hash([0u8; 20]),
+        };
+        let offsets = info.file_offsets();
+        assert_eq!(offsets.len(), 3);
+        assert_eq!(offsets[0].offset, 0);
+        assert_eq!(offsets[0].length, 100);
+        assert_eq!(offsets[0].path, vec!["a.txt"]);
+        assert_eq!(offsets[1].offset, 100);
+        assert_eq!(offsets[1].length, 200);
+        assert_eq!(offsets[1].path, vec!["sub", "b.txt"]);
+        assert_eq!(offsets[2].offset, 300);
+        assert_eq!(offsets[2].length, 50);
+        assert_eq!(offsets[2].path, vec!["c.txt"]);
     }
 }

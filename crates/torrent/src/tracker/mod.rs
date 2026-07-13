@@ -32,17 +32,14 @@
 //! | [`Tracker::announce_into_set`] | return a [`JoinSet`] for caller to drive             |
 
 mod http;
-mod into_url;
 mod udp;
 
 pub use torrent_core::tracker::{
     AnnounceEvent, AnnounceRequest, AnnounceResponse, parse_compact_peers_ipv4,
     parse_compact_peers_ipv6,
 };
-pub use url::Url;
 
 pub use self::http::HttpTracker;
-pub use self::into_url::IntoUrl;
 pub use self::udp::UdpTracker;
 
 use std::collections::HashSet;
@@ -52,6 +49,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use crate::error::{Error, ErrorKind};
+use crate::net::{IntoUrl, Url};
 use crate::spec::TorrentSpec;
 
 /// Default per-request timeout for tracker announces (15 s).

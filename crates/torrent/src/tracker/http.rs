@@ -6,8 +6,9 @@ use tokio_rustls::TlsConnector;
 use crate::error::{Error, ErrorKind};
 use crate::net::http::{HttpClient, MAX_REDIRECTS, resolve_redirect_url};
 use crate::net::tls::build_tls_connector;
+use crate::net::{IntoUrl, Url};
 
-use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
+use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
 
 /// Timeout for HTTP tracker connect + request + response read.
 use super::DEFAULT_TIMEOUT;
@@ -96,9 +97,10 @@ impl HttpTracker {
         let client = HttpClient::new(self.timeout);
 
         loop {
-            let path_and_query = format!("{}?{}", current_url.path(), build_query_string(req));
+            let mut announce_url = current_url.clone();
+            announce_url.set_query(Some(&build_query_string(req)));
 
-            let buf = client.get(&current_url, &path_and_query).await?;
+            let buf = client.get(announce_url).await?;
 
             // Parse HTTP response: find "\r\n\r\n" separator
             let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
