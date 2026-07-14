@@ -283,11 +283,18 @@ pub struct TorrentStatus {
     pub num_pieces: u32,
     /// Number of pieces that have been downloaded and verified.
     pub pieces_completed: u32,
+    /// Per-piece completion bitmap: `true` at index `i` means piece `i`
+    /// has been downloaded and verified.
+    pub bitfield: Vec<bool>,
+    /// Elapsed time since the torrent was registered with the session.
+    ///
+    /// Updated each status tick (~1 s).  Use for UI display
+    /// (e.g. "Downloading for 5m 32s").
+    pub elapsed: Duration,
     /// Human-readable error description when `state` is [`TorrentState::Error`].
     ///
-    /// `None` in all other states.  The swarm loop writes this field
-    /// when transitioning into the `Error` state; it is never cleared
-    /// automatically — use [`Session::clear_error`] to reset.
+    /// `None` in all other states.  Reserved for future error propagation;
+    /// currently never populated by the swarm loop.
     pub error_message: Option<String>,
 }
 
@@ -512,6 +519,11 @@ mod serde_tests {
             total_uploaded: 512_000,
             num_pieces: 40,
             pieces_completed: 30,
+            bitfield: vec![true; 30]
+                .into_iter()
+                .chain(std::iter::repeat(false).take(10))
+                .collect(),
+            elapsed: Duration::from_secs(120),
             error_message: None,
         };
         let json = serde_json::to_string(&status).unwrap();
@@ -525,6 +537,8 @@ mod serde_tests {
         assert_eq!(v["total_downloaded"], 7_864_320);
         assert_eq!(v["num_pieces"], 40);
         assert_eq!(v["pieces_completed"], 30);
+        assert_eq!(v["bitfield"].as_array().unwrap().len(), 40);
+        assert_eq!(v["elapsed"]["secs"], 120);
     }
 
     #[test]

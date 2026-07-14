@@ -454,10 +454,10 @@ impl Session {
     ///
     /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
     pub async fn clear_error(&self, info_hash: &InfoHash) -> Result<(), Error> {
-        let status = {
+        let (status, event_tx) = {
             let torrents = self.torrents.read().unwrap();
             match torrents.get(info_hash) {
-                Some(handle) => handle.status.clone(),
+                Some(handle) => (handle.status.clone(), handle.event_tx.clone()),
                 None => return Err(Error::new(ErrorKind::InvalidInput)),
             }
         };
@@ -467,15 +467,10 @@ impl Session {
             s.error_message = None;
             s.state = TorrentState::Downloading;
             drop(s);
-            // Notify through the event channel.
-            if let Ok(torrents) = self.torrents.read() {
-                if let Some(handle) = torrents.get(info_hash) {
-                    let _ = handle.event_tx.send(TorrentEvent::StateChanged {
-                        from: TorrentState::Error,
-                        to: TorrentState::Downloading,
-                    });
-                }
-            }
+            let _ = event_tx.send(TorrentEvent::StateChanged {
+                from: TorrentState::Error,
+                to: TorrentState::Downloading,
+            });
         }
         Ok(())
     }

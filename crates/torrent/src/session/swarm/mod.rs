@@ -118,6 +118,8 @@ impl TorrentHandle {
             total_uploaded: 0,
             num_pieces: num_pieces as u32,
             pieces_completed: 0,
+            bitfield: vec![false; num_pieces],
+            elapsed: Duration::ZERO,
             error_message: None,
         }));
 
@@ -196,6 +198,7 @@ impl TorrentHandle {
         let total_size = metainfo.info.total_size();
         let pieces_completed = piece_mgr.completed_pieces().len() as u32;
         let progress = piece_mgr.progress();
+        let bitfield = piece_mgr.bitfield().to_vec();
         let is_seeding = piece_mgr.missing_pieces().is_empty();
 
         self.metainfo = Some(metainfo.clone());
@@ -211,6 +214,7 @@ impl TorrentHandle {
             status.num_pieces = num_pieces;
             status.pieces_completed = pieces_completed;
             status.progress = progress;
+            status.bitfield = bitfield;
             status.state = if is_seeding {
                 TorrentState::Seeding
             } else {
@@ -258,6 +262,7 @@ impl TorrentHandle {
             peer_mgr: self.peer_mgr.clone(),
             status: self.status.clone(),
             event_tx: self.event_tx.clone(),
+            started_at: Instant::now(),
             control_rx,
             peer_id,
             listen_port: config.listen_port,
@@ -332,6 +337,9 @@ pub(crate) struct SwarmLoop {
     pub status: Arc<RwLock<TorrentStatus>>,
     /// Broadcast sender for [`TorrentEvent`]s to external consumers.
     pub event_tx: broadcast::Sender<TorrentEvent>,
+    /// Instant when the swarm loop was spawned — used to compute
+    /// [`TorrentStatus::elapsed`] each status tick.
+    pub started_at: Instant,
     pub control_rx: mpsc::Receiver<TorrentCommand>,
     /// Our peer ID.
     pub(crate) peer_id: PeerId,
@@ -569,13 +577,24 @@ impl SwarmLoop {
         }
     }
 
-    /// Update TorrentStatus with rate, progress, peers, seeding state.
+    /// Update TorrentStatus with rate, progress, peers, seeding state, and bitfield.
     async fn update_status(&mut self) {
-        let (progress, num_peers, download_rate, upload_rate, num_pieces, pieces_completed) = {
+        let (
+            progress,
+            num_peers,
+            num_pieces,
+            pieces_completed,
+            is_complete,
+            bitfield,
+            download_rate,
+            upload_rate,
+        ) = {
             let pm = self.piece_mgr.read().await;
             let progress = pm.progress();
             let num_pieces = pm.num_pieces as u32;
             let pieces_completed = pm.completed_pieces().len() as u32;
+            let is_complete = pm.missing_pieces().is_empty();
+            let bitfield = pm.bitfield().to_vec();
             let num_peers = self.peer_mgr.read().await.num_connections();
             let download_rate = (self.total_downloaded - self.last_downloaded) as f64;
             let upload_rate = (self.total_uploaded - self.last_uploaded) as f64;
@@ -584,10 +603,12 @@ impl SwarmLoop {
             (
                 progress,
                 num_peers,
-                download_rate,
-                upload_rate,
                 num_pieces,
                 pieces_completed,
+                is_complete,
+                bitfield,
+                download_rate,
+                upload_rate,
             )
         };
 
@@ -603,11 +624,6 @@ impl SwarmLoop {
                 .count()
         };
 
-        let is_complete = {
-            let pm = self.piece_mgr.read().await;
-            pm.missing_pieces().is_empty()
-        };
-
         {
             let mut status = self.status.write().await;
             let old_state = status.state;
@@ -620,10 +636,8 @@ impl SwarmLoop {
             status.pieces_completed = pieces_completed;
             status.total_downloaded = self.total_downloaded;
             status.total_uploaded = self.total_uploaded;
-            // total_size is set once at registration — keep it unless it was 0 (magnet).
-            if status.total_size == 0 {
-                status.total_size = self.metainfo.info.total_size();
-            }
+            status.bitfield = bitfield;
+            status.elapsed = self.started_at.elapsed();
 
             if is_complete && status.state != TorrentState::Seeding {
                 tracing::info!(
