@@ -1,14 +1,14 @@
 //! Passive HTTP download worker and shared URL/probe helpers.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use sha1::{Digest, Sha1};
 use tokio::sync::{RwLock, Semaphore, mpsc};
-use url::Url;
 
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::Metainfo;
+use crate::net::Url;
 use crate::net::http::HttpClient;
 use crate::piece::PieceManager;
 use crate::storage::Storage;
@@ -55,11 +55,10 @@ impl FetchTask {
     pub fn new(
         url: Url, url_index: usize, piece_mgr: Arc<RwLock<PieceManager>>,
         storage: Arc<dyn Storage>, metainfo: Metainfo, work_rx: mpsc::Receiver<WorkItem>,
-        result_tx: mpsc::Sender<WorkResult>, semaphore: Arc<Semaphore>, timeout: Duration,
+        result_tx: mpsc::Sender<WorkResult>, semaphore: Arc<Semaphore>,
     ) -> Self {
         let piece_length = metainfo.info.piece_length;
-        let max_response = timeout.as_secs() * 1024 * 1024;
-        let http = HttpClient::with_max_response(timeout, max_response);
+        let http = HttpClient::new();
 
         FetchTask {
             url,
@@ -269,6 +268,8 @@ pub(super) fn piece_len(index: u32, metainfo: &Metainfo, piece_length: u64) -> u
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -341,7 +342,7 @@ mod tests {
 
         let (server_url, _server) = mock_http_server(data.clone()).await;
         let url = Url::parse(&server_url).unwrap();
-        let client = HttpClient::new(Duration::from_secs(5));
+        let client = HttpClient::new();
         let body = client.get_with_range(url, 0, 255).await.unwrap();
         assert_eq!(body.len(), 256);
 
@@ -355,7 +356,6 @@ mod tests {
 
         let (_work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
         let (result_tx, _result_rx) = mpsc::channel::<WorkResult>(1);
-        let timeout = Duration::from_secs(5);
 
         let task = FetchTask::new(
             url2,
@@ -366,7 +366,6 @@ mod tests {
             work_rx,
             result_tx,
             Arc::new(Semaphore::new(1)),
-            timeout,
         );
 
         let completed = task.download_range(0, 255).await.unwrap();
@@ -382,7 +381,7 @@ mod tests {
 
         let (server_url, _server) = mock_http_server(data.clone()).await;
         let url = Url::parse(&server_url).unwrap();
-        let client = HttpClient::new(Duration::from_secs(5));
+        let client = HttpClient::new();
         let body = client.get_with_range(url, 0, 383).await.unwrap();
         assert_eq!(body.len(), 384);
         assert_eq!(&body[..128], &data[0..128]);
@@ -406,7 +405,6 @@ mod tests {
             work_rx,
             result_tx,
             Arc::new(Semaphore::new(1)),
-            Duration::from_secs(5),
         );
 
         let completed = task.download_range(0, 383).await.unwrap();
@@ -442,7 +440,6 @@ mod tests {
             work_rx,
             result_tx,
             semaphore.clone(),
-            Duration::from_secs(5),
         );
 
         let handle = tokio::spawn(async move { fetcher.run().await });

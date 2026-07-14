@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Notify, RwLock, mpsc};
-use url::Url;
 
 use crate::error::ErrorKind;
 use crate::metainfo::Metainfo;
+use crate::net::Url;
 use crate::piece::PieceManager;
 
 use super::fetcher::file_path_at_byte;

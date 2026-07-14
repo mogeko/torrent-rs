@@ -420,7 +420,6 @@ impl SwarmLoop {
                     work_rx,
                     result_tx,
                     semaphore.clone(),
-                    self.webseed_config.timeout,
                 );
                 tracing::trace!("web seed: spawning fetcher for {url}");
                 fetchers.push(tokio::spawn(async move { fetcher.run().await }));

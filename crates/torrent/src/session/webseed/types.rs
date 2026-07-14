@@ -4,9 +4,9 @@
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
-use url::Url;
 
 use crate::error::ErrorKind;
+use crate::net::Url;
 
 /// Configuration for web seed downloads (BEP 19).
 #[derive(Debug, Clone)]
