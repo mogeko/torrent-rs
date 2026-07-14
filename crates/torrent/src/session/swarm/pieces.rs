@@ -237,12 +237,17 @@ impl SwarmLoop {
             }
             // Notify external consumers that this piece is ready.
             let _ = self.event_tx.send(TorrentEvent::PieceCompleted { index });
-            // Check for newly-completed files in multi-file torrents.
-            {
+            // Check for newly-completed files — only for multi-file torrents.
+            // Use a guard set to avoid re-emitting FileCompleted for files
+            // that were already reported as complete.
+            if self.completed_files.len() < self.metainfo.info.file_offsets().len() {
                 let pm = self.piece_mgr.read().await;
                 let fs = self.metainfo.info.file_status(pm.bitfield());
                 for f in &fs {
-                    if f.progress >= 1.0 && f.length > 0 {
+                    if f.progress >= 1.0
+                        && f.length > 0
+                        && self.completed_files.insert(f.path.clone())
+                    {
                         let _ = self.event_tx.send(TorrentEvent::FileCompleted {
                             path: f.path.clone(),
                         });

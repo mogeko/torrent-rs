@@ -324,6 +324,7 @@ impl TorrentHandle {
             super_seed,
             super_seed_assignments: HashMap::new(),
             super_seed_unrevealed: HashSet::new(),
+            completed_files: HashSet::new(),
             web_seeds: self.web_seeds.clone(),
             webseed_config,
             webseed_scheduler: None,
@@ -445,6 +446,9 @@ pub(crate) struct SwarmLoop {
     /// Unrevealed piece indices. These pieces have been uploaded to
     /// the assigned peer but not yet confirmed (no HAVE received).
     pub(crate) super_seed_unrevealed: HashSet<u32>,
+    /// Paths of files that already reached 100% — prevents duplicate
+    /// [`TorrentEvent::FileCompleted`] emissions.
+    pub(crate) completed_files: HashSet<Vec<String>>,
     /// Web seed URLs for this torrent (BEP 19).
     pub(crate) web_seeds: Vec<String>,
     /// Web seed configuration.
