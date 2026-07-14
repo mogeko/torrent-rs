@@ -10,7 +10,7 @@ use crate::peer::PeerMessage;
 use crate::piece::EndGame;
 
 use super::types::{ActiveDownload, BLOCK_SIZE};
-use super::{InfoHash, SwarmLoop};
+use super::{InfoHash, SwarmLoop, TorrentEvent};
 
 impl SwarmLoop {
     /// Fill request pipelines for all peers that can accept more requests.
@@ -235,6 +235,8 @@ impl SwarmLoop {
                 let mut pm = self.piece_mgr.write().await;
                 pm.set_piece(index);
             }
+            // Notify external consumers that this piece is ready.
+            let _ = self.event_tx.send(TorrentEvent::PieceCompleted { index });
             if self.piece_cache.len() >= self.piece_cache_size {
                 // LRU eviction: remove oldest (first inserted)
                 self.piece_cache.remove(0);

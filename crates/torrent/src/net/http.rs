@@ -161,11 +161,7 @@ impl HttpClient {
 
         // Build the HTTP request line and headers
         let mut request = format!(
-            "{method} {path_and_query} HTTP/1.1\r\n\
-                 Host: {host}\r\n\
-                 User-Agent: torrent-rs/0.1.0\r\n\
-                 Accept-Encoding: identity\r\n\
-                 Connection: close\r\n",
+            "{method} {path_and_query} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: torrent-rs/0.1.0\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
         );
 
         if let Some((start, end)) = range {

@@ -249,6 +249,11 @@ impl Default for SessionConfig {
 }
 
 /// Status of a torrent, exposed via the public API.
+///
+/// A snapshot of the torrent's current state.  Updated internally by
+/// the swarm loop at ~1-second intervals; consumers should poll
+/// [`Session::torrent_status`](super::Session::torrent_status) or
+/// subscribe to [`TorrentEvent`]s for state transitions.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TorrentStatus {
@@ -258,9 +263,9 @@ pub struct TorrentStatus {
     pub name: String,
     /// Download progress (0.0 to 1.0).
     pub progress: f64,
-    /// Download rate in bytes per second.
+    /// Download rate in bytes per second (instantaneous, ≈1 s window).
     pub download_rate: f64,
-    /// Upload rate in bytes per second.
+    /// Upload rate in bytes per second (instantaneous, ≈1 s window).
     pub upload_rate: f64,
     /// Number of connected peers.
     pub num_peers: usize,
@@ -268,6 +273,22 @@ pub struct TorrentStatus {
     pub num_seeds: usize,
     /// Current state of the torrent.
     pub state: TorrentState,
+    /// Total size of the torrent content in bytes.
+    pub total_size: u64,
+    /// Cumulative bytes downloaded and verified (SHA-1 passed).
+    pub total_downloaded: u64,
+    /// Cumulative bytes uploaded to peers.
+    pub total_uploaded: u64,
+    /// Total number of pieces in this torrent.
+    pub num_pieces: u32,
+    /// Number of pieces that have been downloaded and verified.
+    pub pieces_completed: u32,
+    /// Human-readable error description when `state` is [`TorrentState::Error`].
+    ///
+    /// `None` in all other states.  The swarm loop writes this field
+    /// when transitioning into the `Error` state; it is never cleared
+    /// automatically — use [`Session::clear_error`] to reset.
+    pub error_message: Option<String>,
 }
 
 /// Possible states of a torrent.
@@ -282,8 +303,60 @@ pub enum TorrentState {
     Seeding,
     /// Paused by user.
     Paused,
-    /// An error occurred.
+    /// Verifying existing files on disk (e.g. after restart).
+    Checking,
+    /// An unrecoverable error occurred — see [`TorrentStatus::error_message`].
     Error,
+}
+
+/// Discrete state-transition events emitted by a torrent's swarm loop.
+///
+/// Subscribe via [`Session::torrent_events`](super::Session::torrent_events).
+///
+/// # Event semantics
+///
+/// These events are *hints* — they notify consumers that something
+/// changed so they can react immediately rather than waiting for the
+/// next poll of [`TorrentStatus`].  The [`broadcast`] channel has a
+/// bounded buffer; slow consumers may miss events and should always
+/// use [`Session::torrent_status`](super::Session::torrent_status) as
+/// the authoritative source of truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TorrentEvent {
+    /// The torrent's lifecycle state changed.
+    StateChanged {
+        /// Previous state.
+        from: TorrentState,
+        /// New state.
+        to: TorrentState,
+    },
+    /// A single piece was downloaded and verified (SHA-1 passed).
+    PieceCompleted {
+        /// Zero-based piece index.
+        index: u32,
+    },
+    /// All pieces are complete — the torrent has finished downloading.
+    TorrentFinished,
+}
+
+/// Aggregated status across all torrents in a [`Session`](super::Session).
+///
+/// Obtain via [`Session::session_status`](super::Session::session_status).
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct SessionStatus {
+    /// Sum of all torrents' instantaneous download rates (bytes/s).
+    pub total_download_rate: f64,
+    /// Sum of all torrents' instantaneous upload rates (bytes/s).
+    pub total_upload_rate: f64,
+    /// Sum of all torrents' cumulative downloaded bytes.
+    pub total_downloaded: u64,
+    /// Sum of all torrents' cumulative uploaded bytes.
+    pub total_uploaded: u64,
+    /// Number of torrents currently managed by the session.
+    pub num_torrents: usize,
+    /// Total number of connected peers across all torrents.
+    pub num_connections: usize,
 }
 
 #[cfg(all(test, feature = "serde"))]
@@ -434,6 +507,12 @@ mod serde_tests {
             num_peers: 12,
             num_seeds: 3,
             state: TorrentState::Downloading,
+            total_size: 10_485_760,
+            total_downloaded: 7_864_320,
+            total_uploaded: 512_000,
+            num_pieces: 40,
+            pieces_completed: 30,
+            error_message: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -442,6 +521,10 @@ mod serde_tests {
         assert_eq!(v["num_peers"], 12);
         assert_eq!(v["num_seeds"], 3);
         assert_eq!(v["state"], "Downloading");
+        assert_eq!(v["total_size"], 10_485_760);
+        assert_eq!(v["total_downloaded"], 7_864_320);
+        assert_eq!(v["num_pieces"], 40);
+        assert_eq!(v["pieces_completed"], 30);
     }
 
     #[test]
@@ -451,6 +534,7 @@ mod serde_tests {
             TorrentState::Downloading,
             TorrentState::Seeding,
             TorrentState::Paused,
+            TorrentState::Checking,
             TorrentState::Error,
         ];
         for &state in &states {

@@ -20,7 +20,9 @@ mod uni_deque;
 mod upload_mgr;
 mod webseed;
 
-pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
+pub use self::config::{
+    InfoHash, SessionConfig, SessionStatus, TorrentEvent, TorrentState, TorrentStatus,
+};
 pub use self::download::DownloadBuilder;
 pub use self::seed::{DataSource, PreparedTorrent, SeedBuilder};
 
@@ -30,6 +32,7 @@ use std::str::FromStr as _;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::dht::{DhtNode, generate_node_id};
@@ -415,6 +418,104 @@ impl Session {
         }
 
         Ok(())
+    }
+
+    /// Subscribe to a live event stream for a torrent.
+    ///
+    /// Returns a [`broadcast::Receiver`] that yields [`TorrentEvent`]s
+    /// as they occur — piece completions, state transitions, and
+    /// torrent completion.
+    ///
+    /// The broadcast channel has a bounded buffer (64 events); slow
+    /// consumers may miss events.  Always use
+    /// [`torrent_status`](Self::torrent_status) as the authoritative
+    /// source of truth.  This stream is best-effort notification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    pub fn torrent_events(
+        &self, info_hash: &InfoHash,
+    ) -> Result<broadcast::Receiver<TorrentEvent>, Error> {
+        let torrents = self.torrents.read().unwrap();
+        match torrents.get(info_hash) {
+            Some(handle) => Ok(handle.event_tx.subscribe()),
+            None => Err(Error::new(ErrorKind::InvalidInput)),
+        }
+    }
+
+    /// Clear the error state of a torrent, transitioning it back to
+    /// [`TorrentState::Downloading`] (or [`TorrentState::Seeding`] if
+    /// all pieces are complete).
+    ///
+    /// No-op if the torrent is not in [`TorrentState::Error`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    pub async fn clear_error(&self, info_hash: &InfoHash) -> Result<(), Error> {
+        let status = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(handle) => handle.status.clone(),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+
+        let mut s = status.write().await;
+        if s.state == TorrentState::Error {
+            s.error_message = None;
+            s.state = TorrentState::Downloading;
+            drop(s);
+            // Notify through the event channel.
+            if let Ok(torrents) = self.torrents.read() {
+                if let Some(handle) = torrents.get(info_hash) {
+                    let _ = handle.event_tx.send(TorrentEvent::StateChanged {
+                        from: TorrentState::Error,
+                        to: TorrentState::Downloading,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get aggregated status across all active torrents.
+    ///
+    /// Computes sums of download/upload rates and bytes, plus
+    /// torrent and connection counts.
+    pub async fn session_status(&self) -> SessionStatus {
+        // Collect status Arcs first, then await them without holding the
+        // torrents read lock.
+        let statuses: Vec<_> = {
+            let torrents = self.torrents.read().unwrap();
+            torrents.values().map(|h| h.status.clone()).collect()
+        };
+
+        let num_torrents = statuses.len();
+        let mut total_download_rate = 0.0_f64;
+        let mut total_upload_rate = 0.0_f64;
+        let mut total_downloaded = 0_u64;
+        let mut total_uploaded = 0_u64;
+        let mut num_connections = 0_usize;
+
+        for status in &statuses {
+            let s = status.read().await;
+            total_download_rate += s.download_rate;
+            total_upload_rate += s.upload_rate;
+            total_downloaded += s.total_downloaded;
+            total_uploaded += s.total_uploaded;
+            num_connections += s.num_peers;
+        }
+
+        SessionStatus {
+            total_download_rate,
+            total_upload_rate,
+            total_downloaded,
+            total_uploaded,
+            num_torrents,
+            num_connections,
+        }
     }
 
     /// Get the status of a torrent.

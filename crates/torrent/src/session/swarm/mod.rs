@@ -12,7 +12,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
+use tokio::sync::{Notify, RwLock, Semaphore, broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use url::Url;
 
@@ -34,7 +34,7 @@ use super::webseed::{
     FetchTask, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WebSeedScheduler,
     WorkItem, WorkResult, deduplicate_urls,
 };
-use super::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
+use super::{InfoHash, SessionConfig, TorrentEvent, TorrentState, TorrentStatus};
 
 use self::types::{UT_PEX, UT_PEX_ID};
 
@@ -54,6 +54,9 @@ pub(crate) struct TorrentHandle {
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
+    /// Broadcast sender for [`TorrentEvent`]s — each receiver gets
+    /// its own copy via [`broadcast::Sender::subscribe`].
+    pub event_tx: broadcast::Sender<TorrentEvent>,
     /// Web seed URLs collected from the torrent spec (BEP 19).
     pub(crate) web_seeds: Vec<String>,
     /// Set by [`activate`](TorrentHandle::activate).
@@ -73,19 +76,20 @@ impl TorrentHandle {
     pub(crate) fn register(spec: TorrentSpec, config: &SessionConfig) -> Self {
         let web_seeds: Vec<String> = spec.web_seeds().into_iter().map(|s| s.to_owned()).collect();
 
-        let (metainfo, info_hash, name, num_pieces) = match spec {
+        let (metainfo, info_hash, name, num_pieces, total_size) = match spec {
             TorrentSpec::Metainfo(meta) => {
                 let ih = meta.info_hash();
                 let num = meta.info.num_pieces();
                 let name = match &meta.info.mode {
                     Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
                 };
-                (Some(meta), ih, name, num)
+                let ts = meta.info.total_size();
+                (Some(meta), ih, name, num, ts)
             }
             TorrentSpec::Magnet(uri) => {
                 let ih = *uri.primary_info_hash();
                 let name = uri.display_name.unwrap_or_else(|| hex_encode(ih));
-                (None, ih, name, 0)
+                (None, ih, name, 0, 0)
             }
         };
 
@@ -109,7 +113,15 @@ impl TorrentHandle {
             num_peers: 0,
             num_seeds: 0,
             state: TorrentState::Registered,
+            total_size,
+            total_downloaded: 0,
+            total_uploaded: 0,
+            num_pieces: num_pieces as u32,
+            pieces_completed: 0,
+            error_message: None,
         }));
+
+        let (event_tx, _) = broadcast::channel(64);
 
         TorrentHandle {
             info_hash,
@@ -117,6 +129,7 @@ impl TorrentHandle {
             peer_mgr,
             piece_mgr,
             status,
+            event_tx,
             web_seeds,
             storage: None,
             control_tx: None,
@@ -136,6 +149,19 @@ impl TorrentHandle {
         let name = match &metainfo.info.mode {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
         };
+
+        let total_size = metainfo.info.total_size();
+        let num_pieces = metainfo.info.num_pieces() as u32;
+
+        // Update the status snapshot now that metadata is available.
+        {
+            let mut status = self
+                .status
+                .try_write()
+                .expect("status lock should be uncontended at activation");
+            status.total_size = total_size;
+            status.num_pieces = num_pieces;
+        }
 
         tracing::info!(
             "torrent activated: {} ({} pieces)",
@@ -166,8 +192,31 @@ impl TorrentHandle {
             "metainfo info_hash mismatch"
         );
 
+        let num_pieces = metainfo.info.num_pieces() as u32;
+        let total_size = metainfo.info.total_size();
+        let pieces_completed = piece_mgr.completed_pieces().len() as u32;
+        let progress = piece_mgr.progress();
+        let is_seeding = piece_mgr.missing_pieces().is_empty();
+
         self.metainfo = Some(metainfo.clone());
         self.piece_mgr = Arc::new(RwLock::new(piece_mgr));
+
+        // Update the status snapshot with verified seed state.
+        {
+            let mut status = self
+                .status
+                .try_write()
+                .expect("status lock should be uncontended at registration");
+            status.total_size = total_size;
+            status.num_pieces = num_pieces;
+            status.pieces_completed = pieces_completed;
+            status.progress = progress;
+            status.state = if is_seeding {
+                TorrentState::Seeding
+            } else {
+                TorrentState::Downloading
+            };
+        }
 
         tracing::info!(
             "torrent activated for seeding: {} ({} pieces)",
@@ -208,6 +257,7 @@ impl TorrentHandle {
             piece_mgr: self.piece_mgr.clone(),
             peer_mgr: self.peer_mgr.clone(),
             status: self.status.clone(),
+            event_tx: self.event_tx.clone(),
             control_rx,
             peer_id,
             listen_port: config.listen_port,
@@ -280,6 +330,8 @@ pub(crate) struct SwarmLoop {
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
+    /// Broadcast sender for [`TorrentEvent`]s to external consumers.
+    pub event_tx: broadcast::Sender<TorrentEvent>,
     pub control_rx: mpsc::Receiver<TorrentCommand>,
     /// Our peer ID.
     pub(crate) peer_id: PeerId,
@@ -519,15 +571,24 @@ impl SwarmLoop {
 
     /// Update TorrentStatus with rate, progress, peers, seeding state.
     async fn update_status(&mut self) {
-        let (progress, num_peers, download_rate, upload_rate) = {
+        let (progress, num_peers, download_rate, upload_rate, num_pieces, pieces_completed) = {
             let pm = self.piece_mgr.read().await;
             let progress = pm.progress();
+            let num_pieces = pm.num_pieces as u32;
+            let pieces_completed = pm.completed_pieces().len() as u32;
             let num_peers = self.peer_mgr.read().await.num_connections();
             let download_rate = (self.total_downloaded - self.last_downloaded) as f64;
             let upload_rate = (self.total_uploaded - self.last_uploaded) as f64;
             self.last_downloaded = self.total_downloaded;
             self.last_uploaded = self.total_uploaded;
-            (progress, num_peers, download_rate, upload_rate)
+            (
+                progress,
+                num_peers,
+                download_rate,
+                upload_rate,
+                num_pieces,
+                pieces_completed,
+            )
         };
 
         let num_seeds = {
@@ -549,17 +610,37 @@ impl SwarmLoop {
 
         {
             let mut status = self.status.write().await;
+            let old_state = status.state;
             status.progress = progress;
             status.num_peers = num_peers;
             status.num_seeds = num_seeds;
             status.download_rate = download_rate;
             status.upload_rate = upload_rate;
+            status.num_pieces = num_pieces;
+            status.pieces_completed = pieces_completed;
+            status.total_downloaded = self.total_downloaded;
+            status.total_uploaded = self.total_uploaded;
+            // total_size is set once at registration — keep it unless it was 0 (magnet).
+            if status.total_size == 0 {
+                status.total_size = self.metainfo.info.total_size();
+            }
+
             if is_complete && status.state != TorrentState::Seeding {
                 tracing::info!(
                     "download complete, transitioning to seeding ({} pieces)",
                     self.metainfo.info.num_pieces(),
                 );
                 status.state = TorrentState::Seeding;
+            }
+
+            if status.state != old_state {
+                let _ = self.event_tx.send(TorrentEvent::StateChanged {
+                    from: old_state,
+                    to: status.state,
+                });
+                if status.state == TorrentState::Seeding {
+                    let _ = self.event_tx.send(TorrentEvent::TorrentFinished);
+                }
             }
         }
 
