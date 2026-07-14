@@ -21,7 +21,8 @@ mod upload_mgr;
 mod webseed;
 
 pub use self::config::{
-    InfoHash, SessionConfig, SessionStatus, TorrentEvent, TorrentState, TorrentStatus,
+    InfoHash, PeerStatus, SessionConfig, SessionStatus, TorrentEvent, TorrentState, TorrentStatus,
+    TrackerStatus,
 };
 pub use self::download::DownloadBuilder;
 pub use self::seed::{DataSource, PreparedTorrent, SeedBuilder};
@@ -38,7 +39,7 @@ use tokio::task::JoinHandle;
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
-use crate::metainfo::{Metainfo, Mode};
+use crate::metainfo::{FileStatus, Metainfo, Mode};
 use crate::piece::PieceManager;
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
@@ -446,7 +447,7 @@ impl Session {
 
     /// Clear the error state of a torrent, transitioning it back to
     /// [`TorrentState::Downloading`] (or [`TorrentState::Seeding`] if
-    /// all pieces are complete).
+    /// all pieces are already complete).
     ///
     /// No-op if the torrent is not in [`TorrentState::Error`].
     ///
@@ -465,6 +466,8 @@ impl Session {
         let mut s = status.write().await;
         if s.state == TorrentState::Error {
             s.error_message = None;
+            // Transition to Downloading — the next status tick will promote
+            // to Seeding if all pieces are complete.
             s.state = TorrentState::Downloading;
             drop(s);
             let _ = event_tx.send(TorrentEvent::StateChanged {
@@ -531,6 +534,72 @@ impl Session {
         };
 
         Ok(status.read().await.clone())
+    }
+
+    /// Get per-file download progress for a torrent.
+    ///
+    /// For single-file torrents, returns a single-element `Vec`.
+    /// For multi-file torrents, computes each file's progress by
+    /// intersecting completed piece byte ranges with file boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found,
+    /// or if metadata has not yet been resolved (magnet link without
+    /// downloaded metadata).
+    pub async fn file_status(&self, info_hash: &InfoHash) -> Result<Vec<FileStatus>, Error> {
+        let (piece_mgr, metainfo) = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(handle) => (handle.piece_mgr.clone(), handle.metainfo.clone()),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+
+        let metainfo = metainfo.ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
+        let pm = piece_mgr.read().await;
+        Ok(metainfo.info.file_status(pm.bitfield()))
+    }
+
+    /// Get per-peer status snapshots for all connected peers.
+    ///
+    /// Updated every status tick (~1 s).  Returns an empty `Vec` if
+    /// no peers are connected or the torrent has not been activated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    pub fn peer_status(&self, info_hash: &InfoHash) -> Result<Vec<PeerStatus>, Error> {
+        let peer_statuses = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(handle) => handle.peer_statuses.clone(),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+        Ok(peer_statuses
+            .try_read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default())
+    }
+
+    /// Get the tracker communication status for a torrent.
+    ///
+    /// Updated after each tracker announce (success or failure).
+    /// Before the first announce, most fields are at their defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    pub async fn tracker_status(&self, info_hash: &InfoHash) -> Result<TrackerStatus, Error> {
+        let ts = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(handle) => handle.tracker_status.clone(),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+        Ok(ts.read().await.clone())
     }
 
     /// List all active info_hashes.

@@ -34,7 +34,9 @@ use super::webseed::{
     FetchTask, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WebSeedScheduler,
     WorkItem, WorkResult, deduplicate_urls,
 };
-use super::{InfoHash, SessionConfig, TorrentEvent, TorrentState, TorrentStatus};
+use super::{
+    InfoHash, PeerStatus, SessionConfig, TorrentEvent, TorrentState, TorrentStatus, TrackerStatus,
+};
 
 use self::types::{UT_PEX, UT_PEX_ID};
 
@@ -57,6 +59,10 @@ pub(crate) struct TorrentHandle {
     /// Broadcast sender for [`TorrentEvent`]s — each receiver gets
     /// its own copy via [`broadcast::Sender::subscribe`].
     pub event_tx: broadcast::Sender<TorrentEvent>,
+    /// Per-peer status snapshots, updated each status tick.
+    pub peer_statuses: Arc<RwLock<Vec<PeerStatus>>>,
+    /// Tracker communication status, updated after each announce.
+    pub tracker_status: Arc<RwLock<TrackerStatus>>,
     /// Web seed URLs collected from the torrent spec (BEP 19).
     pub(crate) web_seeds: Vec<String>,
     /// Set by [`activate`](TorrentHandle::activate).
@@ -124,6 +130,19 @@ impl TorrentHandle {
         }));
 
         let (event_tx, _) = broadcast::channel(64);
+        let peer_statuses = Arc::new(RwLock::new(Vec::new()));
+        let tracker_url = metainfo
+            .as_ref()
+            .map(|m| m.announce.clone())
+            .unwrap_or_default();
+        let tracker_status = Arc::new(RwLock::new(TrackerStatus {
+            url: tracker_url,
+            next_announce_in: None,
+            announce_interval: Duration::ZERO,
+            seeds_reported: 0,
+            leechers_reported: 0,
+            last_error: None,
+        }));
 
         TorrentHandle {
             info_hash,
@@ -132,6 +151,8 @@ impl TorrentHandle {
             piece_mgr,
             status,
             event_tx,
+            peer_statuses,
+            tracker_status,
             web_seeds,
             storage: None,
             control_tx: None,
@@ -262,6 +283,8 @@ impl TorrentHandle {
             peer_mgr: self.peer_mgr.clone(),
             status: self.status.clone(),
             event_tx: self.event_tx.clone(),
+            peer_statuses: self.peer_statuses.clone(),
+            tracker_status: self.tracker_status.clone(),
             started_at: Instant::now(),
             control_rx,
             peer_id,
@@ -337,6 +360,10 @@ pub(crate) struct SwarmLoop {
     pub status: Arc<RwLock<TorrentStatus>>,
     /// Broadcast sender for [`TorrentEvent`]s to external consumers.
     pub event_tx: broadcast::Sender<TorrentEvent>,
+    /// Per-peer status snapshots shared with [`TorrentHandle`].
+    pub peer_statuses: Arc<RwLock<Vec<PeerStatus>>>,
+    /// Tracker communication status shared with [`TorrentHandle`].
+    pub tracker_status: Arc<RwLock<TrackerStatus>>,
     /// Instant when the swarm loop was spawned — used to compute
     /// [`TorrentStatus::elapsed`] each status tick.
     pub started_at: Instant,
@@ -655,6 +682,29 @@ impl SwarmLoop {
                 if status.state == TorrentState::Seeding {
                     let _ = self.event_tx.send(TorrentEvent::TorrentFinished);
                 }
+            }
+        }
+
+        // Populate per-peer status snapshots.
+        {
+            let mut pss = self.peer_statuses.write().await;
+            pss.clear();
+            let total_pieces = self.metainfo.info.num_pieces();
+            for (addr, pi) in &self.peers {
+                let progress = if pi.bitfield.len() >= total_pieces && total_pieces > 0 {
+                    pi.bitfield.iter().filter(|&&b| b).count() as f64 / total_pieces as f64
+                } else {
+                    0.0
+                };
+                pss.push(PeerStatus {
+                    addr: *addr,
+                    client_name: pi.client_version.clone(),
+                    progress,
+                    download_rate: pi.downloaded_this_round as f64,
+                    upload_rate: pi.uploaded_this_round as f64,
+                    am_choked: pi.am_choked,
+                    peer_interested: pi.peer_interested,
+                });
             }
         }
 

@@ -8,7 +8,7 @@
 //! - [`TorrentState`] — lifecycle state of a torrent
 //! - [`InfoHash`] — SHA-1 identifier for a torrent
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use crate::dht::BootstrapNode;
@@ -329,6 +329,7 @@ pub enum TorrentState {
 /// use [`Session::torrent_status`](super::Session::torrent_status) as
 /// the authoritative source of truth.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TorrentEvent {
     /// The torrent's lifecycle state changed.
     StateChanged {
@@ -364,6 +365,47 @@ pub struct SessionStatus {
     pub num_torrents: usize,
     /// Total number of connected peers across all torrents.
     pub num_connections: usize,
+}
+
+/// Tracker communication status for a torrent.
+///
+/// Updated after each successful or failed tracker announce.
+/// Before the first announce, most fields are at their defaults.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TrackerStatus {
+    /// URL of the currently active tracker.
+    pub url: String,
+    /// Time remaining until the next scheduled announce, if known.
+    pub next_announce_in: Option<Duration>,
+    /// The announce interval requested by the tracker (seconds).
+    pub announce_interval: Duration,
+    /// Number of seeders reported in the last announce response.
+    pub seeds_reported: u32,
+    /// Number of leechers reported in the last announce response.
+    pub leechers_reported: u32,
+    /// Error message from the last failed announce, if any.
+    pub last_error: Option<String>,
+}
+
+/// Per-peer status snapshot.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct PeerStatus {
+    /// IP address and port of the peer.
+    pub addr: SocketAddr,
+    /// Client name and version from the peer's LTEP handshake (BEP 10 `v`).
+    pub client_name: Option<String>,
+    /// The peer's download progress (0.0 to 1.0), derived from its bitfield.
+    pub progress: f64,
+    /// Download rate from this peer in bytes/s (current ≈1 s window).
+    pub download_rate: f64,
+    /// Upload rate to this peer in bytes/s (current ≈1 s window).
+    pub upload_rate: f64,
+    /// Whether we are choked by this peer.
+    pub am_choked: bool,
+    /// Whether the peer is interested in downloading from us.
+    pub peer_interested: bool,
 }
 
 #[cfg(all(test, feature = "serde"))]

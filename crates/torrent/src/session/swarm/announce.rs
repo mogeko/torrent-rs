@@ -67,6 +67,15 @@ impl SwarmLoop {
                 let interval = resp.min_interval.unwrap_or(resp.interval);
                 self.next_announce = Some(Instant::now() + Duration::from_secs(interval as u64));
 
+                {
+                    let mut ts = self.tracker_status.write().await;
+                    ts.announce_interval = Duration::from_secs(interval as u64);
+                    ts.next_announce_in = Some(Duration::from_secs(interval as u64));
+                    ts.seeds_reported = resp.complete;
+                    ts.leechers_reported = resp.incomplete;
+                    ts.last_error = None;
+                }
+
                 if !resp.peers.is_empty() {
                     let mut pm = self.peer_mgr.write().await;
                     pm.add_peers(resp.peers);
@@ -76,6 +85,11 @@ impl SwarmLoop {
             }
             Err(e) => {
                 self.next_announce = Some(Instant::now() + self.announce_fallback_interval);
+                {
+                    let mut ts = self.tracker_status.write().await;
+                    ts.next_announce_in = Some(self.announce_fallback_interval);
+                    ts.last_error = Some(e.to_string());
+                }
                 tracing::warn!("failed to announce to tracker: {}", e);
                 Err(e)
             }

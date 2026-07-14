@@ -11,6 +11,7 @@
 //! - [`Info`] — the `info` dictionary with piece hashes and file layout
 //! - [`Mode`] — single-file vs multi-file layout
 //! - [`FileInfo`] — per-file metadata in multi-file mode
+//! - [`FileStatus`] — per-file download progress
 //! - [`from_bytes`] — parse raw bencoded `.torrent` data
 //!
 //! # Examples
@@ -304,6 +305,72 @@ impl Info {
             }
         }
     }
+
+    /// Compute per-file download progress from a piece bitfield.
+    ///
+    /// `bitfield[i]` is `true` if piece `i` has been downloaded and
+    /// verified (SHA-1 passed).  The method intersects each completed
+    /// piece's byte range with every file's byte range to compute how
+    /// many bytes of each file have been downloaded.
+    ///
+    /// For single-file torrents, returns a single-element `Vec`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bitfield.len() != self.num_pieces()`.
+    pub fn file_status(&self, bitfield: &[bool]) -> Vec<FileStatus> {
+        assert_eq!(
+            bitfield.len(),
+            self.num_pieces(),
+            "bitfield length must match num_pieces"
+        );
+
+        let offsets = self.file_offsets();
+        let total = self.total_size();
+        let piece_len = self.piece_length;
+
+        let mut downloaded: Vec<u64> = vec![0u64; offsets.len()];
+
+        for (i, &have) in bitfield.iter().enumerate() {
+            if !have {
+                continue;
+            }
+            let piece_start = i as u64 * piece_len;
+            let piece_end = total.min(piece_start + piece_len);
+            if piece_start >= piece_end {
+                break; // past the last byte
+            }
+            for (fi, fo) in offsets.iter().enumerate() {
+                let file_end = fo.offset + fo.length;
+                let overlap_start = piece_start.max(fo.offset);
+                let overlap_end = piece_end.min(file_end);
+                if overlap_start < overlap_end {
+                    downloaded[fi] += overlap_end - overlap_start;
+                }
+                if piece_end <= file_end {
+                    break; // remaining files start after this piece
+                }
+            }
+        }
+
+        offsets
+            .into_iter()
+            .zip(downloaded)
+            .map(|(fo, dl)| {
+                let progress = if fo.length > 0 {
+                    dl as f64 / fo.length as f64
+                } else {
+                    1.0
+                };
+                FileStatus {
+                    path: fo.path,
+                    length: fo.length,
+                    downloaded: dl,
+                    progress,
+                }
+            })
+            .collect()
+    }
 }
 
 /// A file's position and identity within a torrent's byte stream.
@@ -320,6 +387,25 @@ pub struct FileOffset {
     pub length: u64,
     /// Path components (e.g. `["dir", "file.txt"]`).
     pub path: Vec<String>,
+}
+
+/// Per-file download progress in a torrent.
+///
+/// Computed from the piece bitfield by intersecting completed piece
+/// byte ranges with each file's byte range.  For single-file torrents
+/// (where there is only one entry), `progress` equals the overall
+/// torrent progress.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct FileStatus {
+    /// Path components of the file (e.g. `["dir", "file.txt"]`).
+    pub path: Vec<String>,
+    /// Total length of the file in bytes.
+    pub length: u64,
+    /// Number of bytes downloaded and SHA-1 verified.
+    pub downloaded: u64,
+    /// Download progress of this file (0.0 to 1.0).
+    pub progress: f64,
 }
 
 /// Try to parse [`Metainfo`] from raw bencoded bytes (BEP 3).
