@@ -10,8 +10,6 @@
 //! - Response size capping (anti-DoS)
 //! - Redirect resolution helper
 
-use std::time::Duration;
-
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpSocket, lookup_host};
@@ -24,9 +22,6 @@ use super::{IntoUrl, Url};
 
 /// Maximum number of redirects to follow before giving up.
 pub(crate) const MAX_REDIRECTS: u32 = 5;
-
-/// Maximum response size to guard against malicious or buggy servers (256 KB).
-pub(crate) const MAX_RESPONSE_SIZE: u64 = 256 * 1024;
 
 // ── Internal stream trait ──────────────────────────────────────────
 
@@ -42,34 +37,37 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> HttpStream for T {}
 /// basic GET and ranged GET for partial content downloads (BEP 19 web
 /// seed).
 pub(crate) struct HttpClient {
-    /// Per-request timeout (connect + send + receive).
-    timeout: Duration,
-    /// Maximum response size to read (anti-DoS).
-    max_response: u64,
+    /// Maximum response size to read (`None` = no cap, reads until EOF).
+    max_response: Option<u64>,
 }
 
 impl HttpClient {
-    /// Create a new HTTP client with the given timeout and default
-    /// response cap ([`MAX_RESPONSE_SIZE`], 256 KB).
-    pub fn new(timeout: Duration) -> Self {
-        HttpClient::with_max_response(timeout, MAX_RESPONSE_SIZE)
+    /// Create a new HTTP client with no response size cap.
+    ///
+    /// Use [`with_max_response`](Self::with_max_response) to set a cap.
+    pub fn new() -> Self {
+        HttpClient { max_response: None }
     }
 
-    /// Create a client with a custom response size cap.
-    pub fn with_max_response(timeout: Duration, max_response: u64) -> Self {
+    /// Create a new HTTP client with a response size cap.
+    ///
+    /// Responses larger than `max_response` bytes are silently
+    /// truncated.  Used by web seed download (BEP 19) to prevent
+    /// unbounded reads from large files.
+    pub fn with_max_response(max_response: u64) -> Self {
         HttpClient {
-            timeout,
-            max_response,
+            max_response: Some(max_response),
         }
     }
 
     /// HTTP GET request without a `Range` header.
     ///
     /// The `path_and_query` for the request line is derived from `url`
-    /// (path + optional query string). Returns the full response body
-    /// (capped at [`MAX_RESPONSE_SIZE`]).
+    /// (path + optional query string). Returns the full response body.
     ///
-    /// Used by the HTTP tracker for announces.
+    /// Used by the HTTP tracker for announces.  Callers are expected
+    /// to wrap this with [`tokio::time::timeout`] if they need a
+    /// deadline.
     pub async fn get(&self, url: impl IntoUrl) -> Result<Vec<u8>, Error> {
         let url = url.into_url()?;
         let tls = if url.scheme() == "https" {
@@ -87,6 +85,8 @@ impl HttpClient {
     /// are stripped).
     ///
     /// Used by web seed download (BEP 19) to fetch partial file content.
+    /// Callers are expected to wrap this with [`tokio::time::timeout`]
+    /// if they need a deadline.
     pub async fn get_with_range(
         &self, url: impl IntoUrl, range_start: u64, range_end: u64,
     ) -> Result<Vec<u8>, Error> {
@@ -117,84 +117,79 @@ impl HttpClient {
         let method = method.to_owned();
         let tls = tls.clone();
         let path_and_query = path_and_query_from_url(url);
-        let timeout = self.timeout;
 
-        let response = tokio::time::timeout(timeout, async move {
-            let addrs = match lookup_host((&*host, port)).await {
-                Ok(a) => a,
+        let addrs = match lookup_host((&*host, port)).await {
+            Ok(a) => a,
+            Err(e) => return Err(Error::io(e)),
+        };
+
+        // Try each resolved address until one connects.
+        let (mut tcp_stream, mut last_err) = (None, None);
+        for addr in addrs {
+            let socket = if addr.is_ipv4() {
+                TcpSocket::new_v4()
+            } else {
+                TcpSocket::new_v6()
+            }
+            .map_err(Error::io)?;
+
+            socket.set_nodelay(true).map_err(Error::io)?;
+
+            match socket.connect(addr).await {
+                Ok(s) => {
+                    tcp_stream = Some(s);
+                    break;
+                }
+                Err(e) => last_err = Some(Error::io(e)),
+            }
+        }
+
+        let Some(tcp_stream) = tcp_stream else {
+            return Err(last_err.unwrap_or(Error::new(ErrorKind::Io)));
+        };
+
+        let mut stream: Box<dyn HttpStream> = if let Some(ref connector) = tls {
+            let domain = ServerName::try_from(host.clone()).map_err(Error::invalid_input)?;
+            let tls_stream = match connector.connect(domain, tcp_stream).await {
+                Ok(ts) => ts,
                 Err(e) => return Err(Error::io(e)),
             };
+            Box::new(tls_stream)
+        } else {
+            Box::new(tcp_stream)
+        };
 
-            // Try each resolved address until one connects.
-            let (mut tcp_stream, mut last_err) = (None, None);
-            for addr in addrs {
-                let socket = if addr.is_ipv4() {
-                    TcpSocket::new_v4()
-                } else {
-                    TcpSocket::new_v6()
-                }
-                .map_err(Error::io)?;
-
-                socket.set_nodelay(true).map_err(Error::io)?;
-
-                match socket.connect(addr).await {
-                    Ok(s) => {
-                        tcp_stream = Some(s);
-                        break;
-                    }
-                    Err(e) => last_err = Some(Error::io(e)),
-                }
-            }
-
-            let Some(tcp_stream) = tcp_stream else {
-                return Err(last_err.unwrap_or(Error::new(ErrorKind::Io)));
-            };
-
-            let mut stream: Box<dyn HttpStream> = if let Some(ref connector) = tls {
-                let domain = ServerName::try_from(host.clone()).map_err(Error::invalid_input)?;
-                let tls_stream = match connector.connect(domain, tcp_stream).await {
-                    Ok(ts) => ts,
-                    Err(e) => return Err(Error::io(e)),
-                };
-                Box::new(tls_stream)
-            } else {
-                Box::new(tcp_stream)
-            };
-
-            // Build the HTTP request line and headers
-            let mut request = format!(
-                "{method} {path_and_query} HTTP/1.1\r\n\
+        // Build the HTTP request line and headers
+        let mut request = format!(
+            "{method} {path_and_query} HTTP/1.1\r\n\
                  Host: {host}\r\n\
                  User-Agent: torrent-rs/0.1.0\r\n\
                  Accept-Encoding: identity\r\n\
                  Connection: close\r\n",
-            );
+        );
 
-            if let Some((start, end)) = range {
-                request.push_str(&format!("Range: bytes={start}-{end}\r\n"));
-            }
-
-            request.push_str("\r\n");
-
-            if let Err(e) = stream.write_all(request.as_bytes()).await {
-                return Err(Error::io(e));
-            }
-
-            let mut buf = Vec::new();
-            let mut limited = AsyncReadExt::take(&mut stream, self.max_response);
-
-            if let Err(e) = limited.read_to_end(&mut buf).await {
-                return Err(Error::io(e));
-            }
-
-            Ok(buf)
-        });
-
-        match response.await {
-            Ok(Ok(buf)) => Ok(buf),
-            Ok(Err(e)) => Err(e),
-            Err(elapsed) => Err(Error::io(elapsed)),
+        if let Some((start, end)) = range {
+            request.push_str(&format!("Range: bytes={start}-{end}\r\n"));
         }
+
+        request.push_str("\r\n");
+
+        if let Err(e) = stream.write_all(request.as_bytes()).await {
+            return Err(Error::io(e));
+        }
+
+        let mut buf = Vec::new();
+        match self.max_response {
+            Some(cap) => {
+                let mut limited = AsyncReadExt::take(&mut stream, cap);
+                limited.read_to_end(&mut buf).await.map_err(Error::io)?;
+            }
+            None => {
+                stream.read_to_end(&mut buf).await.map_err(Error::io)?;
+            }
+        }
+
+        Ok(buf)
     }
 
     /// Split HTTP response into body bytes (strips headers at `\r\n\r\n`).

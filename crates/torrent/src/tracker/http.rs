@@ -12,6 +12,9 @@ use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse, IntoUrl, Url};
 /// Timeout for HTTP tracker connect + request + response read.
 use super::DEFAULT_TIMEOUT;
 
+/// Maximum response size to guard against malicious or buggy servers (256 KB).
+pub(crate) const MAX_RESPONSE_SIZE: u64 = 256 * 1024;
+
 /// HTTP tracker client (BEP 3, BEP 23).
 ///
 /// Supports both `http://` (plain TCP) and `https://` (TLS via `tokio-rustls`).
@@ -93,13 +96,16 @@ impl HttpTracker {
         let mut current_url = self.url.clone();
         let mut tls = self.tls.clone();
         let mut redirects_remaining = MAX_REDIRECTS;
-        let client = HttpClient::new(self.timeout);
+        let client = HttpClient::with_max_response(MAX_RESPONSE_SIZE);
 
         loop {
             let mut announce_url = current_url.clone();
+
             announce_url.set_query(Some(&build_query_string(req)));
 
-            let buf = client.get(announce_url).await?;
+            let buf = tokio::time::timeout(self.timeout, client.get(announce_url))
+                .await
+                .map_err(Error::io)??;
 
             // Parse HTTP response: find "\r\n\r\n" separator
             let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
