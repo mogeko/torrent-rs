@@ -237,6 +237,18 @@ impl SwarmLoop {
             }
             // Notify external consumers that this piece is ready.
             let _ = self.event_tx.send(TorrentEvent::PieceCompleted { index });
+            // Check for newly-completed files in multi-file torrents.
+            {
+                let pm = self.piece_mgr.read().await;
+                let fs = self.metainfo.info.file_status(pm.bitfield());
+                for f in &fs {
+                    if f.progress >= 1.0 && f.length > 0 {
+                        let _ = self.event_tx.send(TorrentEvent::FileCompleted {
+                            path: f.path.clone(),
+                        });
+                    }
+                }
+            }
             if self.piece_cache.len() >= self.piece_cache_size {
                 // LRU eviction: remove oldest (first inserted)
                 self.piece_cache.remove(0);
@@ -249,6 +261,7 @@ impl SwarmLoop {
             // Since SHA-1 is per-piece, we can't identify which specific
             // block(s) failed. Each contributing peer gets one strike.
             // Ban threshold is 10 to tolerate false positives in EndGame.
+            self.total_wasted += self.piece_len_for_index(index);
             let mut penalized: HashSet<SocketAddr> = HashSet::new();
             if let Some(dl) = self.active_downloads.get(&index) {
                 for addr in dl.requested.iter().flatten() {
@@ -278,6 +291,7 @@ impl SwarmLoop {
             }
 
             self.active_downloads.remove(&index);
+            let _ = self.event_tx.send(TorrentEvent::PieceFailed { index });
             Ok(false)
         }
     }

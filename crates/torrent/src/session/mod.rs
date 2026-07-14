@@ -82,7 +82,6 @@ pub struct Session {
     /// Active torrents, keyed by info_hash.
     torrents: Arc<RwLock<HashMap<InfoHash, TorrentHandle>>>,
     /// Shared dual-stack DHT node (if DHT is enabled).
-    #[expect(dead_code)]
     dht_node: Option<Arc<DhtNode>>,
     /// LSD background task handle (keeps the task alive).
     #[expect(dead_code)]
@@ -513,6 +512,10 @@ impl Session {
             total_uploaded,
             num_torrents,
             num_connections,
+            dht_nodes: match &self.dht_node {
+                Some(n) => n.num_nodes().await,
+                None => 0,
+            },
         }
     }
 

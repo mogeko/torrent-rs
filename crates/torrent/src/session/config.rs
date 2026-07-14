@@ -296,6 +296,13 @@ pub struct TorrentStatus {
     /// `None` in all other states.  Reserved for future error propagation;
     /// currently never populated by the swarm loop.
     pub error_message: Option<String>,
+    /// Cumulative bytes received that failed SHA-1 verification (corrupt data)
+    /// or were duplicate.  Includes both P2P and web seed sources.
+    pub total_wasted: u64,
+    /// Whether super seeding mode (BEP 16) is active for this torrent.
+    pub super_seed_active: bool,
+    /// Number of pieces not yet revealed to the swarm in super seeding mode.
+    pub super_seed_remaining: u32,
 }
 
 /// Possible states of a torrent.
@@ -343,8 +350,40 @@ pub enum TorrentEvent {
         /// Zero-based piece index.
         index: u32,
     },
+    /// A piece failed SHA-1 verification (corrupt data).
+    PieceFailed {
+        /// Zero-based piece index.
+        index: u32,
+    },
     /// All pieces are complete — the torrent has finished downloading.
     TorrentFinished,
+    /// A new peer connection was established.
+    PeerConnected {
+        /// IP address and port of the peer.
+        addr: SocketAddr,
+        /// Client name from the peer's LTEP handshake, if available.
+        client_name: Option<String>,
+    },
+    /// A peer disconnected or was removed.
+    PeerDisconnected {
+        /// IP address and port of the peer.
+        addr: SocketAddr,
+    },
+    /// A tracker announce succeeded.
+    TrackerAnnounced {
+        /// Number of new peers returned by the tracker.
+        peers_found: usize,
+    },
+    /// A tracker announce failed.
+    TrackerError {
+        /// Human-readable error message.
+        message: String,
+    },
+    /// A single file within a multi-file torrent reached 100% completion.
+    FileCompleted {
+        /// Path components of the completed file.
+        path: Vec<String>,
+    },
 }
 
 /// Aggregated status across all torrents in a [`Session`](super::Session).
@@ -365,6 +404,8 @@ pub struct SessionStatus {
     pub num_torrents: usize,
     /// Total number of connected peers across all torrents.
     pub num_connections: usize,
+    /// Total number of nodes in the DHT routing table (0 if DHT is disabled).
+    pub dht_nodes: usize,
 }
 
 /// Tracker communication status for a torrent.
@@ -566,6 +607,9 @@ mod serde_tests {
                 .chain(std::iter::repeat(false).take(10))
                 .collect(),
             elapsed: Duration::from_secs(120),
+            total_wasted: 0,
+            super_seed_active: false,
+            super_seed_remaining: 0,
             error_message: None,
         };
         let json = serde_json::to_string(&status).unwrap();
@@ -581,6 +625,9 @@ mod serde_tests {
         assert_eq!(v["pieces_completed"], 30);
         assert_eq!(v["bitfield"].as_array().unwrap().len(), 40);
         assert_eq!(v["elapsed"]["secs"], 120);
+        assert_eq!(v["total_wasted"], 0);
+        assert_eq!(v["super_seed_active"], false);
+        assert_eq!(v["super_seed_remaining"], 0);
     }
 
     #[test]

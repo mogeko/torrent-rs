@@ -5,8 +5,8 @@ use std::time::Instant;
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerMessage};
 
-use super::SwarmLoop;
 use super::types::{PeerEvent, parse_bitfield};
+use super::{SwarmLoop, TorrentEvent};
 
 impl SwarmLoop {
     /// Handle an event from a peer reader task.
@@ -27,6 +27,7 @@ impl SwarmLoop {
                     }
                 }
                 self.peers.remove(&addr);
+                let _ = self.event_tx.send(TorrentEvent::PeerDisconnected { addr });
                 self.peer_mgr.write().await.remove_peer(&addr);
                 if self.pex_enabled {
                     self.recently_dropped.push(addr);
@@ -59,6 +60,7 @@ impl SwarmLoop {
                         }
                     }
                     self.peers.remove(&addr);
+                    let _ = self.event_tx.send(TorrentEvent::PeerDisconnected { addr });
                     self.peer_mgr.write().await.remove_peer(&addr);
                     if self.pex_enabled {
                         self.recently_dropped.push(addr);

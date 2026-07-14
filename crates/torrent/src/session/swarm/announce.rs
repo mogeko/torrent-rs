@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crate::error::Error;
 use crate::tracker::{AnnounceEvent, AnnounceRequest};
 
-use super::SwarmLoop;
+use super::{SwarmLoop, TorrentEvent};
 
 impl SwarmLoop {
     /// Announce to the tracker if it's time.
@@ -66,6 +66,7 @@ impl SwarmLoop {
                 tracing::debug!("tracker announce: {} peers", resp.peers.len());
                 let interval = resp.min_interval.unwrap_or(resp.interval);
                 self.next_announce = Some(Instant::now() + Duration::from_secs(interval as u64));
+                let peers_found = resp.peers.len();
 
                 {
                     let mut ts = self.tracker_status.write().await;
@@ -75,6 +76,10 @@ impl SwarmLoop {
                     ts.leechers_reported = resp.incomplete;
                     ts.last_error = None;
                 }
+
+                let _ = self
+                    .event_tx
+                    .send(TorrentEvent::TrackerAnnounced { peers_found });
 
                 if !resp.peers.is_empty() {
                     let mut pm = self.peer_mgr.write().await;
@@ -90,6 +95,9 @@ impl SwarmLoop {
                     ts.next_announce_in = Some(self.announce_fallback_interval);
                     ts.last_error = Some(e.to_string());
                 }
+                let _ = self.event_tx.send(TorrentEvent::TrackerError {
+                    message: e.to_string(),
+                });
                 tracing::warn!("failed to announce to tracker: {}", e);
                 Err(e)
             }

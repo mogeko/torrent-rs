@@ -126,6 +126,9 @@ impl TorrentHandle {
             pieces_completed: 0,
             bitfield: vec![false; num_pieces],
             elapsed: Duration::ZERO,
+            total_wasted: 0,
+            super_seed_active: false,
+            super_seed_remaining: 0,
             error_message: None,
         }));
 
@@ -313,6 +316,7 @@ impl TorrentHandle {
             upload_mgr: UploadManager::new(config.max_uploads),
             total_downloaded: 0,
             total_uploaded: 0,
+            total_wasted: 0,
             last_downloaded: 0,
             last_uploaded: 0,
             piece_cache: Vec::new(),
@@ -416,6 +420,8 @@ pub(crate) struct SwarmLoop {
     pub(crate) total_downloaded: u64,
     /// Total bytes uploaded.
     pub(crate) total_uploaded: u64,
+    /// Total bytes wasted (corrupt + duplicate).
+    pub(crate) total_wasted: u64,
     /// Previous downloaded count for rate calc.
     pub(crate) last_downloaded: u64,
     /// Previous uploaded count for rate calc.
@@ -676,6 +682,9 @@ impl SwarmLoop {
             status.total_uploaded = self.total_uploaded;
             status.bitfield = bitfield;
             status.elapsed = self.started_at.elapsed();
+            status.total_wasted = self.total_wasted;
+            status.super_seed_active = self.super_seed;
+            status.super_seed_remaining = self.super_seed_unrevealed.len() as u32;
 
             if is_complete && status.state != TorrentState::Seeding {
                 tracing::info!(
@@ -818,7 +827,12 @@ impl SwarmLoop {
                 }
 
                 self.spawn_peer_reader(*addr, conn_arc);
+                let client_name = pi.client_version.clone();
                 self.peers.insert(*addr, pi);
+                let _ = self.event_tx.send(TorrentEvent::PeerConnected {
+                    addr: *addr,
+                    client_name,
+                });
                 self.send_bitfield(*addr).await?;
 
                 // PEX is deferred: remote_extension_ids are not known yet.
