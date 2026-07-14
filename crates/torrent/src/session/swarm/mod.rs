@@ -613,6 +613,7 @@ impl SwarmLoop {
             pieces_completed,
             is_complete,
             bitfield,
+            total_downloaded,
             download_rate,
             upload_rate,
         ) = {
@@ -623,9 +624,18 @@ impl SwarmLoop {
             let is_complete = pm.missing_pieces().is_empty();
             let bitfield = pm.bitfield().to_vec();
             let num_peers = self.peer_mgr.read().await.num_connections();
-            let download_rate = (self.total_downloaded - self.last_downloaded) as f64;
+
+            // Derive download stats from verified pieces (BEP 3).
+            // Uses piece completion rather than raw block-receive counters,
+            // so it covers P2P + web seed uniformly and excludes corrupt data.
+            let piece_len = self.metainfo.info.piece_length;
+            let total_size = self.metainfo.info.total_size();
+            let total_downloaded = (pieces_completed as u64 * piece_len).min(total_size);
+            let download_rate = (total_downloaded - self.last_downloaded) as f64;
+            self.last_downloaded = total_downloaded;
+            self.total_downloaded = total_downloaded;
+
             let upload_rate = (self.total_uploaded - self.last_uploaded) as f64;
-            self.last_downloaded = self.total_downloaded;
             self.last_uploaded = self.total_uploaded;
             (
                 progress,
@@ -634,6 +644,7 @@ impl SwarmLoop {
                 pieces_completed,
                 is_complete,
                 bitfield,
+                total_downloaded,
                 download_rate,
                 upload_rate,
             )
@@ -661,7 +672,7 @@ impl SwarmLoop {
             status.upload_rate = upload_rate;
             status.num_pieces = num_pieces;
             status.pieces_completed = pieces_completed;
-            status.total_downloaded = self.total_downloaded;
+            status.total_downloaded = total_downloaded;
             status.total_uploaded = self.total_uploaded;
             status.bitfield = bitfield;
             status.elapsed = self.started_at.elapsed();

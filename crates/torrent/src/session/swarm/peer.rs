@@ -151,7 +151,6 @@ impl SwarmLoop {
                 // calls Storage::write_piece after SHA-1 verification passes.
                 // This avoids writing each 16 KB block separately and reduces
                 // syscall count by up to 256× for a 4 MB piece.
-                self.total_downloaded += data.len() as u64;
                 if let Some(p) = self.peers.get_mut(&addr) {
                     let len = data.len() as u64;
                     p.downloaded_bytes += len;

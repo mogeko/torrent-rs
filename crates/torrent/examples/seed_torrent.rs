@@ -79,6 +79,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Step 8: Keep seeding until Ctrl+C ──
 
     println!("\nSeeding... (Ctrl+C to stop)\n");
+
+    // Exponential moving average for upload rate (tau ≈ 10 s).
+    let alpha = 1.0 - (-(5.0_f64 / 10.0)).exp();
+    let mut upload_ema = 0.0_f64;
+
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
@@ -90,6 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+        upload_ema = alpha * status.upload_rate + (1.0 - alpha) * upload_ema;
+
         let state = if status.state == TorrentState::Seeding {
             "Seeding"
         } else {
@@ -98,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "  {state} | peers: {} | up: {:.1} KB/s",
             status.num_peers,
-            status.upload_rate / 1024.0
+            upload_ema / 1024.0
         );
     }
 }

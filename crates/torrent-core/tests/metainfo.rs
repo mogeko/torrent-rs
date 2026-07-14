@@ -54,10 +54,7 @@ fn make_multi_file_torrent() -> Vec<u8> {
             Bytes::from("pieces"),
             Bencode::Bytes(Bytes::from(vec![0u8; 40])),
         ),
-        (
-            Bytes::from("files"),
-            Bencode::List(vec![file1.into(), file2.into()]),
-        ),
+        (Bytes::from("files"), Bencode::List(vec![file1, file2])),
     ]);
     let root = Bencode::Dict(vec![
         (
