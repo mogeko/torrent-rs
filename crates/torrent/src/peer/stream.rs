@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{Error, ErrorKind};
 
-use super::utp::UtpStream;
+use super::utp::{UtpSocket, UtpStream};
 use super::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
 
 /// Timeout for TCP connect + handshake exchange.
@@ -113,8 +113,7 @@ impl PeerConnection {
     /// The handshake runs over the uTP stream after the uTP connection
     /// is established. Returns a `PeerConnection` that uses uTP transport.
     pub async fn connect_utp(
-        addr: SocketAddr, info_hash: [u8; 20], our_peer_id: PeerId,
-        utp_socket: &crate::peer::utp::UtpSocket,
+        addr: SocketAddr, info_hash: [u8; 20], our_peer_id: PeerId, utp_socket: &UtpSocket,
     ) -> Result<Self, Error> {
         tracing::debug!("connecting to peer {} via uTP", addr);
 

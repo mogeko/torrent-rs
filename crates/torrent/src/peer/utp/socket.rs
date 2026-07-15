@@ -7,7 +7,6 @@
 //!
 //! ```text
 //! UDP socket (recv loop)
-//!   │
 //!   ├── conn_id=0x1234 → UtpConnection A
 //!   ├── conn_id=0x5678 → UtpConnection B
 //!   └── unknown conn_id → ST_RESET (or new connection if SYN)

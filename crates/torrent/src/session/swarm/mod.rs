@@ -20,6 +20,7 @@ use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
 use crate::magnet::hex_encode;
 use crate::metainfo::{Metainfo, Mode};
+use crate::peer::utp::UtpSocket;
 use crate::peer::{
     ExtensionNegotiation, PeerConnection, PeerId, PeerMessage, compute_allowed_fast_set,
 };
@@ -71,6 +72,8 @@ pub(crate) struct TorrentHandle {
     pub control_tx: Option<mpsc::Sender<TorrentCommand>>,
     /// Set by [`activate`](TorrentHandle::activate).
     pub task: Option<JoinHandle<()>>,
+    /// Shared uTP socket from the session (BEP 29).
+    pub(crate) utp_socket: Option<Arc<UtpSocket>>,
 }
 
 impl TorrentHandle {
@@ -160,6 +163,7 @@ impl TorrentHandle {
             storage: None,
             control_tx: None,
             task: None,
+            utp_socket: None,
         }
     }
 
@@ -277,6 +281,7 @@ impl TorrentHandle {
             park_retry_interval: Duration::from_secs(60),
         };
         let webseed_notify = Arc::new(Notify::new());
+        let utp_socket = self.utp_socket.clone();
 
         let mut swarm_loop = SwarmLoop {
             info_hash: self.info_hash,
@@ -330,6 +335,7 @@ impl TorrentHandle {
             webseed_scheduler: None,
             webseed_fetchers: Vec::new(),
             webseed_notify,
+            utp_socket,
         };
 
         let task = tokio::spawn(async move { swarm_loop.run().await });
@@ -459,6 +465,8 @@ pub(crate) struct SwarmLoop {
     pub(crate) webseed_fetchers: Vec<JoinHandle<()>>,
     /// Notify the web seed scheduler when a piece is completed by a P2P peer.
     pub(crate) webseed_notify: Arc<Notify>,
+    /// Shared uTP socket from the session (BEP 29).
+    pub(crate) utp_socket: Option<Arc<UtpSocket>>,
 }
 
 impl SwarmLoop {
@@ -757,13 +765,25 @@ impl SwarmLoop {
             return Ok(());
         }
 
-        // Phase 2: Spawn connection tasks and collect results WITHOUT lock
+        // Phase 2: Spawn connection tasks and collect results WITHOUT lock.
+        // When uTP is enabled, try both TCP and uTP in parallel, preferring uTP.
         let mut joinset = JoinSet::new();
         for &addr in &batch {
             let info_hash = self.info_hash;
             let peer_id = self.peer_id;
+            let utp_socket = self.utp_socket.clone();
             joinset.spawn(async move {
-                let result = PeerConnection::connect(addr, info_hash, peer_id).await;
+                let result = if let Some(utp) = &utp_socket {
+                    let tcp_fut = PeerConnection::connect(addr, info_hash, peer_id);
+                    let utp_fut = PeerConnection::connect_utp(addr, info_hash, peer_id, utp);
+                    // Race TCP and uTP in parallel, prefer uTP
+                    match tokio::join!(utp_fut, tcp_fut) {
+                        (Ok(utp_conn), _) => Ok(utp_conn),
+                        (Err(_), tcp_result) => tcp_result,
+                    }
+                } else {
+                    PeerConnection::connect(addr, info_hash, peer_id).await
+                };
                 (addr, result)
             });
         }
