@@ -12,6 +12,7 @@
 
 pub mod connection;
 pub mod socket;
+pub mod stream;
 
 pub use torrent_core::peer::utp::congestion;
 pub use torrent_core::peer::utp::header;
@@ -19,4 +20,5 @@ pub use torrent_core::peer::utp::selective_ack;
 pub use torrent_core::peer::utp::{SelectiveAck, UtpCongestionControl, UtpHeader, UtpType};
 
 pub use self::connection::UtpConnection;
-pub use self::socket::UtpSocket;
+pub use self::socket::{UtpConnectionHandle, UtpSocket};
+pub use self::stream::UtpStream;
