@@ -3,14 +3,18 @@
 //! Re-exports sync types from `torrent_core::peer` and provides
 //! the async [`PeerConnection`] over TCP and uTP (BEP 29).
 //!
+//! uTP is managed transparently via [`SessionConfig::enable_utp`]
+//! and requires no direct type imports from this module.
+//!
 //! # Key Types
 //!
 //! - [`PeerId`], [`Handshake`], [`PeerMessage`], [`PeerState`], [`ExtensionNegotiation`] — re-exported from `torrent_core`
 //! - [`PeerConnection`] — async TCP connection with buffered I/O
-//! - [`utp`] — uTP UDP-based transport (BEP 29)
+//!
+//! [`SessionConfig::enable_utp`]: crate::session::SessionConfig#structfield.enable_utp
 
 mod stream;
-pub mod utp;
+pub(crate) mod utp;
 
 pub use torrent_core::peer::lsd;
 pub use torrent_core::peer::metadata;

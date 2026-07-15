@@ -54,7 +54,8 @@ pub(crate) struct UtpIncoming {
 
 /// Connection state (BEP 29 §connection setup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnState {
+#[allow(dead_code)]
+pub(crate) enum ConnState {
     /// We initiated: sent SYN, waiting for STATE response.
     SynSent,
     /// We received SYN: sent STATE, waiting for DATA.
@@ -73,7 +74,7 @@ pub enum ConnState {
 ///
 /// Handles packet sending/receiving, retransmission, congestion control,
 /// and the connection lifecycle for a single uTP connection.
-pub struct UtpConnection {
+pub(crate) struct UtpConnection {
     /// Remote peer address.
     remote_addr: SocketAddr,
     /// Connection ID we put in outgoing packets.
@@ -370,7 +371,7 @@ impl UtpConnection {
     ///
     /// Splits data into uTP-sized packets and sends them.
     /// Each ST_DATA packet increments seq_nr.
-    pub async fn send(&mut self, data: &[u8]) -> Result<usize, String> {
+    pub(crate) async fn send(&mut self, data: &[u8]) -> Result<usize, String> {
         if self.state != ConnState::Connected {
             return Err("uTP: not connected".into());
         }
@@ -390,7 +391,8 @@ impl UtpConnection {
     }
 
     /// Close the connection gracefully (send FIN).
-    pub async fn close(&mut self) -> Result<(), String> {
+    #[allow(dead_code)]
+    pub(crate) async fn close(&mut self) -> Result<(), String> {
         if self.state == ConnState::Connected {
             let seq = self.seq_nr;
             self.seq_nr = self.seq_nr.wrapping_add(1);
@@ -403,7 +405,8 @@ impl UtpConnection {
     /// Read reassembled application data.
     ///
     /// Returns all available bytes from the ready buffer.
-    pub fn recv(&mut self) -> Vec<u8> {
+    #[allow(dead_code)]
+    pub(crate) fn recv(&mut self) -> Vec<u8> {
         let mut data = Vec::with_capacity(self.ready_data.len());
         while let Some(byte) = self.ready_data.pop_front() {
             data.push(byte);
@@ -412,32 +415,34 @@ impl UtpConnection {
     }
 
     /// Check if there is data available to read.
-    pub fn has_data(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn has_data(&self) -> bool {
         !self.ready_data.is_empty()
     }
 
     /// Check if the connection is established.
-    pub fn is_connected(&self) -> bool {
+    pub(crate) fn is_connected(&self) -> bool {
         self.state == ConnState::Connected
     }
 
     /// Check if the connection is closed.
-    pub fn is_closed(&self) -> bool {
+    pub(crate) fn is_closed(&self) -> bool {
         self.state == ConnState::Closed
     }
 
     /// Get the connection ID we use for sending.
-    pub fn conn_id_send(&self) -> u16 {
+    #[allow(dead_code)]
+    pub(crate) fn conn_id_send(&self) -> u16 {
         self.conn_id_send
     }
 
     /// Get the connection ID we expect in incoming packets.
-    pub fn conn_id_recv(&self) -> u16 {
+    pub(crate) fn conn_id_recv(&self) -> u16 {
         self.conn_id_recv
     }
 
     /// Get the remote peer address.
-    pub fn remote_addr(&self) -> SocketAddr {
+    pub(crate) fn remote_addr(&self) -> SocketAddr {
         self.remote_addr
     }
 
@@ -446,7 +451,7 @@ impl UtpConnection {
     /// Should be called periodically (every ~100ms). Checks for:
     /// - Packets that have timed out and need retransmission
     /// - Overall connection timeout (no activity for too long)
-    pub async fn check_retransmit(&mut self) -> Result<(), String> {
+    pub(crate) async fn check_retransmit(&mut self) -> Result<(), String> {
         let now = Instant::now();
         let timeout_ms = self.cc.timeout_ms() as u64;
 

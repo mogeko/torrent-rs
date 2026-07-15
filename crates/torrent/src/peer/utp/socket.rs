@@ -24,16 +24,16 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc};
 
 use super::connection::{ConnState, UtpConnection, UtpIncoming};
-use super::{UtpHeader, UtpType};
+use torrent_core::peer::utp::{UtpHeader, UtpType};
 
 /// Channel buffer size for the main recv loop.
 const SOCKET_RECV_BUF: usize = 4096;
 
 /// A handle to a uTP connection, providing send/recv access.
 #[allow(dead_code)]
-pub struct UtpConnectionHandle {
+pub(crate) struct UtpConnectionHandle {
     /// The remote peer address.
-    pub remote_addr: SocketAddr,
+    pub(crate) remote_addr: SocketAddr,
     /// Channel to send incoming packets to the connection task.
     packet_tx: mpsc::UnboundedSender<UtpIncoming>,
     /// Channel to receive application data from the connection.
@@ -46,24 +46,26 @@ pub struct UtpConnectionHandle {
 
 impl UtpConnectionHandle {
     /// Send data to the remote peer through this connection.
-    pub fn send(&mut self, data: Vec<u8>) -> Result<(), String> {
+    pub(crate) fn send(&mut self, data: Vec<u8>) -> Result<(), String> {
         self.data_tx
             .send(data)
             .map_err(|_| "uTP: connection closed".to_string())
     }
 
     /// Receive available data from this connection (non-blocking).
-    pub fn try_recv(&mut self) -> Option<Vec<u8>> {
+    pub(crate) fn try_recv(&mut self) -> Option<Vec<u8>> {
         self.data_rx.try_recv().ok()
     }
 
-    /// Receive data from this connection (async).
-    pub async fn recv(&mut self) -> Option<Vec<u8>> {
+    /// Receive data from this connection (async).  
+    #[allow(dead_code)]
+    pub(crate) async fn recv(&mut self) -> Option<Vec<u8>> {
         self.data_rx.recv().await
     }
 
     /// Check current connection state (non-blocking).
-    pub fn state(&mut self) -> Option<ConnState> {
+    #[allow(dead_code)]
+    pub(crate) fn state(&mut self) -> Option<ConnState> {
         self.state_rx.try_recv().ok()
     }
 }
@@ -72,7 +74,7 @@ impl UtpConnectionHandle {
 ///
 /// Spawns a background receive task that dispatches incoming
 /// packets by `connection_id`.
-pub struct UtpSocket {
+pub(crate) struct UtpSocket {
     /// The shared UDP socket.
     socket: Arc<UdpSocket>,
     /// Bound address of the socket.
@@ -90,7 +92,7 @@ impl UtpSocket {
     ///
     /// Spawns a background receive loop that dispatches packets
     /// to registered connections.
-    pub async fn bind(addr: SocketAddr) -> Result<Self, String> {
+    pub(crate) async fn bind(addr: SocketAddr) -> Result<Self, String> {
         let socket = UdpSocket::bind(addr)
             .await
             .map_err(|e| format!("uTP: bind failed: {e}"))?;
@@ -127,7 +129,7 @@ impl UtpSocket {
     }
 
     /// Get the local address this socket is bound to.
-    pub fn local_addr(&self) -> SocketAddr {
+    pub(crate) fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
@@ -135,7 +137,9 @@ impl UtpSocket {
     ///
     /// Sends ST_SYN and returns a handle for send/recv operations.
     /// The connection runs as a background task.
-    pub async fn connect(&self, remote_addr: SocketAddr) -> Result<UtpConnectionHandle, String> {
+    pub(crate) async fn connect(
+        &self, remote_addr: SocketAddr,
+    ) -> Result<UtpConnectionHandle, String> {
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
         let (_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (conn_data_tx, data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -401,5 +405,97 @@ impl UtpSocket {
             ack_nr: header.seq_nr,
         };
         let _ = socket.send_to(&reset.to_bytes(), dst).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn test_addrs() -> (SocketAddr, SocketAddr) {
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        (a, b)
+    }
+
+    #[tokio::test]
+    async fn utp_socket_bind() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let socket = UtpSocket::bind(addr).await.unwrap();
+        assert!(socket.local_addr().port() > 0);
+    }
+
+    #[tokio::test]
+    async fn utp_connect_and_send() {
+        let (addr_a, addr_b) = test_addrs();
+        let socket_a = UtpSocket::bind(addr_a).await.unwrap();
+        let socket_b = UtpSocket::bind(addr_b).await.unwrap();
+        let b_addr = socket_b.local_addr();
+
+        let mut conn_a = socket_a.connect(b_addr).await.unwrap();
+        assert_eq!(conn_a.remote_addr, b_addr);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let test_data = b"hello uTP!".to_vec();
+        conn_a.send(test_data.clone()).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn utp_connect_unreachable() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let socket = UtpSocket::bind(addr).await.unwrap();
+        let dead_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let result = timeout(TEST_TIMEOUT, socket.connect(dead_addr)).await;
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn utp_send_multiple_packets() {
+        let (addr_a, addr_b) = test_addrs();
+        let socket_a = UtpSocket::bind(addr_a).await.unwrap();
+        let socket_b = UtpSocket::bind(addr_b).await.unwrap();
+        let b_addr = socket_b.local_addr();
+
+        let mut conn = socket_a.connect(b_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        for i in 0..5u8 {
+            conn.send(vec![i; 100]).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn utp_bind_conflict() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let socket_a = UtpSocket::bind(addr).await.unwrap();
+        let bound_addr = socket_a.local_addr();
+        let result = UtpSocket::bind(bound_addr).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn utp_connection_cleanup() {
+        let (addr_a, addr_b) = test_addrs();
+        let socket_a = UtpSocket::bind(addr_a).await.unwrap();
+        let socket_b = UtpSocket::bind(addr_b).await.unwrap();
+        let b_addr = socket_b.local_addr();
+
+        {
+            let conn = socket_a.connect(b_addr).await.unwrap();
+            drop(conn);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let conn2 = socket_a.connect(b_addr).await.unwrap();
+        drop(conn2);
     }
 }

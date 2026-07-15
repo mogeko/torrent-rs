@@ -5,20 +5,18 @@
 //!
 //! # Architecture
 //!
-//! - [`UtpSocket`] manages a single UDP socket for all uTP connections,
-//!   dispatching incoming packets by `connection_id`.
-//! - [`UtpConnection`] handles per-connection state: sequence numbers,
-//!   congestion control, retransmission, and packet reassembly.
+//! A single UDP socket (managed by the internal `UtpSocket`) dispatches
+//! incoming packets by `connection_id` to per-connection state machines
+//! (`UtpConnection`). The async internals are `pub(crate)` and managed
+//! transparently by [`Session`].
+//!
+//! For protocol data types (`UtpHeader`, `UtpType`, `UtpCongestionControl`,
+//! `SelectiveAck`), depend on `torrent-core` directly.
+//!
+//! [`Session`]: crate::session::Session
 
-pub mod connection;
-pub mod socket;
-pub mod stream;
+pub(crate) mod connection;
+pub(crate) mod socket;
+pub(crate) mod stream;
 
-pub use torrent_core::peer::utp::congestion;
-pub use torrent_core::peer::utp::header;
-pub use torrent_core::peer::utp::selective_ack;
-pub use torrent_core::peer::utp::{SelectiveAck, UtpCongestionControl, UtpHeader, UtpType};
-
-pub use self::connection::UtpConnection;
-pub use self::socket::{UtpConnectionHandle, UtpSocket};
-pub use self::stream::UtpStream;
+use torrent_core::peer::utp::{UtpCongestionControl, UtpHeader, UtpType};

@@ -40,7 +40,7 @@ use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{FileStatus, Metainfo, Mode};
-use crate::peer::utp::UtpSocket;
+use crate::peer::utp::socket::UtpSocket;
 use crate::piece::PieceManager;
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;

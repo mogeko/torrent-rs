@@ -20,7 +20,7 @@ use super::socket::UtpConnectionHandle;
 /// wire protocol communication over uTP.
 ///
 /// [`PeerConnection`]: crate::peer::stream::PeerConnection
-pub struct UtpStream {
+pub(crate) struct UtpStream {
     handle: UtpConnectionHandle,
     /// Buffered data received from the remote peer, ready for reading.
     read_buf: Vec<u8>,
@@ -30,7 +30,7 @@ pub struct UtpStream {
 
 impl UtpStream {
     /// Create a new uTP stream from a connection handle.
-    pub fn new(handle: UtpConnectionHandle) -> Self {
+    pub(crate) fn new(handle: UtpConnectionHandle) -> Self {
         UtpStream {
             handle,
             read_buf: Vec::new(),
@@ -39,7 +39,8 @@ impl UtpStream {
     }
 
     /// Consume the stream and return the underlying handle.
-    pub fn into_handle(self) -> UtpConnectionHandle {
+    #[allow(dead_code)]
+    pub(crate) fn into_handle(self) -> UtpConnectionHandle {
         self.handle
     }
 }
