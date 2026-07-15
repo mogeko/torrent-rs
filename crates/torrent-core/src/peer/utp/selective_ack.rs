@@ -6,12 +6,12 @@
 //! # Extension Format
 //!
 //! ```text
-//!  0               8               16
-//! +---------------+---------------+---------------+---------------+
+//!  0                8               16
+//! +----------------+---------------+---------------+---------------+
 //! | next_extension | len           | bitmask (len bytes)           |
-//! +---------------+---------------+---------------+---------------+
-//!                                 |                               |
-//! +---------------+---------------+---------------+---------------+
+//! +----------------+---------------+---------------+---------------+
+//!                                  |                               |
+//! +----------------+---------------+---------------+---------------+
 //! ```
 //!
 //! - `next_extension`: type of the next extension in the linked list (0 = end).
@@ -274,9 +274,7 @@ pub fn parse_extensions(
 ///
 /// The extension data should be the raw bitmask bytes (without the
 /// `next_extension` and `len` fields, which are handled by `parse_extensions`).
-pub fn parse_selective_ack(
-    next_extension: u8, data: &[u8],
-) -> Result<SelectiveAck, Error> {
+pub fn parse_selective_ack(next_extension: u8, data: &[u8]) -> Result<SelectiveAck, Error> {
     SelectiveAck::from_bytes(next_extension, data.to_vec())
 }
 

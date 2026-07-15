@@ -10,13 +10,13 @@
 //! +-------+-------+---------------+---------------+---------------+
 //! | type  | ver   | extension     | connection_id                 |
 //! +-------+-------+---------------+---------------+---------------+
-//! | timestamp_microseconds                                         |
+//! | timestamp_microseconds                                        |
 //! +---------------+---------------+---------------+---------------+
-//! | timestamp_difference_microseconds                              |
+//! | timestamp_difference_microseconds                             |
 //! +---------------+---------------+---------------+---------------+
-//! | wnd_size                                                       |
+//! | wnd_size                                                      |
 //! +---------------+---------------+---------------+---------------+
-//! | seq_nr                        | ack_nr                         |
+//! | seq_nr                        | ack_nr                        |
 //! +---------------+---------------+---------------+---------------+
 //! ```
 //!
@@ -214,8 +214,7 @@ impl UtpHeader {
         let connection_id = u16::from_be_bytes([data[2], data[3]]);
 
         // Bytes 4-7: timestamp_microseconds
-        let timestamp_microseconds =
-            u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+        let timestamp_microseconds = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
         // Bytes 8-11: timestamp_difference_microseconds
         let timestamp_difference_microseconds =
