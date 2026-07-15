@@ -80,8 +80,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("(Ctrl+C to stop)\n");
 
     let start = Instant::now();
-    let mut last_bytes = 0u64;
     let poll_interval = Duration::from_secs(2);
+
+    // Exponential moving average for download rate (tau ≈ 5 s).
+    let alpha = 1.0 - (-(poll_interval.as_secs_f64() / 5.0)).exp();
+    let mut download_ema = 0.0_f64;
 
     loop {
         tokio::time::sleep(poll_interval).await;
@@ -95,17 +98,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let pct = status.progress * 100.0;
-        let downloaded = (meta.info.total_size() as f64 * status.progress) as u64;
-        let rate = downloaded.saturating_sub(last_bytes) / poll_interval.as_secs();
-        last_bytes = downloaded;
+        let downloaded = status.total_downloaded;
+        download_ema = alpha * status.download_rate + (1.0 - alpha) * download_ema;
 
         let elapsed = start.elapsed().as_secs();
 
         println!(
-            "  {:5.1}% | {:>3} peers | ↓ {:>6} KB/s | {:>5} / {:>5} MB | {:>5}s",
+            "  {:5.1}% | {:>3} peers | ↓ {:>8.1} KB/s | {:>5} / {:>5} MB | {:>5}s",
             pct,
             status.num_peers,
-            rate / 1024,
+            download_ema / 1024.0,
             downloaded / (1024 * 1024),
             total_mb,
             elapsed,

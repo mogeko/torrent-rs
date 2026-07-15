@@ -12,7 +12,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Notify, RwLock, Semaphore, mpsc};
+use tokio::sync::{Notify, RwLock, Semaphore, broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use url::Url;
 
@@ -34,7 +34,9 @@ use super::webseed::{
     FetchTask, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WebSeedScheduler,
     WorkItem, WorkResult, deduplicate_urls,
 };
-use super::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
+use super::{
+    InfoHash, PeerStatus, SessionConfig, TorrentEvent, TorrentState, TorrentStatus, TrackerStatus,
+};
 
 use self::types::{UT_PEX, UT_PEX_ID};
 
@@ -54,6 +56,13 @@ pub(crate) struct TorrentHandle {
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
+    /// Broadcast sender for [`TorrentEvent`]s — each receiver gets
+    /// its own copy via [`broadcast::Sender::subscribe`].
+    pub event_tx: broadcast::Sender<TorrentEvent>,
+    /// Per-peer status snapshots, updated each status tick.
+    pub peer_statuses: Arc<RwLock<Vec<PeerStatus>>>,
+    /// Tracker communication status, updated after each announce.
+    pub tracker_status: Arc<RwLock<TrackerStatus>>,
     /// Web seed URLs collected from the torrent spec (BEP 19).
     pub(crate) web_seeds: Vec<String>,
     /// Set by [`activate`](TorrentHandle::activate).
@@ -73,19 +82,20 @@ impl TorrentHandle {
     pub(crate) fn register(spec: TorrentSpec, config: &SessionConfig) -> Self {
         let web_seeds: Vec<String> = spec.web_seeds().into_iter().map(|s| s.to_owned()).collect();
 
-        let (metainfo, info_hash, name, num_pieces) = match spec {
+        let (metainfo, info_hash, name, num_pieces, total_size) = match spec {
             TorrentSpec::Metainfo(meta) => {
                 let ih = meta.info_hash();
                 let num = meta.info.num_pieces();
                 let name = match &meta.info.mode {
                     Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
                 };
-                (Some(meta), ih, name, num)
+                let ts = meta.info.total_size();
+                (Some(meta), ih, name, num, ts)
             }
             TorrentSpec::Magnet(uri) => {
                 let ih = *uri.primary_info_hash();
                 let name = uri.display_name.unwrap_or_else(|| hex_encode(ih));
-                (None, ih, name, 0)
+                (None, ih, name, 0, 0)
             }
         };
 
@@ -109,6 +119,32 @@ impl TorrentHandle {
             num_peers: 0,
             num_seeds: 0,
             state: TorrentState::Registered,
+            total_size,
+            total_downloaded: 0,
+            total_uploaded: 0,
+            num_pieces: num_pieces as u32,
+            pieces_completed: 0,
+            bitfield: vec![false; num_pieces],
+            elapsed: Duration::ZERO,
+            total_wasted: 0,
+            super_seed_active: false,
+            super_seed_remaining: 0,
+            error_message: None,
+        }));
+
+        let (event_tx, _) = broadcast::channel(64);
+        let peer_statuses = Arc::new(RwLock::new(Vec::new()));
+        let tracker_url = metainfo
+            .as_ref()
+            .map(|m| m.announce.clone())
+            .unwrap_or_default();
+        let tracker_status = Arc::new(RwLock::new(TrackerStatus {
+            url: tracker_url,
+            next_announce_in: None,
+            announce_interval: Duration::ZERO,
+            seeds_reported: 0,
+            leechers_reported: 0,
+            last_error: None,
         }));
 
         TorrentHandle {
@@ -117,6 +153,9 @@ impl TorrentHandle {
             peer_mgr,
             piece_mgr,
             status,
+            event_tx,
+            peer_statuses,
+            tracker_status,
             web_seeds,
             storage: None,
             control_tx: None,
@@ -136,6 +175,19 @@ impl TorrentHandle {
         let name = match &metainfo.info.mode {
             Mode::Single { name, .. } | Mode::Multiple { name, .. } => name.clone(),
         };
+
+        let total_size = metainfo.info.total_size();
+        let num_pieces = metainfo.info.num_pieces() as u32;
+
+        // Update the status snapshot now that metadata is available.
+        {
+            let mut status = self
+                .status
+                .try_write()
+                .expect("status lock should be uncontended at activation");
+            status.total_size = total_size;
+            status.num_pieces = num_pieces;
+        }
 
         tracing::info!(
             "torrent activated: {} ({} pieces)",
@@ -166,8 +218,33 @@ impl TorrentHandle {
             "metainfo info_hash mismatch"
         );
 
+        let num_pieces = metainfo.info.num_pieces() as u32;
+        let total_size = metainfo.info.total_size();
+        let pieces_completed = piece_mgr.completed_pieces().len() as u32;
+        let progress = piece_mgr.progress();
+        let bitfield = piece_mgr.bitfield().to_vec();
+        let is_seeding = piece_mgr.missing_pieces().is_empty();
+
         self.metainfo = Some(metainfo.clone());
         self.piece_mgr = Arc::new(RwLock::new(piece_mgr));
+
+        // Update the status snapshot with verified seed state.
+        {
+            let mut status = self
+                .status
+                .try_write()
+                .expect("status lock should be uncontended at registration");
+            status.total_size = total_size;
+            status.num_pieces = num_pieces;
+            status.pieces_completed = pieces_completed;
+            status.progress = progress;
+            status.bitfield = bitfield;
+            status.state = if is_seeding {
+                TorrentState::Seeding
+            } else {
+                TorrentState::Downloading
+            };
+        }
 
         tracing::info!(
             "torrent activated for seeding: {} ({} pieces)",
@@ -208,6 +285,10 @@ impl TorrentHandle {
             piece_mgr: self.piece_mgr.clone(),
             peer_mgr: self.peer_mgr.clone(),
             status: self.status.clone(),
+            event_tx: self.event_tx.clone(),
+            peer_statuses: self.peer_statuses.clone(),
+            tracker_status: self.tracker_status.clone(),
+            started_at: Instant::now(),
             control_rx,
             peer_id,
             listen_port: config.listen_port,
@@ -235,6 +316,7 @@ impl TorrentHandle {
             upload_mgr: UploadManager::new(config.max_uploads),
             total_downloaded: 0,
             total_uploaded: 0,
+            total_wasted: 0,
             last_downloaded: 0,
             last_uploaded: 0,
             piece_cache: Vec::new(),
@@ -242,6 +324,7 @@ impl TorrentHandle {
             super_seed,
             super_seed_assignments: HashMap::new(),
             super_seed_unrevealed: HashSet::new(),
+            completed_files: HashSet::new(),
             web_seeds: self.web_seeds.clone(),
             webseed_config,
             webseed_scheduler: None,
@@ -280,6 +363,15 @@ pub(crate) struct SwarmLoop {
     pub piece_mgr: Arc<RwLock<PieceManager>>,
     pub peer_mgr: Arc<RwLock<PeerManager>>,
     pub status: Arc<RwLock<TorrentStatus>>,
+    /// Broadcast sender for [`TorrentEvent`]s to external consumers.
+    pub event_tx: broadcast::Sender<TorrentEvent>,
+    /// Per-peer status snapshots shared with [`TorrentHandle`].
+    pub peer_statuses: Arc<RwLock<Vec<PeerStatus>>>,
+    /// Tracker communication status shared with [`TorrentHandle`].
+    pub tracker_status: Arc<RwLock<TrackerStatus>>,
+    /// Instant when the swarm loop was spawned — used to compute
+    /// [`TorrentStatus::elapsed`] each status tick.
+    pub started_at: Instant,
     pub control_rx: mpsc::Receiver<TorrentCommand>,
     /// Our peer ID.
     pub(crate) peer_id: PeerId,
@@ -329,6 +421,8 @@ pub(crate) struct SwarmLoop {
     pub(crate) total_downloaded: u64,
     /// Total bytes uploaded.
     pub(crate) total_uploaded: u64,
+    /// Total bytes wasted (corrupt + duplicate).
+    pub(crate) total_wasted: u64,
     /// Previous downloaded count for rate calc.
     pub(crate) last_downloaded: u64,
     /// Previous uploaded count for rate calc.
@@ -352,6 +446,9 @@ pub(crate) struct SwarmLoop {
     /// Unrevealed piece indices. These pieces have been uploaded to
     /// the assigned peer but not yet confirmed (no HAVE received).
     pub(crate) super_seed_unrevealed: HashSet<u32>,
+    /// Paths of files that already reached 100% — prevents duplicate
+    /// [`TorrentEvent::FileCompleted`] emissions.
+    pub(crate) completed_files: HashSet<Vec<String>>,
     /// Web seed URLs for this torrent (BEP 19).
     pub(crate) web_seeds: Vec<String>,
     /// Web seed configuration.
@@ -517,17 +614,50 @@ impl SwarmLoop {
         }
     }
 
-    /// Update TorrentStatus with rate, progress, peers, seeding state.
+    /// Update TorrentStatus with rate, progress, peers, seeding state, and bitfield.
     async fn update_status(&mut self) {
-        let (progress, num_peers, download_rate, upload_rate) = {
+        let (
+            progress,
+            num_peers,
+            num_pieces,
+            pieces_completed,
+            is_complete,
+            bitfield,
+            total_downloaded,
+            download_rate,
+            upload_rate,
+        ) = {
             let pm = self.piece_mgr.read().await;
             let progress = pm.progress();
+            let num_pieces = pm.num_pieces as u32;
+            let pieces_completed = pm.completed_pieces().len() as u32;
+            let is_complete = pm.missing_pieces().is_empty();
+            let bitfield = pm.bitfield().to_vec();
             let num_peers = self.peer_mgr.read().await.num_connections();
-            let download_rate = (self.total_downloaded - self.last_downloaded) as f64;
+
+            // Derive download stats from verified pieces (BEP 3).
+            // Uses piece completion rather than raw block-receive counters,
+            // so it covers P2P + web seed uniformly and excludes corrupt data.
+            let piece_len = self.metainfo.info.piece_length;
+            let total_size = self.metainfo.info.total_size();
+            let total_downloaded = (pieces_completed as u64 * piece_len).min(total_size);
+            let download_rate = (total_downloaded - self.last_downloaded) as f64;
+            self.last_downloaded = total_downloaded;
+            self.total_downloaded = total_downloaded;
+
             let upload_rate = (self.total_uploaded - self.last_uploaded) as f64;
-            self.last_downloaded = self.total_downloaded;
             self.last_uploaded = self.total_uploaded;
-            (progress, num_peers, download_rate, upload_rate)
+            (
+                progress,
+                num_peers,
+                num_pieces,
+                pieces_completed,
+                is_complete,
+                bitfield,
+                total_downloaded,
+                download_rate,
+                upload_rate,
+            )
         };
 
         let num_seeds = {
@@ -542,24 +672,63 @@ impl SwarmLoop {
                 .count()
         };
 
-        let is_complete = {
-            let pm = self.piece_mgr.read().await;
-            pm.missing_pieces().is_empty()
-        };
-
         {
             let mut status = self.status.write().await;
+            let old_state = status.state;
             status.progress = progress;
             status.num_peers = num_peers;
             status.num_seeds = num_seeds;
             status.download_rate = download_rate;
             status.upload_rate = upload_rate;
+            status.num_pieces = num_pieces;
+            status.pieces_completed = pieces_completed;
+            status.total_downloaded = total_downloaded;
+            status.total_uploaded = self.total_uploaded;
+            status.bitfield = bitfield;
+            status.elapsed = self.started_at.elapsed();
+            status.total_wasted = self.total_wasted;
+            status.super_seed_active = self.super_seed;
+            status.super_seed_remaining = self.super_seed_unrevealed.len() as u32;
+
             if is_complete && status.state != TorrentState::Seeding {
                 tracing::info!(
                     "download complete, transitioning to seeding ({} pieces)",
                     self.metainfo.info.num_pieces(),
                 );
                 status.state = TorrentState::Seeding;
+            }
+
+            if status.state != old_state {
+                let _ = self.event_tx.send(TorrentEvent::StateChanged {
+                    from: old_state,
+                    to: status.state,
+                });
+                if status.state == TorrentState::Seeding {
+                    let _ = self.event_tx.send(TorrentEvent::TorrentFinished);
+                }
+            }
+        }
+
+        // Populate per-peer status snapshots.
+        {
+            let mut pss = self.peer_statuses.write().await;
+            pss.clear();
+            let total_pieces = self.metainfo.info.num_pieces();
+            for (addr, pi) in &self.peers {
+                let progress = if pi.bitfield.len() >= total_pieces && total_pieces > 0 {
+                    pi.bitfield.iter().filter(|&&b| b).count() as f64 / total_pieces as f64
+                } else {
+                    0.0
+                };
+                pss.push(PeerStatus {
+                    addr: *addr,
+                    client_name: pi.client_version.clone(),
+                    progress,
+                    download_rate: pi.downloaded_this_round as f64,
+                    upload_rate: pi.uploaded_this_round as f64,
+                    am_choked: pi.am_choked,
+                    peer_interested: pi.peer_interested,
+                });
             }
         }
 
@@ -662,7 +831,12 @@ impl SwarmLoop {
                 }
 
                 self.spawn_peer_reader(*addr, conn_arc);
+                let client_name = pi.client_version.clone();
                 self.peers.insert(*addr, pi);
+                let _ = self.event_tx.send(TorrentEvent::PeerConnected {
+                    addr: *addr,
+                    client_name,
+                });
                 self.send_bitfield(*addr).await?;
 
                 // PEX is deferred: remote_extension_ids are not known yet.

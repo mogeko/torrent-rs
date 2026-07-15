@@ -54,10 +54,7 @@ fn make_multi_file_torrent() -> Vec<u8> {
             Bytes::from("pieces"),
             Bencode::Bytes(Bytes::from(vec![0u8; 40])),
         ),
-        (
-            Bytes::from("files"),
-            Bencode::List(vec![file1.into(), file2.into()]),
-        ),
+        (Bytes::from("files"), Bencode::List(vec![file1, file2])),
     ]);
     let root = Bencode::Dict(vec![
         (
@@ -405,4 +402,124 @@ fn torrent_spec_web_seeds_from_metainfo() {
     let spec = TorrentSpec::from(meta);
     assert_eq!(spec.web_seeds(), vec!["http://mirror.com/file.iso"]);
     assert!(spec.httpseeds().is_empty());
+}
+
+// ── FileStatus ──────────────────────────────────────────────
+
+#[test]
+fn file_status_single_file_all_complete() {
+    let data = make_single_file_torrent();
+    let meta = from_bytes(&data).unwrap();
+    let bitfield = vec![true]; // 1 piece, all done
+    let fs = meta.info.file_status(&bitfield);
+    assert_eq!(fs.len(), 1);
+    assert_eq!(fs[0].length, 1024);
+    assert_eq!(fs[0].downloaded, 1024);
+    assert!((fs[0].progress - 1.0).abs() < 0.001);
+}
+
+#[test]
+fn file_status_single_file_none_complete() {
+    let data = make_single_file_torrent();
+    let meta = from_bytes(&data).unwrap();
+    let bitfield = vec![false];
+    let fs = meta.info.file_status(&bitfield);
+    assert_eq!(fs.len(), 1);
+    assert_eq!(fs[0].downloaded, 0);
+    assert!((fs[0].progress - 0.0).abs() < 0.001);
+}
+
+#[test]
+fn file_status_multi_file() {
+    let data = make_multi_file_torrent();
+    let meta = from_bytes(&data).unwrap();
+    // piece_length=16384, 2 files of 512 each = 1024 total, 2 pieces
+    // Only piece 0 covers actual data; piece 1 is past total_size
+    let bitfield = vec![true, true];
+    let fs = meta.info.file_status(&bitfield);
+    assert_eq!(fs.len(), 2);
+    assert_eq!(fs[0].length, 512);
+    assert_eq!(fs[0].downloaded, 512);
+    assert_eq!(fs[1].length, 512);
+    assert_eq!(fs[1].downloaded, 512);
+}
+
+#[test]
+fn file_status_multi_file_partial() {
+    let data = make_multi_file_torrent();
+    let meta = from_bytes(&data).unwrap();
+    let bitfield = vec![false, false]; // 0 pieces done
+    let fs = meta.info.file_status(&bitfield);
+    assert_eq!(fs.len(), 2);
+    assert_eq!(fs[0].downloaded, 0);
+    assert_eq!(fs[1].downloaded, 0);
+    assert!((fs[0].progress - 0.0).abs() < 0.001);
+}
+
+#[test]
+fn file_status_multi_file_piece_spans_two_files() {
+    // piece_length=200, file1=150 bytes, file2=100 bytes = 250 total, 2 pieces
+    // Piece 0: bytes [0, 200) — covers file1 [0, 150) + file2 [0, 50)
+    // Piece 1: bytes [200, 250) — covers file2 [50, 100)
+    use torrent_core::bencode::Bencode;
+    use torrent_core::bencode::{Bytes, encode};
+
+    let file1 = Bencode::Dict(vec![
+        (Bytes::from("length"), Bencode::Integer(150)),
+        (
+            Bytes::from("path"),
+            Bencode::List(vec![Bencode::Bytes(Bytes::from("a.txt"))]),
+        ),
+    ]);
+    let file2 = Bencode::Dict(vec![
+        (Bytes::from("length"), Bencode::Integer(100)),
+        (
+            Bytes::from("path"),
+            Bencode::List(vec![Bencode::Bytes(Bytes::from("b.txt"))]),
+        ),
+    ]);
+    let info_dict = Bencode::Dict(vec![
+        (Bytes::from("name"), Bencode::Bytes(Bytes::from("root"))),
+        (Bytes::from("piece length"), Bencode::Integer(200)),
+        (Bytes::from("files"), Bencode::List(vec![file1, file2])),
+        (
+            Bytes::from("pieces"),
+            // 2 pieces × 20 bytes each
+            Bencode::Bytes(Bytes::from(vec![0u8; 40])),
+        ),
+    ]);
+    let root = Bencode::Dict(vec![
+        (
+            Bytes::from("announce"),
+            Bencode::Bytes(Bytes::from("http://t.com/ann")),
+        ),
+        (Bytes::from("info"), info_dict),
+    ]);
+    let data = encode(&root);
+    let meta = from_bytes(&data).unwrap();
+
+    // Only piece 0 complete: file1 gets 150, file2 gets first 50
+    let bitfield = vec![true, false];
+    let fs = meta.info.file_status(&bitfield);
+    assert_eq!(fs.len(), 2);
+    assert_eq!(fs[0].downloaded, 150);
+    assert_eq!(fs[1].downloaded, 50);
+
+    // Both pieces complete
+    let bitfield = vec![true, true];
+    let fs = meta.info.file_status(&bitfield);
+    assert_eq!(fs[0].downloaded, 150);
+    assert_eq!(fs[1].downloaded, 100);
+}
+
+#[test]
+fn file_status_empty_bitfield() {
+    let data = make_single_file_torrent();
+    let meta = from_bytes(&data).unwrap();
+    let bitfield: Vec<bool> = vec![];
+    // Should panic — bitfield length must match num_pieces
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        meta.info.file_status(&bitfield)
+    }));
+    assert!(result.is_err());
 }

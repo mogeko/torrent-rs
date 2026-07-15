@@ -20,7 +20,10 @@ mod uni_deque;
 mod upload_mgr;
 mod webseed;
 
-pub use self::config::{InfoHash, SessionConfig, TorrentState, TorrentStatus};
+pub use self::config::{
+    InfoHash, PeerStatus, SessionConfig, SessionStatus, TorrentEvent, TorrentState, TorrentStatus,
+    TrackerStatus,
+};
 pub use self::download::DownloadBuilder;
 pub use self::seed::{DataSource, PreparedTorrent, SeedBuilder};
 
@@ -30,12 +33,13 @@ use std::str::FromStr as _;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
-use crate::metainfo::{Metainfo, Mode};
+use crate::metainfo::{FileStatus, Metainfo, Mode};
 use crate::piece::PieceManager;
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
@@ -78,7 +82,6 @@ pub struct Session {
     /// Active torrents, keyed by info_hash.
     torrents: Arc<RwLock<HashMap<InfoHash, TorrentHandle>>>,
     /// Shared dual-stack DHT node (if DHT is enabled).
-    #[expect(dead_code)]
     dht_node: Option<Arc<DhtNode>>,
     /// LSD background task handle (keeps the task alive).
     #[expect(dead_code)]
@@ -417,6 +420,105 @@ impl Session {
         Ok(())
     }
 
+    /// Subscribe to a live event stream for a torrent.
+    ///
+    /// Returns a [`broadcast::Receiver`] that yields [`TorrentEvent`]s
+    /// as they occur — piece completions, state transitions, and
+    /// torrent completion.
+    ///
+    /// The broadcast channel has a bounded buffer (64 events); slow
+    /// consumers may miss events.  Always use
+    /// [`torrent_status`](Self::torrent_status) as the authoritative
+    /// source of truth.  This stream is best-effort notification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    pub fn torrent_events(
+        &self, info_hash: &InfoHash,
+    ) -> Result<broadcast::Receiver<TorrentEvent>, Error> {
+        let torrents = self.torrents.read().unwrap();
+        match torrents.get(info_hash) {
+            Some(handle) => Ok(handle.event_tx.subscribe()),
+            None => Err(Error::new(ErrorKind::InvalidInput)),
+        }
+    }
+
+    /// Clear the error state of a torrent, transitioning it back to
+    /// [`TorrentState::Downloading`] (or [`TorrentState::Seeding`] if
+    /// all pieces are already complete).
+    ///
+    /// No-op if the torrent is not in [`TorrentState::Error`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    pub async fn clear_error(&self, info_hash: &InfoHash) -> Result<(), Error> {
+        let (status, event_tx) = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(handle) => (handle.status.clone(), handle.event_tx.clone()),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+
+        let mut s = status.write().await;
+        if s.state == TorrentState::Error {
+            s.error_message = None;
+            // Transition to Downloading — the next status tick will promote
+            // to Seeding if all pieces are complete.
+            s.state = TorrentState::Downloading;
+            drop(s);
+            let _ = event_tx.send(TorrentEvent::StateChanged {
+                from: TorrentState::Error,
+                to: TorrentState::Downloading,
+            });
+        }
+        Ok(())
+    }
+
+    /// Get aggregated status across all active torrents.
+    ///
+    /// Computes sums of download/upload rates and bytes, plus
+    /// torrent and connection counts.
+    pub async fn session_status(&self) -> SessionStatus {
+        // Collect status Arcs first, then await them without holding the
+        // torrents read lock.
+        let statuses: Vec<_> = {
+            let torrents = self.torrents.read().unwrap();
+            torrents.values().map(|h| h.status.clone()).collect()
+        };
+
+        let num_torrents = statuses.len();
+        let mut total_download_rate = 0.0_f64;
+        let mut total_upload_rate = 0.0_f64;
+        let mut total_downloaded = 0_u64;
+        let mut total_uploaded = 0_u64;
+        let mut num_connections = 0_usize;
+
+        for status in &statuses {
+            let s = status.read().await;
+            total_download_rate += s.download_rate;
+            total_upload_rate += s.upload_rate;
+            total_downloaded += s.total_downloaded;
+            total_uploaded += s.total_uploaded;
+            num_connections += s.num_peers;
+        }
+
+        SessionStatus {
+            total_download_rate,
+            total_upload_rate,
+            total_downloaded,
+            total_uploaded,
+            num_torrents,
+            num_connections,
+            dht_nodes: match &self.dht_node {
+                Some(n) => n.num_nodes().await,
+                None => 0,
+            },
+        }
+    }
+
     /// Get the status of a torrent.
     ///
     /// # Errors
@@ -435,6 +537,72 @@ impl Session {
         };
 
         Ok(status.read().await.clone())
+    }
+
+    /// Get per-file download progress for a torrent.
+    ///
+    /// For single-file torrents, returns a single-element `Vec`.
+    /// For multi-file torrents, computes each file's progress by
+    /// intersecting completed piece byte ranges with file boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found,
+    /// or if metadata has not yet been resolved (magnet link without
+    /// downloaded metadata).
+    pub async fn file_status(&self, info_hash: &InfoHash) -> Result<Vec<FileStatus>, Error> {
+        let (piece_mgr, metainfo) = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(handle) => (handle.piece_mgr.clone(), handle.metainfo.clone()),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+
+        let metainfo = metainfo.ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
+        let pm = piece_mgr.read().await;
+        Ok(metainfo.info.file_status(pm.bitfield()))
+    }
+
+    /// Get per-peer status snapshots for all connected peers.
+    ///
+    /// Updated every status tick (~1 s).  Returns an empty `Vec` if
+    /// no peers are connected or the torrent has not been activated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    pub fn peer_status(&self, info_hash: &InfoHash) -> Result<Vec<PeerStatus>, Error> {
+        let peer_statuses = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(handle) => handle.peer_statuses.clone(),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+        Ok(peer_statuses
+            .try_read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default())
+    }
+
+    /// Get the tracker communication status for a torrent.
+    ///
+    /// Updated after each tracker announce (success or failure).
+    /// Before the first announce, most fields are at their defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the torrent is not found.
+    pub async fn tracker_status(&self, info_hash: &InfoHash) -> Result<TrackerStatus, Error> {
+        let ts = {
+            let torrents = self.torrents.read().unwrap();
+            match torrents.get(info_hash) {
+                Some(handle) => handle.tracker_status.clone(),
+                None => return Err(Error::new(ErrorKind::InvalidInput)),
+            }
+        };
+        Ok(ts.read().await.clone())
     }
 
     /// List all active info_hashes.

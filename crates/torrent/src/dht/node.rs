@@ -138,6 +138,11 @@ impl DhtNode {
         }
     }
 
+    /// Return the total number of nodes in both IPv4 and IPv6 routing tables.
+    pub async fn num_nodes(&self) -> usize {
+        self.routing_table.lock().await.num_nodes()
+    }
+
     /// Find peers for an info_hash via iterative DHT lookup (BEP 5 / BEP 32).
     ///
     /// Starts from the K closest nodes across both address families,

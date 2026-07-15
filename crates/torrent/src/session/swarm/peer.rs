@@ -5,8 +5,8 @@ use std::time::Instant;
 use crate::error::Error;
 use crate::peer::{PeerConnection, PeerMessage};
 
-use super::SwarmLoop;
 use super::types::{PeerEvent, parse_bitfield};
+use super::{SwarmLoop, TorrentEvent};
 
 impl SwarmLoop {
     /// Handle an event from a peer reader task.
@@ -27,6 +27,7 @@ impl SwarmLoop {
                     }
                 }
                 self.peers.remove(&addr);
+                let _ = self.event_tx.send(TorrentEvent::PeerDisconnected { addr });
                 self.peer_mgr.write().await.remove_peer(&addr);
                 if self.pex_enabled {
                     self.recently_dropped.push(addr);
@@ -59,6 +60,7 @@ impl SwarmLoop {
                         }
                     }
                     self.peers.remove(&addr);
+                    let _ = self.event_tx.send(TorrentEvent::PeerDisconnected { addr });
                     self.peer_mgr.write().await.remove_peer(&addr);
                     if self.pex_enabled {
                         self.recently_dropped.push(addr);
@@ -151,7 +153,6 @@ impl SwarmLoop {
                 // calls Storage::write_piece after SHA-1 verification passes.
                 // This avoids writing each 16 KB block separately and reduces
                 // syscall count by up to 256× for a 4 MB piece.
-                self.total_downloaded += data.len() as u64;
                 if let Some(p) = self.peers.get_mut(&addr) {
                     let len = data.len() as u64;
                     p.downloaded_bytes += len;

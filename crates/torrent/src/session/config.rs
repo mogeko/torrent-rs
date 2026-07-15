@@ -8,7 +8,7 @@
 //! - [`TorrentState`] — lifecycle state of a torrent
 //! - [`InfoHash`] — SHA-1 identifier for a torrent
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use crate::dht::BootstrapNode;
@@ -249,6 +249,11 @@ impl Default for SessionConfig {
 }
 
 /// Status of a torrent, exposed via the public API.
+///
+/// A snapshot of the torrent's current state.  Updated internally by
+/// the swarm loop at ~1-second intervals; consumers should poll
+/// [`Session::torrent_status`](super::Session::torrent_status) or
+/// subscribe to [`TorrentEvent`]s for state transitions.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TorrentStatus {
@@ -258,9 +263,9 @@ pub struct TorrentStatus {
     pub name: String,
     /// Download progress (0.0 to 1.0).
     pub progress: f64,
-    /// Download rate in bytes per second.
+    /// Download rate in bytes per second (instantaneous, ≈1 s window).
     pub download_rate: f64,
-    /// Upload rate in bytes per second.
+    /// Upload rate in bytes per second (instantaneous, ≈1 s window).
     pub upload_rate: f64,
     /// Number of connected peers.
     pub num_peers: usize,
@@ -268,6 +273,36 @@ pub struct TorrentStatus {
     pub num_seeds: usize,
     /// Current state of the torrent.
     pub state: TorrentState,
+    /// Total size of the torrent content in bytes.
+    pub total_size: u64,
+    /// Cumulative bytes downloaded and verified (SHA-1 passed).
+    pub total_downloaded: u64,
+    /// Cumulative bytes uploaded to peers.
+    pub total_uploaded: u64,
+    /// Total number of pieces in this torrent.
+    pub num_pieces: u32,
+    /// Number of pieces that have been downloaded and verified.
+    pub pieces_completed: u32,
+    /// Per-piece completion bitmap: `true` at index `i` means piece `i`
+    /// has been downloaded and verified.
+    pub bitfield: Vec<bool>,
+    /// Elapsed time since the torrent was registered with the session.
+    ///
+    /// Updated each status tick (~1 s).  Use for UI display
+    /// (e.g. "Downloading for 5m 32s").
+    pub elapsed: Duration,
+    /// Human-readable error description when `state` is [`TorrentState::Error`].
+    ///
+    /// `None` in all other states.  Reserved for future error propagation;
+    /// currently never populated by the swarm loop.
+    pub error_message: Option<String>,
+    /// Cumulative bytes received that failed SHA-1 verification (corrupt data)
+    /// or were duplicate.  Includes both P2P and web seed sources.
+    pub total_wasted: u64,
+    /// Whether super seeding mode (BEP 16) is active for this torrent.
+    pub super_seed_active: bool,
+    /// Number of pieces not yet revealed to the swarm in super seeding mode.
+    pub super_seed_remaining: u32,
 }
 
 /// Possible states of a torrent.
@@ -282,8 +317,138 @@ pub enum TorrentState {
     Seeding,
     /// Paused by user.
     Paused,
-    /// An error occurred.
+    /// Verifying existing files on disk (e.g. after restart).
+    Checking,
+    /// An unrecoverable error occurred — see [`TorrentStatus::error_message`].
     Error,
+}
+
+/// Discrete state-transition events emitted by a torrent's swarm loop.
+///
+/// Subscribe via [`Session::torrent_events`](super::Session::torrent_events).
+///
+/// # Event semantics
+///
+/// These events are *hints* — they notify consumers that something
+/// changed so they can react immediately rather than waiting for the
+/// next poll of [`TorrentStatus`].  The [`broadcast`] channel has a
+/// bounded buffer; slow consumers may miss events and should always
+/// use [`Session::torrent_status`](super::Session::torrent_status) as
+/// the authoritative source of truth.
+///
+/// [`broadcast`]: tokio::sync::broadcast
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TorrentEvent {
+    /// The torrent's lifecycle state changed.
+    StateChanged {
+        /// Previous state.
+        from: TorrentState,
+        /// New state.
+        to: TorrentState,
+    },
+    /// A single piece was downloaded and verified (SHA-1 passed).
+    PieceCompleted {
+        /// Zero-based piece index.
+        index: u32,
+    },
+    /// A piece failed SHA-1 verification (corrupt data).
+    PieceFailed {
+        /// Zero-based piece index.
+        index: u32,
+    },
+    /// All pieces are complete — the torrent has finished downloading.
+    TorrentFinished,
+    /// A new peer connection was established.
+    PeerConnected {
+        /// IP address and port of the peer.
+        addr: SocketAddr,
+        /// Client name from the peer's LTEP handshake, if available.
+        client_name: Option<String>,
+    },
+    /// A peer disconnected or was removed.
+    PeerDisconnected {
+        /// IP address and port of the peer.
+        addr: SocketAddr,
+    },
+    /// A tracker announce succeeded.
+    TrackerAnnounced {
+        /// Number of new peers returned by the tracker.
+        peers_found: usize,
+    },
+    /// A tracker announce failed.
+    TrackerError {
+        /// Human-readable error message.
+        message: String,
+    },
+    /// A single file within a multi-file torrent reached 100% completion.
+    FileCompleted {
+        /// Path components of the completed file.
+        path: Vec<String>,
+    },
+}
+
+/// Aggregated status across all torrents in a [`Session`](super::Session).
+///
+/// Obtain via [`Session::session_status`](super::Session::session_status).
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct SessionStatus {
+    /// Sum of all torrents' instantaneous download rates (bytes/s).
+    pub total_download_rate: f64,
+    /// Sum of all torrents' instantaneous upload rates (bytes/s).
+    pub total_upload_rate: f64,
+    /// Sum of all torrents' cumulative downloaded bytes.
+    pub total_downloaded: u64,
+    /// Sum of all torrents' cumulative uploaded bytes.
+    pub total_uploaded: u64,
+    /// Number of torrents currently managed by the session.
+    pub num_torrents: usize,
+    /// Total number of connected peers across all torrents.
+    pub num_connections: usize,
+    /// Total number of nodes in the DHT routing table (0 if DHT is disabled).
+    pub dht_nodes: usize,
+}
+
+/// Tracker communication status for a torrent.
+///
+/// Updated after each successful or failed tracker announce.
+/// Before the first announce, most fields are at their defaults.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TrackerStatus {
+    /// URL of the currently active tracker.
+    pub url: String,
+    /// Time remaining until the next scheduled announce, if known.
+    pub next_announce_in: Option<Duration>,
+    /// The announce interval requested by the tracker (seconds).
+    pub announce_interval: Duration,
+    /// Number of seeders reported in the last announce response.
+    pub seeds_reported: u32,
+    /// Number of leechers reported in the last announce response.
+    pub leechers_reported: u32,
+    /// Error message from the last failed announce, if any.
+    pub last_error: Option<String>,
+}
+
+/// Per-peer status snapshot.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct PeerStatus {
+    /// IP address and port of the peer.
+    pub addr: SocketAddr,
+    /// Client name and version from the peer's LTEP handshake (BEP 10 `v`).
+    pub client_name: Option<String>,
+    /// The peer's download progress (0.0 to 1.0), derived from its bitfield.
+    pub progress: f64,
+    /// Download rate from this peer in bytes/s (current ≈1 s window).
+    pub download_rate: f64,
+    /// Upload rate to this peer in bytes/s (current ≈1 s window).
+    pub upload_rate: f64,
+    /// Whether we are choked by this peer.
+    pub am_choked: bool,
+    /// Whether the peer is interested in downloading from us.
+    pub peer_interested: bool,
 }
 
 #[cfg(all(test, feature = "serde"))]
@@ -434,6 +599,20 @@ mod serde_tests {
             num_peers: 12,
             num_seeds: 3,
             state: TorrentState::Downloading,
+            total_size: 10_485_760,
+            total_downloaded: 7_864_320,
+            total_uploaded: 512_000,
+            num_pieces: 40,
+            pieces_completed: 30,
+            bitfield: vec![true; 30]
+                .into_iter()
+                .chain(std::iter::repeat(false).take(10))
+                .collect(),
+            elapsed: Duration::from_secs(120),
+            total_wasted: 0,
+            super_seed_active: false,
+            super_seed_remaining: 0,
+            error_message: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -442,6 +621,15 @@ mod serde_tests {
         assert_eq!(v["num_peers"], 12);
         assert_eq!(v["num_seeds"], 3);
         assert_eq!(v["state"], "Downloading");
+        assert_eq!(v["total_size"], 10_485_760);
+        assert_eq!(v["total_downloaded"], 7_864_320);
+        assert_eq!(v["num_pieces"], 40);
+        assert_eq!(v["pieces_completed"], 30);
+        assert_eq!(v["bitfield"].as_array().unwrap().len(), 40);
+        assert_eq!(v["elapsed"]["secs"], 120);
+        assert_eq!(v["total_wasted"], 0);
+        assert_eq!(v["super_seed_active"], false);
+        assert_eq!(v["super_seed_remaining"], 0);
     }
 
     #[test]
@@ -451,6 +639,7 @@ mod serde_tests {
             TorrentState::Downloading,
             TorrentState::Seeding,
             TorrentState::Paused,
+            TorrentState::Checking,
             TorrentState::Error,
         ];
         for &state in &states {
