@@ -1,4 +1,4 @@
-//! BitTorrent peer wire protocol (BEP 3, BEP 6, BEP 10).
+//! BitTorrent peer wire protocol (BEP 3, BEP 6, BEP 10) and uTP (BEP 29).
 //!
 //! This module provides sync primitives for peer communication:
 //! - [`PeerId`]: 20-byte client identifier
@@ -7,9 +7,10 @@
 //! - [`ExtensionNegotiation`]: LTEP extension negotiation (BEP 10)
 //! - [`compute_allowed_fast_set`]: Fast Extension piece set computation (BEP 6)
 //! - [`PeerState`]: connection state machine
+//! - [`utp`]: uTP packet header, types, and Selective ACK (BEP 29)
 //!
 //! All types are purely data with no I/O, usable in both sync and async
-//! contexts. The async `PeerConnection` type lives in the `torrent` crate.
+//! contexts. The async `PeerConnection` and uTP socket types live in the `torrent` crate.
 
 mod extension;
 mod handshake;
@@ -17,6 +18,7 @@ pub mod lsd;
 mod message;
 pub mod metadata;
 pub mod pex;
+pub mod utp;
 
 pub use self::extension::ExtensionNegotiation;
 pub use self::handshake::Handshake;
