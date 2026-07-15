@@ -335,6 +335,8 @@ pub enum TorrentState {
 /// bounded buffer; slow consumers may miss events and should always
 /// use [`Session::torrent_status`](super::Session::torrent_status) as
 /// the authoritative source of truth.
+///
+/// [`broadcast`]: tokio::sync::broadcast
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TorrentEvent {
