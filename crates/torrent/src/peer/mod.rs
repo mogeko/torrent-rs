@@ -16,12 +16,14 @@
 mod stream;
 pub(crate) mod utp;
 
-pub use torrent_core::peer::lsd;
-pub use torrent_core::peer::metadata;
-pub use torrent_core::peer::pex;
 pub use torrent_core::peer::{
     ExtensionNegotiation, Handshake, PeerId, PeerMessage, PeerState, compute_allowed_fast_set,
     decode, encode,
 };
 
-pub use self::stream::PeerConnection;
+pub use self::stream::{PeerConnection, PeerIo};
+
+// Internal protocol modules — used by session/swarm, not user-facing.
+pub(crate) use torrent_core::peer::lsd;
+pub(crate) use torrent_core::peer::metadata;
+pub(crate) use torrent_core::peer::pex;

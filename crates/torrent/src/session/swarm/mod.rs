@@ -20,7 +20,7 @@ use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
 use crate::magnet::hex_encode;
 use crate::metainfo::{Metainfo, Mode};
-use crate::peer::utp::socket::UtpSocket;
+use crate::peer::utp::UtpSocket;
 use crate::peer::{
     ExtensionNegotiation, PeerConnection, PeerId, PeerMessage, compute_allowed_fast_set,
 };

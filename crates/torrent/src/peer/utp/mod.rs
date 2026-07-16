@@ -15,8 +15,11 @@
 //!
 //! [`Session`]: crate::session::Session
 
-pub(crate) mod connection;
-pub(crate) mod socket;
-pub(crate) mod stream;
+mod connection;
+mod socket;
+mod stream;
+
+pub(crate) use self::socket::UtpSocket;
+pub(crate) use self::stream::UtpStream;
 
 use torrent_core::peer::utp::{UtpCongestionControl, UtpHeader, UtpType};

@@ -9,8 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{Error, ErrorKind};
 
-use super::utp::socket::UtpSocket;
-use super::utp::stream::UtpStream;
+use super::utp::{UtpSocket, UtpStream};
 use super::{Handshake, PeerId, PeerMessage, PeerState, decode, encode};
 
 /// Timeout for TCP connect + handshake exchange.

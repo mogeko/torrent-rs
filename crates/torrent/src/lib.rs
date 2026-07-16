@@ -7,7 +7,8 @@
 //! # Re-exports
 //!
 //! Commonly used core types are re-exported for convenience:
-//! - [`bencode`], [`error`], [`magnet`], [`metainfo`], [`piece`] from `torrent_core`
+//! - [`bencode`], [`error`], [`magnet`], [`metainfo`] from `torrent_core`
+//! - [`IntoUrl`], [`Url`] for URL handling
 //!
 //! # Quick Start
 //!
@@ -27,9 +28,6 @@
 //! # }
 //! ```
 
-// Re-export key core types so users only need `torrent` as a dependency.
-pub use torrent_core::{bencode, error, magnet, metainfo, piece, spec};
-
 pub mod dht;
 pub(crate) mod net;
 pub mod peer;
@@ -37,8 +35,13 @@ pub mod session;
 pub mod storage;
 pub mod tracker;
 
-// Re-export commonly-used types at the crate root for convenience.
-pub use peer::PeerId;
+// Re-export key core types so users only need `torrent` as a dependency.
+pub use torrent_core::{bencode, error, magnet, metainfo};
+// General-purpose URL handling.
+pub use net::{IntoUrl, Url};
+
+// Internal-only core types used by session/tracker internals.
+pub(crate) use torrent_core::{piece, spec};
 
 /// Client identifier sent in BEP 10 LTEP handshakes.
 ///
