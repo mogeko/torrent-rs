@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use crate::error::{Error, ErrorKind};
 use super::{UtpCongestionControl, UtpHeader, UtpType};
 
 /// Maximum number of retransmission attempts before giving up.
@@ -113,7 +114,7 @@ impl UtpConnection {
     pub(crate) async fn connect(
         socket: Arc<UdpSocket>, remote_addr: SocketAddr,
         outgoing_tx: mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Error> {
         let conn_id_recv = rand::random::<u16>();
         let conn_id_send = conn_id_recv.wrapping_add(1);
         let _seq_nr = 1u16; // BEP 29: initial seq_nr = 1 (used in SYN packet)
@@ -179,7 +180,7 @@ impl UtpConnection {
 
     /// Send the ST_STATE response to accept a connection (responder side).
     #[allow(dead_code)]
-    pub(crate) async fn send_state_response(&mut self) -> Result<(), String> {
+    pub(crate) async fn send_state_response(&mut self) -> Result<(), Error> {
         let ack = self.ack_nr;
         // ST_STATE: pure ACK, does NOT increment seq_nr
         let seq = self.seq_nr; // use current seq, don't bump
@@ -198,7 +199,7 @@ impl UtpConnection {
     /// Updates connection state, handles ACKs, and buffers payload data.
     pub(crate) async fn handle_packet(
         &mut self, header: &UtpHeader, payload: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         self.last_activity = Instant::now();
 
         // Update delay measurement
@@ -371,9 +372,9 @@ impl UtpConnection {
     ///
     /// Splits data into uTP-sized packets and sends them.
     /// Each ST_DATA packet increments seq_nr.
-    pub(crate) async fn send(&mut self, data: &[u8]) -> Result<usize, String> {
+    pub(crate) async fn send(&mut self, data: &[u8]) -> Result<usize, Error> {
         if self.state != ConnState::Connected {
-            return Err("uTP: not connected".into());
+            return Err(Error::new(ErrorKind::PeerUtpProtocolError));
         }
 
         let packet_size = self.cc.packet_size().max(150) as usize;
@@ -392,7 +393,7 @@ impl UtpConnection {
 
     /// Close the connection gracefully (send FIN).
     #[allow(dead_code)]
-    pub(crate) async fn close(&mut self) -> Result<(), String> {
+    pub(crate) async fn close(&mut self) -> Result<(), Error> {
         if self.state == ConnState::Connected {
             let seq = self.seq_nr;
             self.seq_nr = self.seq_nr.wrapping_add(1);
@@ -451,7 +452,7 @@ impl UtpConnection {
     /// Should be called periodically (every ~100ms). Checks for:
     /// - Packets that have timed out and need retransmission
     /// - Overall connection timeout (no activity for too long)
-    pub(crate) async fn check_retransmit(&mut self) -> Result<(), String> {
+    pub(crate) async fn check_retransmit(&mut self) -> Result<(), Error> {
         let now = Instant::now();
         let timeout_ms = self.cc.timeout_ms() as u64;
 
@@ -459,7 +460,7 @@ impl UtpConnection {
         if self.last_activity.elapsed().as_millis() as u64 > timeout_ms * 4 {
             // Connection is dead
             self.state = ConnState::Closed;
-            return Err("uTP: connection timed out".into());
+            return Err(Error::new(ErrorKind::PeerUtpProtocolError));
         }
 
         // Check individual packet timeouts
@@ -476,7 +477,7 @@ impl UtpConnection {
                 if pkt.retransmit_count >= MAX_RETRANSMIT {
                     tracing::warn!("uTP: max retransmits reached for seq={}, closing", seq);
                     self.state = ConnState::Closed;
-                    return Err("uTP: max retransmits reached".into());
+                    return Err(Error::new(ErrorKind::PeerUtpProtocolError));
                 }
             }
 
@@ -494,7 +495,7 @@ impl UtpConnection {
                 self.socket
                     .send_to(&pkt.data, self.remote_addr)
                     .await
-                    .map_err(|e| format!("uTP: send error: {e}"))?;
+                    .map_err(|e| Error::with_source(ErrorKind::PeerUtpConnectionFailed, e))?;
 
                 self.send_buffer.insert(seq, pkt);
             }
@@ -516,7 +517,7 @@ impl UtpConnection {
     }
 
     /// Send a packet with full header construction.
-    async fn send_packet(&mut self, utp_type: UtpType, payload: &[u8]) -> Result<(), String> {
+    async fn send_packet(&mut self, utp_type: UtpType, payload: &[u8]) -> Result<(), Error> {
         let seq = if utp_type.increments_seq_nr() {
             let s = self.seq_nr;
             self.seq_nr = self.seq_nr.wrapping_add(1);
@@ -531,7 +532,7 @@ impl UtpConnection {
     /// Send raw uTP data with explicit seq/ack.
     async fn send_raw(
         &mut self, utp_type: UtpType, seq_nr: u16, ack_nr: u16, payload: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let now = Instant::now();
         let timestamp_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -571,7 +572,7 @@ impl UtpConnection {
         self.socket
             .send_to(&packet, self.remote_addr)
             .await
-            .map_err(|e| format!("uTP: send error: {e}"))?;
+            .map_err(|e| Error::with_source(ErrorKind::PeerUtpConnectionFailed, e))?;
 
         self.last_activity = now;
 

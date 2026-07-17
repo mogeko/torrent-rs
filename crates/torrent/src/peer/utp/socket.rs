@@ -24,6 +24,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc};
 
 use super::connection::{ConnState, UtpConnection, UtpIncoming};
+use crate::error::{Error, ErrorKind};
 use torrent_core::peer::utp::{UtpHeader, UtpType};
 
 /// Channel buffer size for the main recv loop.
@@ -46,10 +47,10 @@ pub(crate) struct UtpConnectionHandle {
 
 impl UtpConnectionHandle {
     /// Send data to the remote peer through this connection.
-    pub(crate) fn send(&mut self, data: Vec<u8>) -> Result<(), String> {
+    pub(crate) fn send(&mut self, data: Vec<u8>) -> Result<(), Error> {
         self.data_tx
             .send(data)
-            .map_err(|_| "uTP: connection closed".to_string())
+            .map_err(|_| Error::new(ErrorKind::PeerUtpConnectionFailed))
     }
 
     /// Receive available data from this connection (non-blocking).
@@ -92,14 +93,14 @@ impl UtpSocket {
     ///
     /// Spawns a background receive loop that dispatches packets
     /// to registered connections.
-    pub(crate) async fn bind(addr: SocketAddr) -> Result<Self, String> {
+    pub(crate) async fn bind(addr: SocketAddr) -> Result<Self, Error> {
         let socket = UdpSocket::bind(addr)
             .await
-            .map_err(|e| format!("uTP: bind failed: {e}"))?;
+            .map_err(|e| Error::with_source(ErrorKind::PeerUtpConnectionFailed, e))?;
 
         let local_addr = socket
             .local_addr()
-            .map_err(|e| format!("uTP: local_addr failed: {e}"))?;
+            .map_err(|e| Error::with_source(ErrorKind::PeerUtpConnectionFailed, e))?;
 
         let socket = Arc::new(socket);
         let connections: Arc<Mutex<HashMap<u16, mpsc::UnboundedSender<UtpIncoming>>>> =
@@ -139,7 +140,7 @@ impl UtpSocket {
     /// The connection runs as a background task.
     pub(crate) async fn connect(
         &self, remote_addr: SocketAddr,
-    ) -> Result<UtpConnectionHandle, String> {
+    ) -> Result<UtpConnectionHandle, Error> {
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
         let (_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (conn_data_tx, data_rx) = mpsc::unbounded_channel::<Vec<u8>>();

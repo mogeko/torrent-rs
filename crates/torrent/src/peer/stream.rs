@@ -192,30 +192,10 @@ impl PeerConnection {
 
         match &self.inner {
             PeerStreamInner::Tcp { writer, .. } => {
-                let mut writer = writer.lock().await;
-
-                tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, writer.write_all(&data))
-                    .await
-                    .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
-                    .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
-
-                tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, writer.flush())
-                    .await
-                    .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
-                    .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+                write_with_timeout(writer, &data).await?;
             }
             PeerStreamInner::Generic { stream } => {
-                let mut stream = stream.lock().await;
-
-                tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, stream.write_all(&data))
-                    .await
-                    .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
-                    .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
-
-                tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, stream.flush())
-                    .await
-                    .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
-                    .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+                write_with_timeout(stream, &data).await?;
             }
         }
 
@@ -232,18 +212,10 @@ impl PeerConnection {
             let mut len_buf = [0u8; 4];
             match &self.inner {
                 PeerStreamInner::Tcp { reader, .. } => {
-                    let mut reader = reader.lock().await;
-                    tokio::time::timeout(MESSAGE_READ_TIMEOUT, reader.read_exact(&mut len_buf))
-                        .await
-                        .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
-                        .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+                    read_with_timeout(reader, &mut len_buf).await?;
                 }
                 PeerStreamInner::Generic { stream } => {
-                    let mut stream = stream.lock().await;
-                    tokio::time::timeout(MESSAGE_READ_TIMEOUT, stream.read_exact(&mut len_buf))
-                        .await
-                        .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
-                        .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+                    read_with_timeout(stream, &mut len_buf).await?;
                 }
             }
             u32::from_be_bytes(len_buf)
@@ -264,18 +236,10 @@ impl PeerConnection {
         let mut msg_buf = vec![0u8; len as usize];
         match &self.inner {
             PeerStreamInner::Tcp { reader, .. } => {
-                let mut reader = reader.lock().await;
-                tokio::time::timeout(MESSAGE_READ_TIMEOUT, reader.read_exact(&mut msg_buf))
-                    .await
-                    .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
-                    .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+                read_with_timeout(reader, &mut msg_buf).await?;
             }
             PeerStreamInner::Generic { stream } => {
-                let mut stream = stream.lock().await;
-                tokio::time::timeout(MESSAGE_READ_TIMEOUT, stream.read_exact(&mut msg_buf))
-                    .await
-                    .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
-                    .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+                read_with_timeout(stream, &mut msg_buf).await?;
             }
         }
 
@@ -318,4 +282,32 @@ impl PeerConnection {
     pub fn remote_reserved(&self) -> &[u8; 8] {
         &self.remote_reserved
     }
+}
+
+/// Write data to a buffered async writer behind a Mutex, with timeout.
+async fn write_with_timeout(
+    writer: &Mutex<impl AsyncWrite + Unpin>, data: &[u8],
+) -> Result<(), Error> {
+    let mut w = writer.lock().await;
+    tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, w.write_all(data))
+        .await
+        .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+        .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+    tokio::time::timeout(MESSAGE_WRITE_TIMEOUT, w.flush())
+        .await
+        .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+        .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+    Ok(())
+}
+
+/// Read exact bytes from a buffered async reader behind a Mutex, with timeout.
+async fn read_with_timeout(
+    reader: &Mutex<impl AsyncRead + Unpin>, buf: &mut [u8],
+) -> Result<(), Error> {
+    let mut r = reader.lock().await;
+    tokio::time::timeout(MESSAGE_READ_TIMEOUT, r.read_exact(buf))
+        .await
+        .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+        .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+    Ok(())
 }
