@@ -180,7 +180,6 @@ impl UtpConnection {
     }
 
     /// Send the ST_STATE response to accept a connection (responder side).
-    #[allow(dead_code)]
     pub(crate) async fn send_state_response(&mut self) -> Result<(), Error> {
         let ack = self.ack_nr;
         // ST_STATE: pure ACK, does NOT increment seq_nr
@@ -430,12 +429,6 @@ impl UtpConnection {
     /// Check if the connection is closed.
     pub(crate) fn is_closed(&self) -> bool {
         self.state == ConnState::Closed
-    }
-
-    /// Get the connection ID we use for sending.
-    #[allow(dead_code)]
-    pub(crate) fn conn_id_send(&self) -> u16 {
-        self.conn_id_send
     }
 
     /// Get the connection ID we expect in incoming packets.

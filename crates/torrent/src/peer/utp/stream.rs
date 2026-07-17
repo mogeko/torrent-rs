@@ -37,12 +37,6 @@ impl UtpStream {
             read_pos: 0,
         }
     }
-
-    /// Consume the stream and return the underlying handle.
-    #[allow(dead_code)]
-    pub(crate) fn into_handle(self) -> UtpConnectionHandle {
-        self.handle
-    }
 }
 
 impl AsyncRead for UtpStream {

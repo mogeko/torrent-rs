@@ -58,18 +58,6 @@ impl UtpConnectionHandle {
     pub(crate) fn try_recv(&mut self) -> Option<Vec<u8>> {
         self.data_rx.try_recv().ok()
     }
-
-    /// Receive data from this connection (async).  
-    #[allow(dead_code)]
-    pub(crate) async fn recv(&mut self) -> Option<Vec<u8>> {
-        self.data_rx.recv().await
-    }
-
-    /// Check current connection state (non-blocking).
-    #[allow(dead_code)]
-    pub(crate) fn state(&mut self) -> Option<ConnState> {
-        self.state_rx.try_recv().ok()
-    }
 }
 
 /// Manages a shared UDP socket for all uTP connections.
@@ -202,7 +190,7 @@ impl UtpSocket {
         let (_conn_data_tx, _data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (_state_tx, _state_rx) = mpsc::unbounded_channel::<ConnState>();
 
-        let conn = UtpConnection::accept(syn, socket.clone(), src, outgoing_tx.clone());
+        let mut conn = UtpConnection::accept(syn, socket.clone(), src, outgoing_tx.clone());
 
         let conn_id_recv = conn.conn_id_recv();
 
@@ -210,6 +198,14 @@ impl UtpSocket {
         {
             let mut guard = connections.lock().await;
             guard.insert(conn_id_recv, packet_tx.clone());
+        }
+
+        // BEP 29: respond with ST_STATE to complete the handshake
+        if let Err(e) = conn.send_state_response().await {
+            tracing::warn!("uTP: failed to send STATE response to {}: {}", src, e);
+            let mut guard = connections.lock().await;
+            guard.remove(&conn_id_recv);
+            return;
         }
 
         tracing::info!(
