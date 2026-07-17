@@ -12,6 +12,7 @@
 
 mod config;
 mod download;
+mod inbound;
 mod lsd;
 mod peer_mgr;
 mod seed;
@@ -33,6 +34,7 @@ use std::str::FromStr as _;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -45,6 +47,7 @@ use crate::piece::PieceManager;
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 
+use self::inbound::accept_loop;
 use self::lsd::LsdService;
 use self::seed::{DataSourceStorage, verify_existing};
 use self::swarm::{TorrentCommand, TorrentHandle};
@@ -169,6 +172,22 @@ impl Session {
         } else {
             None
         };
+
+        // Initialize TCP listener for inbound peer connections
+        let listen_addr =
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.listen_port));
+        match TcpListener::bind(listen_addr).await {
+            Ok(listener) => {
+                tracing::info!("TCP listener bound to {}", listen_addr);
+                let accept_torrents = torrents.clone();
+                tokio::spawn(async move {
+                    accept_loop(listener, accept_torrents).await;
+                });
+            }
+            Err(e) => {
+                tracing::warn!("TCP listen failed on {}: {}", listen_addr, e);
+            }
+        }
 
         Ok(Session {
             config,
