@@ -6,6 +6,7 @@ use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufStream, BufWriter,
 };
 use tokio::net::TcpSocket;
+use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 
@@ -132,6 +133,62 @@ impl PeerConnection {
             Self::perform_handshake(&mut utp_stream, info_hash, our_peer_id).await?;
 
         tracing::info!("uTP handshake complete with {}", addr);
+
+        Ok(PeerConnection {
+            inner: PeerStreamInner::Generic {
+                stream: Mutex::new(BufStream::new(Box::pin(utp_stream))),
+            },
+            state: PeerState::Init,
+            remote_peer_id: Some(remote_peer_id),
+            remote_reserved,
+        })
+    }
+
+    /// Accept an inbound TCP connection and perform the BEP 3 handshake.
+    ///
+    /// Sets TCP_NODELAY on the accepted stream, then performs the handshake
+    /// with the given `info_hash` and `our_peer_id`. This is the server
+    /// side of the handshake (reads first, then writes).
+    #[allow(dead_code)]
+    pub(crate) async fn inbound(
+        stream: TcpStream, info_hash: [u8; 20], our_peer_id: PeerId,
+    ) -> Result<Self, Error> {
+        stream
+            .set_nodelay(true)
+            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+
+        let mut stream = stream;
+        let (remote_peer_id, remote_reserved) =
+            Self::perform_handshake(&mut stream, info_hash, our_peer_id).await?;
+
+        let (read_half, write_half) = stream.into_split();
+
+        tracing::info!("TCP inbound handshake complete");
+
+        Ok(PeerConnection {
+            inner: PeerStreamInner::Tcp {
+                reader: Mutex::new(BufReader::new(read_half)),
+                writer: Mutex::new(BufWriter::new(write_half)),
+            },
+            state: PeerState::Init,
+            remote_peer_id: Some(remote_peer_id),
+            remote_reserved,
+        })
+    }
+
+    /// Accept an inbound uTP connection and perform the BEP 3 handshake.
+    ///
+    /// Takes an already-established uTP stream and performs the BEP 3
+    /// handshake. Returns a `PeerConnection` over uTP transport.
+    #[allow(dead_code)]
+    pub(crate) async fn inbound_utp(
+        utp_stream: UtpStream, info_hash: [u8; 20], our_peer_id: PeerId,
+    ) -> Result<Self, Error> {
+        let mut utp_stream = utp_stream;
+        let (remote_peer_id, remote_reserved) =
+            Self::perform_handshake(&mut utp_stream, info_hash, our_peer_id).await?;
+
+        tracing::info!("uTP inbound handshake complete");
 
         Ok(PeerConnection {
             inner: PeerStreamInner::Generic {
