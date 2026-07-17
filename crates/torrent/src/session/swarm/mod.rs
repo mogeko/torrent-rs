@@ -766,23 +766,27 @@ impl SwarmLoop {
         }
 
         // Phase 2: Spawn connection tasks and collect results WITHOUT lock.
-        // When uTP is enabled, try both TCP and uTP in parallel, preferring uTP.
+        // Race TCP and uTP in parallel; prefer uTP, fall back to TCP.
+        // TCP is spawned as a separate task so it runs concurrently with uTP —
+        // if uTP times out, TCP may already be connected by then.
         let mut joinset = JoinSet::new();
         for &addr in &batch {
-            let info_hash = self.info_hash;
-            let peer_id = self.peer_id;
-            let utp_socket = self.utp_socket.clone();
+            let (ih, pid, utp_socket) = (self.info_hash, self.peer_id, self.utp_socket.clone());
             joinset.spawn(async move {
                 let result = if let Some(utp) = &utp_socket {
-                    let tcp_fut = PeerConnection::connect(addr, info_hash, peer_id);
-                    let utp_fut = PeerConnection::connect_utp(addr, info_hash, peer_id, utp);
-                    // Race TCP and uTP in parallel, prefer uTP
-                    match tokio::join!(utp_fut, tcp_fut) {
-                        (Ok(utp_conn), _) => Ok(utp_conn),
-                        (Err(_), tcp_result) => tcp_result,
+                    let tcp_task = tokio::spawn(PeerConnection::connect(addr, ih, pid));
+                    match PeerConnection::connect_utp(addr, ih, pid, utp).await {
+                        Ok(conn) => {
+                            tcp_task.abort(); // cancel the TCP task if uTP succeeded
+                            Ok(conn)
+                        }
+                        Err(_utp_err) => match tcp_task.await {
+                            Ok(tcp_result) => tcp_result,
+                            Err(join_err) => Err(Error::peer_closed(join_err)),
+                        },
                     }
                 } else {
-                    PeerConnection::connect(addr, info_hash, peer_id).await
+                    PeerConnection::connect(addr, ih, pid).await
                 };
                 (addr, result)
             });

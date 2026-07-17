@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufStream, BufWriter,
+};
 use tokio::net::TcpSocket;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
@@ -36,7 +38,7 @@ enum PeerStreamInner {
     },
     /// Generic (uTP or other): single buffered stream behind a Mutex.
     Generic {
-        stream: Mutex<tokio::io::BufStream<Pin<Box<dyn PeerIo>>>>,
+        stream: Mutex<BufStream<Pin<Box<dyn PeerIo>>>>,
     },
 }
 
@@ -133,7 +135,7 @@ impl PeerConnection {
 
         Ok(PeerConnection {
             inner: PeerStreamInner::Generic {
-                stream: Mutex::new(tokio::io::BufStream::new(Box::pin(utp_stream))),
+                stream: Mutex::new(BufStream::new(Box::pin(utp_stream))),
             },
             state: PeerState::Init,
             remote_peer_id: Some(remote_peer_id),
