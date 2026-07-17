@@ -13,7 +13,8 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::error::{Error, ErrorKind};
-use crate::peer::{PeerConnection, PeerId};
+use crate::peer::utp::UtpStream;
+use crate::peer::{Handshake, PeerConnection, PeerId};
 
 use super::config::InfoHash;
 use super::swarm::{TorrentCommand, TorrentHandle};
@@ -93,4 +94,58 @@ async fn read_handshake(
         .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
 
     super::super::peer::Handshake::from_bytes(&buf)
+}
+
+/// Handle an inbound uTP connection: handshake → dispatch.
+pub(crate) async fn handle_inbound_utp(
+    mut stream: UtpStream, addr: SocketAddr,
+    torrents: &Arc<RwLock<HashMap<InfoHash, TorrentHandle>>>,
+) {
+    // Read remote handshake first
+    let mut buf = [0u8; 68];
+    let remote_handshake = match tokio::time::timeout(
+        INBOUND_HANDSHAKE_TIMEOUT,
+        AsyncReadExt::read_exact(&mut stream, &mut buf),
+    )
+    .await
+    {
+        Ok(Ok(_)) => match Handshake::from_bytes(&buf) {
+            Ok(hs) => hs,
+            Err(e) => {
+                tracing::debug!("inbound uTP handshake parse failed from {}: {}", addr, e);
+                return;
+            }
+        },
+        _ => {
+            tracing::debug!("inbound uTP handshake read failed from {}", addr);
+            return;
+        }
+    };
+
+    let info_hash = remote_handshake.info_hash;
+
+    let control_tx = {
+        let guard = torrents.read().unwrap();
+        guard.get(&info_hash).and_then(|h| h.control_tx.clone())
+    };
+
+    let control_tx = match control_tx {
+        Some(tx) => tx,
+        None => {
+            tracing::debug!("inbound uTP for unknown info_hash from {}", addr);
+            return;
+        }
+    };
+
+    let conn = match PeerConnection::inbound_utp(stream, info_hash, PeerId::random()).await {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            tracing::debug!("inbound uTP handshake failed for {}: {}", addr, e);
+            return;
+        }
+    };
+
+    let _ = control_tx
+        .send(TorrentCommand::InboundPeer(addr, conn))
+        .await;
 }
