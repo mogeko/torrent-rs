@@ -385,7 +385,7 @@ impl UtpSocket {
             let mut guard = connections.lock().await;
             guard.remove(&conn_id_recv);
         }
-        tracing::info!("uTP: connection {} cleaned up", conn_id_recv);
+        tracing::debug!("uTP: connection {} cleaned up", conn_id_recv);
     }
 
     /// Send a ST_RESET to an unknown connection.

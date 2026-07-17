@@ -25,6 +25,10 @@ use super::{UtpCongestionControl, UtpHeader, UtpType};
 /// Maximum number of retransmission attempts before giving up.
 const MAX_RETRANSMIT: u32 = 10;
 
+/// Maximum bytes of reassembled data buffered before backpressure.
+/// Prevents unbounded memory growth if the reader is slow.
+const MAX_READY_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
+
 /// Retransmission check interval.
 pub(crate) const RETRANSMIT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -212,11 +216,13 @@ impl UtpConnection {
 
         match self.state {
             ConnState::SynSent => {
-                // Expect ST_STATE to complete handshake
                 if header.utp_type == UtpType::StState {
                     self.state = ConnState::Connected;
                     self.ack_nr = header.seq_nr;
                     tracing::info!("uTP: connection established to {}", self.remote_addr);
+                } else if header.utp_type == UtpType::StReset {
+                    tracing::warn!("uTP: received RST during connect to {}", self.remote_addr);
+                    self.state = ConnState::Closed;
                 }
             }
             ConnState::SynRecv => {
@@ -288,6 +294,17 @@ impl UtpConnection {
 
         // Check if this is the next expected packet
         if pkt_seq == self.ack_nr.wrapping_add(1) {
+            // Enforce ready_data cap to prevent unbounded memory growth
+            if self.ready_data.len() + payload.len() > MAX_READY_BYTES {
+                tracing::warn!(
+                    "uTP: ready_data exceeds {} bytes for {}, closing",
+                    MAX_READY_BYTES,
+                    self.remote_addr
+                );
+                self.state = ConnState::Closed;
+                return;
+            }
+
             // In-order: advance ack_nr and deliver
             self.ack_nr = pkt_seq;
             self.ready_data.extend(payload);
@@ -295,6 +312,9 @@ impl UtpConnection {
             // Deliver any subsequent in-order packets from recv_buffer
             let mut next = pkt_seq.wrapping_add(1);
             while let Some(data) = self.recv_buffer.remove(&next) {
+                if self.ready_data.len() + data.len() > MAX_READY_BYTES {
+                    break;
+                }
                 self.ack_nr = next;
                 self.ready_data.extend(data);
                 next = next.wrapping_add(1);
