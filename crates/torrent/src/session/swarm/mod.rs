@@ -837,6 +837,20 @@ impl SwarmLoop {
     async fn register_new_peer(
         &mut self, addr: SocketAddr, conn: Arc<PeerConnection>,
     ) -> Result<(), Error> {
+        // Dedup: reject if this peer is already connected (TCP+uTP race)
+        {
+            let pm = self.peer_mgr.read().await;
+            if pm.connection(&addr).is_some() {
+                tracing::debug!("peer {} already connected, rejecting duplicate", addr);
+                return Ok(());
+            }
+            // Capacity: reject if at max connections
+            if pm.num_connections() >= pm.max_connections() as usize {
+                tracing::debug!("max connections reached, rejecting inbound {}", addr);
+                return Ok(());
+            }
+        }
+
         let mut pi = PeerInfo::new();
 
         // BEP 10: register our enabled extensions.
