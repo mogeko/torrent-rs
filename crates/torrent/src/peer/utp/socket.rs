@@ -21,11 +21,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
-use super::connection::{ConnState, UtpConnection, UtpIncoming};
 use crate::error::{Error, ErrorKind};
-use torrent_core::peer::utp::{UtpHeader, UtpType};
+
+use super::connection::{ConnState, RETRANSMIT_CHECK_INTERVAL, UtpConnection, UtpIncoming};
+use super::{UtpHeader, UtpType};
 
 /// Channel buffer size for the main recv loop.
 const SOCKET_RECV_BUF: usize = 4096;
@@ -85,7 +86,7 @@ pub(crate) struct UtpSocket {
     /// Outgoing packet channel from connections to the send path.
     _outgoing_tx: mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
     /// Shutdown signal sender.
-    _shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    _shutdown_tx: oneshot::Sender<()>,
 }
 
 impl UtpSocket {
@@ -106,7 +107,7 @@ impl UtpSocket {
         let connections: Arc<Mutex<HashMap<u16, mpsc::UnboundedSender<UtpIncoming>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (outgoing_tx, _outgoing_rx) = mpsc::unbounded_channel();
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         // Spawn the receive loop
         let recv_socket = socket.clone();
@@ -239,7 +240,7 @@ impl UtpSocket {
         socket: Arc<UdpSocket>,
         connections: Arc<Mutex<HashMap<u16, mpsc::UnboundedSender<UtpIncoming>>>>,
         outgoing_tx: mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
-        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+        mut shutdown_rx: oneshot::Receiver<()>,
     ) {
         let mut buf = vec![0u8; SOCKET_RECV_BUF];
 
@@ -326,8 +327,7 @@ impl UtpSocket {
         connections: Arc<Mutex<HashMap<u16, mpsc::UnboundedSender<UtpIncoming>>>>,
         conn_id_recv: u16,
     ) {
-        let mut retransmit_timer =
-            tokio::time::interval(super::connection::RETRANSMIT_CHECK_INTERVAL);
+        let mut retransmit_timer = tokio::time::interval(RETRANSMIT_CHECK_INTERVAL);
 
         loop {
             tokio::select! {
