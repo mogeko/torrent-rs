@@ -21,7 +21,7 @@ use super::Url;
 /// # Examples
 ///
 /// ```
-/// use torrent::tracker::IntoUrl;
+/// use torrent::IntoUrl;
 ///
 /// fn connect(url: impl IntoUrl) -> Result<(), torrent::error::Error> {
 ///     let url = url.into_url()?;

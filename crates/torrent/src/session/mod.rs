@@ -40,6 +40,7 @@ use crate::dht::{DhtNode, generate_node_id};
 use crate::error::{Error, ErrorKind};
 use crate::magnet::{MagnetUri, hex_encode};
 use crate::metainfo::{FileStatus, Metainfo, Mode};
+use crate::peer::utp::UtpSocket;
 use crate::piece::PieceManager;
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
@@ -86,6 +87,9 @@ pub struct Session {
     /// LSD background task handle (keeps the task alive).
     #[expect(dead_code)]
     lsd_task: Option<JoinHandle<()>>,
+    /// Shared uTP socket for all torrents (BEP 29).
+    /// Created when [`SessionConfig::enable_utp`] is true.
+    utp_socket: Option<Arc<UtpSocket>>,
 }
 
 impl Session {
@@ -148,11 +152,30 @@ impl Session {
             None
         };
 
+        // Initialize uTP socket (BEP 29)
+        let utp_socket = if config.enable_utp {
+            let bind_addr =
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.listen_port));
+            match UtpSocket::bind(bind_addr).await {
+                Ok(socket) => {
+                    tracing::info!("uTP socket bound to {}", socket.local_addr());
+                    Some(Arc::new(socket))
+                }
+                Err(e) => {
+                    tracing::warn!("uTP init failed, uTP disabled: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Session {
             config,
             torrents,
             dht_node,
             lsd_task,
+            utp_socket,
         })
     }
 
@@ -165,7 +188,8 @@ impl Session {
     pub(crate) fn register_spec(&self, spec: impl Into<TorrentSpec>) -> InfoHash {
         let spec = spec.into();
         let info_hash = spec.info_hash();
-        let handle = TorrentHandle::register(spec, &self.config);
+        let mut handle = TorrentHandle::register(spec, &self.config);
+        handle.utp_socket = self.utp_socket.clone();
         self.torrents.write().unwrap().insert(info_hash, handle);
         info_hash
     }

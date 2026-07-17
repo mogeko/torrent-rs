@@ -39,8 +39,6 @@ pub use torrent_core::tracker::{
     parse_compact_peers_ipv6,
 };
 
-pub use crate::net::{IntoUrl, Url};
-
 pub use self::http::HttpTracker;
 pub use self::udp::UdpTracker;
 
@@ -52,6 +50,7 @@ use tokio::task::JoinSet;
 
 use crate::error::{Error, ErrorKind};
 use crate::spec::TorrentSpec;
+use crate::{IntoUrl, Url};
 
 /// Default per-request timeout for tracker announces (15 s).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);

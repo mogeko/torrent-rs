@@ -13,10 +13,13 @@ mod node;
 mod query;
 mod rpc;
 
-pub use torrent_core::dht::{
-    BootstrapNode, DualRoutingTable, Node, RoutingTable, generate_node_id, generate_secret, krpc,
-};
+// Public: user-facing DHT types for configuration and raw DHT operations.
+pub use torrent_core::dht::{BootstrapNode, Node, RoutingTable, krpc};
+
+pub use self::query::{announce_peer, find_node, get_peers};
+pub use self::rpc::{DhtRpc, QueryHandler};
+
+// Internal: session-level implementation details.
+pub(crate) use torrent_core::dht::{DualRoutingTable, generate_node_id, generate_secret};
 
 pub(crate) use self::node::DhtNode;
-pub use self::query::{announce_peer, find_node, get_peers};
-pub use self::rpc::DhtRpc;

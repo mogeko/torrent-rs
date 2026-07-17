@@ -516,4 +516,27 @@ mod tests {
         let parsed = LsdAnnounce::from_bytes(data).expect("should skip short infohash");
         assert_eq!(parsed.info_hashes.len(), 1); // only the valid 40-char one
     }
+
+    #[test]
+    fn parse_random_garbage_does_not_panic() {
+        // Random bytes should not panic — just return Err.
+        let garbage = b"not an lsd message at all just some random bytes \xff\xfe\xfd";
+        assert!(LsdAnnounce::from_bytes(garbage).is_err());
+    }
+
+    #[test]
+    fn parse_prefix_only_is_error() {
+        let prefix_only = b"BT-SEARCH * HTTP/1.1\r\n\r\n";
+        assert!(LsdAnnounce::from_bytes(prefix_only).is_err());
+    }
+
+    // ── Constant verification ──────────────────────────────────────
+
+    #[test]
+    fn multicast_constants_match_bep14() {
+        use std::net::Ipv4Addr;
+        // BEP 14: 239.192.152.143:6771 (org-local scope)
+        assert_eq!(LSD_IPV4_MULTICAST, Ipv4Addr::new(239, 192, 152, 143));
+        assert_eq!(LSD_PORT, 6771);
+    }
 }

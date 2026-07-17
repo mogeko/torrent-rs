@@ -79,6 +79,12 @@ pub enum ErrorKind {
     PeerInvalidFastMessage,
     /// An LSD announce message (BEP 14) was malformed.
     PeerInvalidLsdAnnounce,
+    /// A uTP packet header (BEP 29) was malformed or contained unknown fields.
+    PeerUtpInvalidHeader,
+    /// A uTP protocol state error (BEP 29), e.g., unexpected packet type.
+    PeerUtpProtocolError,
+    /// A uTP connection (BEP 29) failed to establish or was lost.
+    PeerUtpConnectionFailed,
     // Tracker errors
     TrackerInvalidResponse,
     TrackerRequestFailed,
@@ -112,6 +118,9 @@ impl fmt::Display for Error {
             ErrorKind::PeerInvalidPexMessage => write!(f, "invalid PEX message"),
             ErrorKind::PeerInvalidFastMessage => write!(f, "invalid Fast Extension message"),
             ErrorKind::PeerInvalidLsdAnnounce => write!(f, "invalid LSD announce message"),
+            ErrorKind::PeerUtpInvalidHeader => write!(f, "invalid uTP packet header"),
+            ErrorKind::PeerUtpProtocolError => write!(f, "uTP protocol error"),
+            ErrorKind::PeerUtpConnectionFailed => write!(f, "uTP connection failed"),
             ErrorKind::TrackerInvalidResponse => write!(f, "invalid tracker response"),
             ErrorKind::TrackerRequestFailed => write!(f, "tracker request failed"),
             ErrorKind::TrackerProtocolError => write!(f, "tracker protocol error"),
@@ -146,6 +155,9 @@ impl fmt::Display for ErrorKind {
             ErrorKind::PeerInvalidPexMessage => write!(f, "PeerInvalidPexMessage"),
             ErrorKind::PeerInvalidFastMessage => write!(f, "PeerInvalidFastMessage"),
             ErrorKind::PeerInvalidLsdAnnounce => write!(f, "PeerInvalidLsdAnnounce"),
+            ErrorKind::PeerUtpInvalidHeader => write!(f, "PeerUtpInvalidHeader"),
+            ErrorKind::PeerUtpProtocolError => write!(f, "PeerUtpProtocolError"),
+            ErrorKind::PeerUtpConnectionFailed => write!(f, "PeerUtpConnectionFailed"),
             ErrorKind::TrackerInvalidResponse => write!(f, "TrackerInvalidResponse"),
             ErrorKind::TrackerRequestFailed => write!(f, "TrackerRequestFailed"),
             ErrorKind::TrackerProtocolError => write!(f, "TrackerProtocolError"),

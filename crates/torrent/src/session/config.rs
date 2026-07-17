@@ -151,6 +151,16 @@ pub struct SessionConfig {
     /// Default: `256`.
     pub peer_msg_buffer_size: usize,
 
+    /// Enable uTP (Micro Transport Protocol, BEP 29). When enabled,
+    /// the session binds a UDP socket and prefers uTP over TCP for
+    /// peer connections. uTP provides delay-based congestion control
+    /// that avoids saturating home network upload buffers.
+    ///
+    /// Disable this to force TCP-only connections.
+    ///
+    /// Default: `true`.
+    pub enable_utp: bool,
+
     // ── Web Seed ──
     /// Enable web seed downloads (BEP 19). When enabled, the session
     /// downloads from HTTP/FTP web seed URLs found in the torrent
@@ -233,6 +243,7 @@ impl Default for SessionConfig {
             lsd_enabled: true,
             lsd_interval: Duration::from_secs(300),
             peer_msg_buffer_size: 256,
+            enable_utp: true,
             webseed_enabled: true,
             webseed_min_gap_pieces: 4,
             webseed_max_range_bytes: 5 * 1024 * 1024,
@@ -495,6 +506,7 @@ mod serde_tests {
         assert_eq!(back.pex_interval, config.pex_interval);
         assert_eq!(back.peer_msg_buffer_size, config.peer_msg_buffer_size);
         assert_eq!(back.webseed_max_concurrent, config.webseed_max_concurrent);
+        assert_eq!(back.enable_utp, config.enable_utp);
     }
 
     #[test]
@@ -534,6 +546,7 @@ mod serde_tests {
             webseed_max_range_bytes: 10 * 1024 * 1024,
             webseed_timeout: Duration::from_secs(60),
             webseed_max_concurrent: 16,
+            enable_utp: false,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -574,6 +587,7 @@ mod serde_tests {
         assert_eq!(back.webseed_max_range_bytes, 10 * 1024 * 1024);
         assert_eq!(back.webseed_timeout, Duration::from_secs(60));
         assert_eq!(back.webseed_max_concurrent, 16);
+        assert_eq!(back.enable_utp, false);
     }
 
     #[test]

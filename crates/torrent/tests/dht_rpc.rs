@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use torrent::dht::krpc::{self, KrpcMessage, TransactionId};
-use torrent::dht::{DhtRpc, Node, find_node, generate_node_id};
+use torrent::dht::{DhtRpc, Node, find_node};
 
 #[test]
 fn krpc_ping_message_builds() {
@@ -101,7 +101,7 @@ async fn dht_rpc_creation() {
 #[tokio::test]
 async fn handle_ping_via_loopback() {
     let server = DhtRpc::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    let node_id = generate_node_id();
+    let node_id: [u8; 20] = rand::random();
     let node_for_handler = node_id;
     let tid: TransactionId = [0x01, 0x02];
 
@@ -135,7 +135,7 @@ async fn handle_ping_via_loopback() {
 #[tokio::test]
 async fn handle_find_node_via_loopback() {
     let server = DhtRpc::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    let node_id = generate_node_id();
+    let node_id: [u8; 20] = rand::random();
     let target = [0xABu8; 20];
     let tid: TransactionId = [0x03, 0x04];
     let node_for_handler = node_id;
@@ -183,7 +183,7 @@ async fn handle_find_node_via_loopback() {
 #[tokio::test]
 async fn dht_rpc_concurrent_queries() {
     let server = DhtRpc::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
-    let node_id = generate_node_id();
+    let node_id: [u8; 20] = rand::random();
     let node = node_id;
     server.set_query_handler(Arc::new(move |msg: &KrpcMessage, _src| {
         if let KrpcMessage::Query {
