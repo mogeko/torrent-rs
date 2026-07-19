@@ -54,6 +54,8 @@ async fn handle_inbound_tcp(
     };
 
     let info_hash = remote_handshake.info_hash;
+    let remote_id = PeerId(remote_handshake.peer_id);
+    let remote_reserved = remote_handshake.reserved;
 
     // Phase 2: Look up the torrent — extract control_tx, drop lock before I/O
     let control_tx = {
@@ -69,8 +71,16 @@ async fn handle_inbound_tcp(
         }
     };
 
-    // Phase 3: Perform handshake (async I/O — lock already released)
-    let conn = match PeerConnection::inbound(stream, info_hash, PeerId::random()).await {
+    // Phase 3: Write our handshake (remote already read above)
+    let conn = match PeerConnection::inbound(
+        stream,
+        remote_id,
+        remote_reserved,
+        info_hash,
+        PeerId::random(),
+    )
+    .await
+    {
         Ok(c) => Arc::new(c),
         Err(e) => {
             tracing::debug!("inbound handshake failed for {}: {}", addr, e);
@@ -84,16 +94,14 @@ async fn handle_inbound_tcp(
 }
 
 /// Read the BEP 3 handshake from a stream (inbound path: read-first).
-async fn read_handshake(
-    stream: &mut TcpStream, timeout: Duration,
-) -> Result<super::super::peer::Handshake, Error> {
+async fn read_handshake(stream: &mut TcpStream, timeout: Duration) -> Result<Handshake, Error> {
     let mut buf = [0u8; 68];
     tokio::time::timeout(timeout, AsyncReadExt::read_exact(stream, &mut buf))
         .await
         .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
         .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
 
-    super::super::peer::Handshake::from_bytes(&buf)
+    Handshake::from_bytes(&buf)
 }
 
 /// Handle an inbound uTP connection: handshake → dispatch.
@@ -123,6 +131,8 @@ pub(crate) async fn handle_inbound_utp(
     };
 
     let info_hash = remote_handshake.info_hash;
+    let remote_id = PeerId(remote_handshake.peer_id);
+    let remote_reserved = remote_handshake.reserved;
 
     let control_tx = {
         let guard = torrents.read().unwrap();
@@ -137,7 +147,15 @@ pub(crate) async fn handle_inbound_utp(
         }
     };
 
-    let conn = match PeerConnection::inbound_utp(stream, info_hash, PeerId::random()).await {
+    let conn = match PeerConnection::inbound_utp(
+        stream,
+        remote_id,
+        remote_reserved,
+        info_hash,
+        PeerId::random(),
+    )
+    .await
+    {
         Ok(c) => Arc::new(c),
         Err(e) => {
             tracing::debug!("inbound uTP handshake failed for {}: {}", addr, e);
