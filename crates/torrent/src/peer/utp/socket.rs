@@ -144,8 +144,8 @@ impl UtpSocket {
         &self, remote_addr: SocketAddr,
     ) -> Result<UtpConnectionHandle, Error> {
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
-        let (_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (conn_data_tx, data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (handle_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (conn_data_tx, handle_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (state_tx, state_rx) = mpsc::unbounded_channel::<ConnState>();
 
         // Create the connection
@@ -169,6 +169,7 @@ impl UtpSocket {
                 conn,
                 packet_rx,
                 conn_data_rx,
+                conn_data_tx,
                 state_tx,
                 socket,
                 connections,
@@ -186,8 +187,8 @@ impl UtpSocket {
         Ok(UtpConnectionHandle {
             remote_addr,
             packet_tx,
-            data_rx,
-            data_tx: conn_data_tx,
+            data_rx: handle_data_rx,
+            data_tx: handle_data_tx,
             state_rx,
         })
     }
@@ -199,8 +200,8 @@ impl UtpSocket {
         outgoing_tx: &mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>, on_inbound: &InboundCallback,
     ) {
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
-        let (_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (conn_data_tx, data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (handle_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (conn_data_tx, handle_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (_state_tx, _state_rx) = mpsc::unbounded_channel::<ConnState>();
 
         let mut conn = UtpConnection::accept(syn, socket.clone(), src, outgoing_tx.clone());
@@ -235,6 +236,7 @@ impl UtpSocket {
                 conn,
                 packet_rx,
                 conn_data_rx,
+                conn_data_tx,
                 _state_tx,
                 conn_socket,
                 conn_connections,
@@ -247,8 +249,8 @@ impl UtpSocket {
         let handle = UtpConnectionHandle {
             remote_addr: src,
             packet_tx,
-            data_rx,
-            data_tx: conn_data_tx,
+            data_rx: handle_data_rx,
+            data_tx: handle_data_tx,
             state_rx: _state_rx,
         };
         on_inbound(UtpStream::new(handle), src);
@@ -340,10 +342,11 @@ impl UtpSocket {
     }
 
     /// Background connection task: processes packets and manages the connection.
+    #[allow(clippy::too_many_arguments)]
     async fn connection_task(
         mut conn: UtpConnection, mut packet_rx: mpsc::UnboundedReceiver<UtpIncoming>,
-        mut data_rx: mpsc::UnboundedReceiver<Vec<u8>>, state_tx: mpsc::UnboundedSender<ConnState>,
-        _socket: Arc<UdpSocket>,
+        mut data_rx: mpsc::UnboundedReceiver<Vec<u8>>, data_tx: mpsc::UnboundedSender<Vec<u8>>,
+        state_tx: mpsc::UnboundedSender<ConnState>, _socket: Arc<UdpSocket>,
         connections: Arc<Mutex<HashMap<u16, mpsc::UnboundedSender<UtpIncoming>>>>,
         conn_id_recv: u16,
     ) {
@@ -373,6 +376,12 @@ impl UtpSocket {
                         ConnState::SynSent
                     };
                     let _ = state_tx.send(current_state);
+
+                    // Forward received data to the application
+                    let app_data = conn.recv();
+                    if !app_data.is_empty() {
+                        let _ = data_tx.send(app_data);
+                    }
                 }
 
                 // Outgoing application data
