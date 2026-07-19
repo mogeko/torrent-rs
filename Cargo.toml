@@ -3,7 +3,7 @@ members = ["crates/torrent-core", "crates/torrent"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10"
 repository = "https://github.com/mogeko/torrent-rs"
 homepage = "https://github.com/mogeko/torrent-rs"
 authors = ["Zheng Junyi <zhengjunyi@live.com>"]
@@ -12,7 +12,7 @@ license = "MIT"
 
 [workspace.dependencies.torrent-core]
 path = "crates/torrent-core"
-version = "=0.1.9"
+version = "=0.1.10"
 
 [workspace.dependencies]
 bytes = "1.12"
@@ -25,7 +25,7 @@ serde_json = "1.0"
 sha1 = "0.11"
 socket2 = "0.6"
 tempfile = "3.27"
-tokio = { version = "1.52", features = [
+tokio = { version = "1.53", features = [
     "net",
     "rt",
     "macros",
