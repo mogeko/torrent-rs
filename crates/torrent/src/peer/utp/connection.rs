@@ -426,7 +426,6 @@ impl UtpConnection {
     /// Read reassembled application data.
     ///
     /// Returns all available bytes from the ready buffer.
-    #[allow(dead_code)]
     pub(crate) fn recv(&mut self) -> Vec<u8> {
         let mut data = Vec::with_capacity(self.ready_data.len());
         while let Some(byte) = self.ready_data.pop_front() {

@@ -46,6 +46,9 @@ pub(crate) enum TorrentCommand {
     Pause,
     Resume,
     Cancel,
+    /// An inbound peer connection (TCP accept or uTP SYN).
+    #[allow(dead_code)]
+    InboundPeer(SocketAddr, Arc<PeerConnection>),
 }
 
 /// Internal handle for a single torrent.
@@ -568,6 +571,11 @@ impl SwarmLoop {
                             let mut status = self.status.write().await;
                             status.state = TorrentState::Downloading;
                         }
+                        Some(TorrentCommand::InboundPeer(addr, conn)) => {
+                            if let Err(e) = self.register_new_peer(addr, conn).await {
+                                tracing::warn!("failed to register inbound peer {}: {}", addr, e);
+                            }
+                        }
                         Some(TorrentCommand::Cancel) | None => {
                             let _ = self.announce_to_tracker(AnnounceEvent::Stopped).await;
                             if let Some(scheduler) = self.webseed_scheduler.take() {
@@ -817,58 +825,83 @@ impl SwarmLoop {
                 pm.connection(addr)
             };
             if let Some(conn_arc) = conn_arc {
-                let mut pi = PeerInfo::new();
-
-                // BEP 10: register our enabled extensions.
-                if self.pex_enabled {
-                    pi.our_extension_ids.insert(UT_PEX.to_string(), UT_PEX_ID);
-                }
-
-                // Send the LTEP handshake if we have any extensions to
-                // offer and the remote peer supports the protocol.
-                if !pi.our_extension_ids.is_empty() {
-                    let remote_ltep = conn_arc.remote_reserved()[5] & 0x10 != 0
-                        || conn_arc.remote_has_extension(63);
-                    if remote_ltep {
-                        self.send_extended_handshake(*addr, &pi.our_extension_ids)
-                            .await;
-                    }
-                }
-
-                // BEP 6: compute and send our Allowed Fast set to the peer
-                // before the Bitfield/HaveAll/HaveNone exchange.
-                if conn_arc.remote_has_extension(44) {
-                    let num_pieces = self.metainfo.info.num_pieces() as u32;
-                    let fast_set = compute_allowed_fast_set(
-                        &self.info_hash,
-                        *addr,
-                        num_pieces,
-                        10, // k=10 per BEP 6 recommendation
-                    );
-                    if !fast_set.is_empty() {
-                        let pm = self.peer_mgr.read().await;
-                        for &piece_idx in &fast_set {
-                            let _ = pm.send_to(addr, &PeerMessage::AllowedFast(piece_idx)).await;
-                        }
-                    }
-                    pi.our_allowed_fast = fast_set;
-                }
-
-                self.spawn_peer_reader(*addr, conn_arc);
-                let client_name = pi.client_version.clone();
-                self.peers.insert(*addr, pi);
-                let _ = self.event_tx.send(TorrentEvent::PeerConnected {
-                    addr: *addr,
-                    client_name,
-                });
-                self.send_bitfield(*addr).await?;
-
-                // PEX is deferred: remote_extension_ids are not known yet.
-                // They will be populated when the remote's LTEP handshake
-                // arrives via handle_ltep_handshake, which then sends the
-                // initial PEX message.
+                self.register_new_peer(*addr, conn_arc).await?;
             }
         }
+        Ok(())
+    }
+
+    /// Register a newly connected peer: LTEP, AllowedFast, reader, Bitfield.
+    ///
+    /// Shared between outbound (`connect_pending`) and inbound paths.
+    async fn register_new_peer(
+        &mut self, addr: SocketAddr, conn: Arc<PeerConnection>,
+    ) -> Result<(), Error> {
+        // Dedup: reject if this peer is already connected (TCP+uTP race)
+        {
+            let pm = self.peer_mgr.read().await;
+            if pm.connection(&addr).is_some() {
+                tracing::debug!("peer {} already connected, rejecting duplicate", addr);
+                return Ok(());
+            }
+            // Capacity: reject if at max connections
+            if pm.num_connections() >= pm.max_connections() as usize {
+                tracing::debug!("max connections reached, rejecting inbound {}", addr);
+                return Ok(());
+            }
+        }
+
+        let mut pi = PeerInfo::new();
+
+        // BEP 10: register our enabled extensions.
+        if self.pex_enabled {
+            pi.our_extension_ids.insert(UT_PEX.to_string(), UT_PEX_ID);
+        }
+
+        // Send the LTEP handshake if we have any extensions to
+        // offer and the remote peer supports the protocol.
+        if !pi.our_extension_ids.is_empty() {
+            let remote_ltep =
+                conn.remote_reserved()[5] & 0x10 != 0 || conn.remote_has_extension(63);
+            if remote_ltep {
+                self.send_extended_handshake(addr, &pi.our_extension_ids)
+                    .await;
+            }
+        }
+
+        // BEP 6: compute and send our Allowed Fast set to the peer
+        // before the Bitfield/HaveAll/HaveNone exchange.
+        if conn.remote_has_extension(44) {
+            let num_pieces = self.metainfo.info.num_pieces() as u32;
+            let fast_set = compute_allowed_fast_set(
+                &self.info_hash,
+                addr,
+                num_pieces,
+                10, // k=10 per BEP 6 recommendation
+            );
+            if !fast_set.is_empty() {
+                let pm = self.peer_mgr.read().await;
+                for &piece_idx in &fast_set {
+                    let _ = pm
+                        .send_to(&addr, &PeerMessage::AllowedFast(piece_idx))
+                        .await;
+                }
+            }
+            pi.our_allowed_fast = fast_set;
+        }
+
+        self.spawn_peer_reader(addr, conn);
+        let client_name = pi.client_version.clone();
+        self.peers.insert(addr, pi);
+        let _ = self
+            .event_tx
+            .send(TorrentEvent::PeerConnected { addr, client_name });
+        self.send_bitfield(addr).await?;
+
+        // PEX is deferred: remote_extension_ids are not known yet.
+        // They will be populated when the remote's LTEP handshake
+        // arrives via handle_ltep_handshake, which then sends the
+        // initial PEX message.
         Ok(())
     }
 
@@ -908,7 +941,10 @@ mod tests {
         let resume = TorrentCommand::Resume;
         let cancel = TorrentCommand::Cancel;
         match pause {
-            TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Cancel => {}
+            TorrentCommand::Pause
+            | TorrentCommand::Resume
+            | TorrentCommand::Cancel
+            | TorrentCommand::InboundPeer(_, _) => {}
         }
         let _ = (pause, resume, cancel);
     }

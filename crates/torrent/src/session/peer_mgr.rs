@@ -106,6 +106,11 @@ impl PeerManager {
         self.connections.len()
     }
 
+    /// Get the configured maximum number of connections.
+    pub fn max_connections(&self) -> u32 {
+        self.max_connections
+    }
+
     /// Drain a batch of pending peers for connection attempts.
     ///
     /// Returns up to `max_connections - current_connections` peers from the

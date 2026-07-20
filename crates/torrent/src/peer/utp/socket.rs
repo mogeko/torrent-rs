@@ -26,10 +26,14 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use crate::error::{Error, ErrorKind};
 
 use super::connection::{ConnState, RETRANSMIT_CHECK_INTERVAL, UtpConnection, UtpIncoming};
+use super::stream::UtpStream;
 use super::{UtpHeader, UtpType};
 
 /// Channel buffer size for the main recv loop.
 const SOCKET_RECV_BUF: usize = 4096;
+
+/// Callback invoked when an inbound uTP connection is established.
+type InboundCallback = Arc<dyn Fn(UtpStream, SocketAddr) + Send + Sync>;
 
 /// A handle to a uTP connection, providing send/recv access.
 #[allow(dead_code)]
@@ -75,6 +79,9 @@ pub(crate) struct UtpSocket {
     _outgoing_tx: mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
     /// Shutdown signal sender.
     _shutdown_tx: oneshot::Sender<()>,
+    /// Callback for inbound uTP connections.
+    #[allow(dead_code)]
+    on_inbound: InboundCallback,
 }
 
 impl UtpSocket {
@@ -82,7 +89,9 @@ impl UtpSocket {
     ///
     /// Spawns a background receive loop that dispatches packets
     /// to registered connections.
-    pub(crate) async fn bind(addr: SocketAddr) -> Result<Self, Error> {
+    pub(crate) async fn bind(
+        addr: SocketAddr, on_inbound: impl Fn(UtpStream, SocketAddr) + Send + Sync + 'static,
+    ) -> Result<Self, Error> {
         let socket = UdpSocket::bind(addr)
             .await
             .map_err(|e| Error::with_source(ErrorKind::PeerUtpConnectionFailed, e))?;
@@ -100,11 +109,14 @@ impl UtpSocket {
         // Spawn the receive loop
         let recv_socket = socket.clone();
         let recv_connections = connections.clone();
+        let on_inbound: InboundCallback = Arc::new(on_inbound);
+        let recv_cb = on_inbound.clone();
         tokio::spawn(Self::recv_loop(
             recv_socket,
             recv_connections,
             outgoing_tx.clone(),
             shutdown_rx,
+            recv_cb,
         ));
 
         tracing::info!("uTP socket bound to {}", local_addr);
@@ -115,6 +127,7 @@ impl UtpSocket {
             connections,
             _outgoing_tx: outgoing_tx,
             _shutdown_tx: shutdown_tx,
+            on_inbound,
         })
     }
 
@@ -131,8 +144,8 @@ impl UtpSocket {
         &self, remote_addr: SocketAddr,
     ) -> Result<UtpConnectionHandle, Error> {
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
-        let (_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (conn_data_tx, data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (handle_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (conn_data_tx, handle_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (state_tx, state_rx) = mpsc::unbounded_channel::<ConnState>();
 
         // Create the connection
@@ -156,6 +169,7 @@ impl UtpSocket {
                 conn,
                 packet_rx,
                 conn_data_rx,
+                conn_data_tx,
                 state_tx,
                 socket,
                 connections,
@@ -173,8 +187,8 @@ impl UtpSocket {
         Ok(UtpConnectionHandle {
             remote_addr,
             packet_tx,
-            data_rx,
-            data_tx: conn_data_tx,
+            data_rx: handle_data_rx,
+            data_tx: handle_data_tx,
             state_rx,
         })
     }
@@ -183,11 +197,11 @@ impl UtpSocket {
     async fn accept_incoming(
         socket: Arc<UdpSocket>, syn: &UtpHeader, src: SocketAddr,
         connections: &Arc<Mutex<HashMap<u16, mpsc::UnboundedSender<UtpIncoming>>>>,
-        outgoing_tx: &mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+        outgoing_tx: &mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>, on_inbound: &InboundCallback,
     ) {
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
-        let (_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (_conn_data_tx, _data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (handle_data_tx, conn_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (conn_data_tx, handle_data_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (_state_tx, _state_rx) = mpsc::unbounded_channel::<ConnState>();
 
         let mut conn = UtpConnection::accept(syn, socket.clone(), src, outgoing_tx.clone());
@@ -222,6 +236,7 @@ impl UtpSocket {
                 conn,
                 packet_rx,
                 conn_data_rx,
+                conn_data_tx,
                 _state_tx,
                 conn_socket,
                 conn_connections,
@@ -229,6 +244,16 @@ impl UtpSocket {
             )
             .await;
         });
+
+        // BEP 3 handshake + dispatch via callback
+        let handle = UtpConnectionHandle {
+            remote_addr: src,
+            packet_tx,
+            data_rx: handle_data_rx,
+            data_tx: handle_data_tx,
+            state_rx: _state_rx,
+        };
+        on_inbound(UtpStream::new(handle), src);
     }
 
     /// Background receive loop: reads UDP datagrams and dispatches them.
@@ -236,7 +261,7 @@ impl UtpSocket {
         socket: Arc<UdpSocket>,
         connections: Arc<Mutex<HashMap<u16, mpsc::UnboundedSender<UtpIncoming>>>>,
         outgoing_tx: mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
-        mut shutdown_rx: oneshot::Receiver<()>,
+        mut shutdown_rx: oneshot::Receiver<()>, on_inbound: InboundCallback,
     ) {
         let mut buf = vec![0u8; SOCKET_RECV_BUF];
 
@@ -275,6 +300,7 @@ impl UtpSocket {
                                             src,
                                             &connections,
                                             &outgoing_tx,
+                                            &on_inbound,
                                         ).await;
                                     } else if header.is_reset() {
                                         // RST for unknown connection — ignore
@@ -316,10 +342,11 @@ impl UtpSocket {
     }
 
     /// Background connection task: processes packets and manages the connection.
+    #[allow(clippy::too_many_arguments)]
     async fn connection_task(
         mut conn: UtpConnection, mut packet_rx: mpsc::UnboundedReceiver<UtpIncoming>,
-        mut data_rx: mpsc::UnboundedReceiver<Vec<u8>>, state_tx: mpsc::UnboundedSender<ConnState>,
-        _socket: Arc<UdpSocket>,
+        mut data_rx: mpsc::UnboundedReceiver<Vec<u8>>, data_tx: mpsc::UnboundedSender<Vec<u8>>,
+        state_tx: mpsc::UnboundedSender<ConnState>, _socket: Arc<UdpSocket>,
         connections: Arc<Mutex<HashMap<u16, mpsc::UnboundedSender<UtpIncoming>>>>,
         conn_id_recv: u16,
     ) {
@@ -349,6 +376,12 @@ impl UtpSocket {
                         ConnState::SynSent
                     };
                     let _ = state_tx.send(current_state);
+
+                    // Forward received data to the application
+                    let app_data = conn.recv();
+                    if !app_data.is_empty() {
+                        let _ = data_tx.send(app_data);
+                    }
                 }
 
                 // Outgoing application data
@@ -423,15 +456,15 @@ mod tests {
     #[tokio::test]
     async fn utp_socket_bind() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let socket = UtpSocket::bind(addr).await.unwrap();
+        let socket = UtpSocket::bind(addr, |_, _| {}).await.unwrap();
         assert!(socket.local_addr().port() > 0);
     }
 
     #[tokio::test]
     async fn utp_connect_and_send() {
         let (addr_a, addr_b) = test_addrs();
-        let socket_a = UtpSocket::bind(addr_a).await.unwrap();
-        let socket_b = UtpSocket::bind(addr_b).await.unwrap();
+        let socket_a = UtpSocket::bind(addr_a, |_, _| {}).await.unwrap();
+        let socket_b = UtpSocket::bind(addr_b, |_, _| {}).await.unwrap();
         let b_addr = socket_b.local_addr();
 
         let mut conn_a = socket_a.connect(b_addr).await.unwrap();
@@ -448,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn utp_connect_unreachable() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let socket = UtpSocket::bind(addr).await.unwrap();
+        let socket = UtpSocket::bind(addr, |_, _| {}).await.unwrap();
         let dead_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
         let result = timeout(TEST_TIMEOUT, socket.connect(dead_addr)).await;
         let _ = result;
@@ -457,8 +490,8 @@ mod tests {
     #[tokio::test]
     async fn utp_send_multiple_packets() {
         let (addr_a, addr_b) = test_addrs();
-        let socket_a = UtpSocket::bind(addr_a).await.unwrap();
-        let socket_b = UtpSocket::bind(addr_b).await.unwrap();
+        let socket_a = UtpSocket::bind(addr_a, |_, _| {}).await.unwrap();
+        let socket_b = UtpSocket::bind(addr_b, |_, _| {}).await.unwrap();
         let b_addr = socket_b.local_addr();
 
         let mut conn = socket_a.connect(b_addr).await.unwrap();
@@ -473,17 +506,17 @@ mod tests {
     #[tokio::test]
     async fn utp_bind_conflict() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let socket_a = UtpSocket::bind(addr).await.unwrap();
+        let socket_a = UtpSocket::bind(addr, |_, _| {}).await.unwrap();
         let bound_addr = socket_a.local_addr();
-        let result = UtpSocket::bind(bound_addr).await;
+        let result = UtpSocket::bind(bound_addr, |_, _| {}).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn utp_connection_cleanup() {
         let (addr_a, addr_b) = test_addrs();
-        let socket_a = UtpSocket::bind(addr_a).await.unwrap();
-        let socket_b = UtpSocket::bind(addr_b).await.unwrap();
+        let socket_a = UtpSocket::bind(addr_a, |_, _| {}).await.unwrap();
+        let socket_b = UtpSocket::bind(addr_b, |_, _| {}).await.unwrap();
         let b_addr = socket_b.local_addr();
 
         {

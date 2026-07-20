@@ -12,6 +12,7 @@
 
 mod config;
 mod download;
+mod inbound;
 mod lsd;
 mod peer_mgr;
 mod seed;
@@ -33,6 +34,7 @@ use std::str::FromStr as _;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -45,6 +47,7 @@ use crate::piece::PieceManager;
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 
+use self::inbound::{accept_loop, handle_inbound_utp};
 use self::lsd::LsdService;
 use self::seed::{DataSourceStorage, verify_existing};
 use self::swarm::{TorrentCommand, TorrentHandle};
@@ -156,7 +159,17 @@ impl Session {
         let utp_socket = if config.enable_utp {
             let bind_addr =
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.listen_port));
-            match UtpSocket::bind(bind_addr).await {
+            match UtpSocket::bind(bind_addr, {
+                let torrents = torrents.clone();
+                move |stream, addr| {
+                    let t = torrents.clone();
+                    tokio::spawn(async move {
+                        handle_inbound_utp(stream, addr, &t).await;
+                    });
+                }
+            })
+            .await
+            {
                 Ok(socket) => {
                     tracing::info!("uTP socket bound to {}", socket.local_addr());
                     Some(Arc::new(socket))
@@ -169,6 +182,22 @@ impl Session {
         } else {
             None
         };
+
+        // Initialize TCP listener for inbound peer connections
+        let listen_addr =
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.listen_port));
+        match TcpListener::bind(listen_addr).await {
+            Ok(listener) => {
+                tracing::info!("TCP listener bound to {}", listen_addr);
+                let accept_torrents = torrents.clone();
+                tokio::spawn(async move {
+                    accept_loop(listener, accept_torrents).await;
+                });
+            }
+            Err(e) => {
+                tracing::warn!("TCP listen failed on {}: {}", listen_addr, e);
+            }
+        }
 
         Ok(Session {
             config,

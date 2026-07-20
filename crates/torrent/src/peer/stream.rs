@@ -6,6 +6,7 @@ use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufStream, BufWriter,
 };
 use tokio::net::TcpSocket;
+use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 
@@ -141,6 +142,77 @@ impl PeerConnection {
             remote_peer_id: Some(remote_peer_id),
             remote_reserved,
         })
+    }
+
+    /// Accept an inbound TCP connection, write our BEP 3 handshake response.
+    ///
+    /// The caller has already read the remote handshake and extracted
+    /// `remote_peer_id`, `remote_reserved`, and `info_hash`. This method
+    /// writes our handshake and returns a [`PeerConnection`].
+    pub(crate) async fn inbound(
+        stream: TcpStream, remote_peer_id: PeerId, remote_reserved: [u8; 8], info_hash: [u8; 20],
+        our_peer_id: PeerId,
+    ) -> Result<Self, Error> {
+        stream
+            .set_nodelay(true)
+            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+
+        let mut stream = stream;
+        // Write our handshake (remote already read by caller)
+        Self::write_handshake(&mut stream, info_hash, our_peer_id).await?;
+
+        let (read_half, write_half) = stream.into_split();
+
+        Ok(PeerConnection {
+            inner: PeerStreamInner::Tcp {
+                reader: Mutex::new(BufReader::new(read_half)),
+                writer: Mutex::new(BufWriter::new(write_half)),
+            },
+            state: PeerState::Init,
+            remote_peer_id: Some(remote_peer_id),
+            remote_reserved,
+        })
+    }
+
+    /// Accept an inbound uTP connection, write our BEP 3 handshake response.
+    ///
+    /// The caller has already read the remote handshake. This method
+    /// writes our handshake and returns a [`PeerConnection`].
+    pub(crate) async fn inbound_utp(
+        utp_stream: UtpStream, remote_peer_id: PeerId, remote_reserved: [u8; 8],
+        info_hash: [u8; 20], our_peer_id: PeerId,
+    ) -> Result<Self, Error> {
+        let mut utp_stream = utp_stream;
+        Self::write_handshake(&mut utp_stream, info_hash, our_peer_id).await?;
+
+        Ok(PeerConnection {
+            inner: PeerStreamInner::Generic {
+                stream: Mutex::new(BufStream::new(Box::pin(utp_stream))),
+            },
+            state: PeerState::Init,
+            remote_peer_id: Some(remote_peer_id),
+            remote_reserved,
+        })
+    }
+
+    /// Write our BEP 3 handshake to an already-connected stream.
+    async fn write_handshake(
+        stream: &mut (impl AsyncWrite + Unpin), info_hash: [u8; 20], our_peer_id: PeerId,
+    ) -> Result<(), Error> {
+        let mut handshake = Handshake::with_extensions(info_hash, our_peer_id.0, &[63]);
+        handshake.set_reserved_byte(5, handshake.reserved[5] | 0x10);
+        handshake.set_reserved_byte(5, handshake.reserved[5] | 0x08);
+        let handshake_bytes = handshake.to_bytes();
+
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.write_all(&handshake_bytes))
+            .await
+            .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.flush())
+            .await
+            .map_err(|_| Error::new(ErrorKind::PeerConnectionClosed))?
+            .map_err(|e| Error::with_source(ErrorKind::PeerConnectionClosed, e))?;
+        Ok(())
     }
 
     /// Perform the BEP 3 handshake on an already-connected stream.
