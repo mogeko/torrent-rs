@@ -6,20 +6,39 @@
 //! [`QueryHandler`] callback.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::task::{Context, Poll};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
+use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 
 use super::krpc::{KrpcMessage, TransactionId};
 
-/// Default timeout for DHT RPC calls.
-const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+/// A DHT KRPC request ready to be dispatched.
+///
+/// Bundles the destination address, transaction ID, and serialized
+/// KRPC payload. This is the request type for the `tower::Service`
+/// implementation on [`DhtRpc`].
+#[derive(Debug, Clone)]
+pub struct DhtRequest {
+    pub addr: SocketAddr,
+    pub tid: TransactionId,
+    pub data: Vec<u8>,
+}
+
+impl DhtRequest {
+    /// Create a new DHT request.
+    pub fn new(addr: SocketAddr, tid: TransactionId, data: Vec<u8>) -> Self {
+        DhtRequest { addr, tid, data }
+    }
+}
 
 /// Callback type for handling incoming DHT queries.
 ///
@@ -27,20 +46,25 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 /// optional response bytes. Return `None` to silently ignore the query.
 pub type QueryHandler = Arc<dyn Fn(&KrpcMessage, SocketAddr) -> Option<Vec<u8>> + Send + Sync>;
 
-/// DHT RPC client for sending KRPC messages, matching responses, and
-/// handling incoming queries.
-///
-/// Supports concurrent in-flight queries via a background receive loop
-/// and a transaction ID → oneshot channel map. Each [`query`](DhtRpc::query)
-/// call inserts a oneshot sender into `pending`, sends the UDP datagram,
-/// then awaits the receiver. The background loop dispatches matching
-/// responses by transaction ID and delegates queries to the optional
-/// `query_handler` callback.
-pub struct DhtRpc {
+/// Internal state shared by [`DhtRpc`] clones.
+struct DhtRpcInner {
     socket: UdpSocket,
     pending: Mutex<HashMap<TransactionId, oneshot::Sender<KrpcMessage>>>,
     query_handler: Mutex<Option<QueryHandler>>,
-    timeout: Duration,
+}
+
+/// DHT RPC client for sending KRPC messages, matching responses, and
+/// handling incoming queries.
+///
+/// Thin `Arc`-based handle — cloning is cheap.  Supports concurrent
+/// in-flight queries via a background receive loop and a transaction
+/// ID → oneshot channel map. Implements [`tower::Service`] so callers
+/// can compose timeout, retry, and rate-limiting middleware.
+///
+/// Incoming queries are dispatched to an optional [`QueryHandler`] callback.
+#[derive(Clone)]
+pub struct DhtRpc {
+    inner: Arc<DhtRpcInner>,
 }
 
 impl DhtRpc {
@@ -48,23 +72,18 @@ impl DhtRpc {
     ///
     /// Spawns a background receive loop that dispatches incoming KRPC
     /// messages to the corresponding in-flight query via transaction ID.
-    pub async fn new(bind_addr: SocketAddr) -> Result<Arc<Self>, Error> {
-        DhtRpc::with_timeout(bind_addr, RPC_TIMEOUT).await
-    }
-
-    /// Create a new DHT RPC client with a custom query timeout.
-    pub async fn with_timeout(
-        bind_addr: SocketAddr, timeout: Duration,
-    ) -> Result<Arc<Self>, Error> {
+    ///
+    /// Timeout is not embedded — apply [`tower::timeout::TimeoutLayer`]
+    /// at the call site via [`tower::ServiceBuilder`].
+    pub async fn new(bind_addr: SocketAddr) -> Result<Self, Error> {
         let socket = bind_dht_socket(bind_addr)?;
-        let rpc = Arc::new(DhtRpc {
+        let inner = Arc::new(DhtRpcInner {
             socket,
             pending: Mutex::new(HashMap::new()),
             query_handler: Mutex::new(None),
-            timeout,
         });
-        rpc.clone().start_recv_loop();
-        Ok(rpc)
+        start_recv_loop(inner.clone());
+        Ok(DhtRpc { inner })
     }
 
     /// Set the handler for incoming DHT queries.
@@ -73,37 +92,34 @@ impl DhtRpc {
     /// it invokes this handler with the message and source address.
     /// The handler's return value (if any) is sent back to the source.
     pub fn set_query_handler(&self, handler: QueryHandler) {
-        *self.query_handler.lock().unwrap() = Some(handler);
+        *self.inner.query_handler.lock().unwrap() = Some(handler);
     }
 
     /// Return the bound local address of the underlying UDP socket.
     pub fn local_addr(&self) -> Result<SocketAddr, Error> {
-        self.socket.local_addr().map_err(Error::protocol)
+        self.inner.socket.local_addr().map_err(Error::protocol)
     }
 
     /// Send a query and wait for a response via the transaction table.
+    ///
+    /// Raw I/O only — no timeout is applied here.  Wrap with
+    /// [`tower::ServiceBuilder::timeout`] at the call site.
     pub async fn query(
         &self, addr: SocketAddr, tid: TransactionId, data: &[u8],
     ) -> Result<KrpcMessage, Error> {
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(tid, tx);
+        self.inner.pending.lock().unwrap().insert(tid, tx);
 
         tracing::debug!("DHT query to {}", addr);
-        if let Err(e) = self.socket.send_to(data, addr).await {
-            self.pending.lock().unwrap().remove(&tid);
+        if let Err(e) = self.inner.socket.send_to(data, addr).await {
+            self.inner.pending.lock().unwrap().remove(&tid);
             return Err(Error::with_source(ErrorKind::Protocol, e));
         }
 
-        tokio::time::timeout(self.timeout, rx)
-            .await
-            .map_err(|_| {
-                self.pending.lock().unwrap().remove(&tid);
-                Error::new(ErrorKind::Protocol)
-            })?
-            .map_err(|_| {
-                self.pending.lock().unwrap().remove(&tid);
-                Error::new(ErrorKind::Protocol)
-            })
+        rx.await.map_err(|_| {
+            self.inner.pending.lock().unwrap().remove(&tid);
+            Error::new(ErrorKind::Protocol)
+        })
     }
 
     /// Ping a node to check if it's alive.
@@ -113,44 +129,64 @@ impl DhtRpc {
         let data = super::krpc::build_ping(tid, node_id);
         self.query(addr, tid, &data).await
     }
+}
 
-    /// Background receive loop — dispatches responses and handles queries.
-    fn start_recv_loop(self: Arc<Self>) {
-        tokio::spawn(async move {
-            let mut buf = [0u8; 8192];
-            loop {
-                let (len, src_addr) = match self.socket.recv_from(&mut buf).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!("DHT recv error: {e}");
-                        continue;
+/// Tower [`Service`] implementation for DHT KRPC queries.
+///
+/// This is a **raw** service — no timeout is applied here.  Wrap with
+/// [`tower::ServiceBuilder`] at the call site to add timeout, retry, or
+/// rate-limiting middleware.
+impl Service<DhtRequest> for DhtRpc {
+    type Response = KrpcMessage;
+    type Error = Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: DhtRequest) -> Self::Future {
+        let this = self.clone();
+        Box::pin(async move { this.query(req.addr, req.tid, &req.data).await })
+    }
+}
+
+/// Background receive loop — dispatches responses and handles queries.
+fn start_recv_loop(inner: Arc<DhtRpcInner>) {
+    tokio::spawn(async move {
+        let mut buf = [0u8; 8192];
+        loop {
+            let (len, src_addr) = match inner.socket.recv_from(&mut buf).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("DHT recv error: {e}");
+                    continue;
+                }
+            };
+
+            let msg = match KrpcMessage::from_bytes(&buf[..len]) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            match &msg {
+                KrpcMessage::Response { transaction_id, .. }
+                | KrpcMessage::Error { transaction_id, .. } => {
+                    if let Some(tx) = inner.pending.lock().unwrap().remove(transaction_id) {
+                        let _ = tx.send(msg);
                     }
-                };
-
-                let msg = match KrpcMessage::from_bytes(&buf[..len]) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-
-                match &msg {
-                    KrpcMessage::Response { transaction_id, .. }
-                    | KrpcMessage::Error { transaction_id, .. } => {
-                        if let Some(tx) = self.pending.lock().unwrap().remove(transaction_id) {
-                            let _ = tx.send(msg);
-                        }
-                    }
-                    KrpcMessage::Query { .. } => {
-                        let handler = self.query_handler.lock().unwrap().clone();
-                        if let Some(handler) = handler {
-                            if let Some(response_bytes) = handler(&msg, src_addr) {
-                                let _ = self.socket.send_to(&response_bytes, src_addr).await;
-                            }
+                }
+                KrpcMessage::Query { .. } => {
+                    let handler = inner.query_handler.lock().unwrap().clone();
+                    if let Some(handler) = handler {
+                        if let Some(response_bytes) = handler(&msg, src_addr) {
+                            let _ = inner.socket.send_to(&response_bytes, src_addr).await;
                         }
                     }
                 }
             }
-        });
-    }
+        }
+    });
 }
 
 /// Bind a UDP socket with SO_REUSEADDR for DHT.

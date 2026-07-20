@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use torrent::dht::krpc::{self, KrpcMessage, TransactionId};
-use torrent::dht::{DhtRpc, Node, find_node};
+use torrent::dht::{DhtRequest, DhtRpc, Node, find_node};
+use tower::{Service, ServiceBuilder};
 
 #[test]
 fn krpc_ping_message_builds() {
@@ -224,16 +225,18 @@ async fn dht_rpc_concurrent_queries() {
 
 #[tokio::test]
 async fn dht_rpc_query_timeout() {
-    let timeout = Duration::from_secs(1); // 1s
-    let client = DhtRpc::with_timeout("127.0.0.1:0".parse().unwrap(), timeout)
-        .await
-        .unwrap();
+    let client = DhtRpc::new("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let mut svc = ServiceBuilder::new()
+        .timeout(Duration::from_secs(1))
+        .service(client);
+
     let tid: TransactionId = [0xFF, 0xFF];
     let node_id = [0u8; 20];
+    let data = krpc::build_ping(tid, &node_id);
     // Port 1 is privileged — no DHT node responds there
-    let unreachable = "127.0.0.1:1".parse().unwrap();
+    let req = DhtRequest::new("127.0.0.1:1".parse().unwrap(), tid, data);
 
-    let result = client.ping(unreachable, tid, &node_id).await;
+    let result = svc.call(req).await;
     assert!(result.is_err());
 }
 
