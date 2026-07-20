@@ -24,6 +24,7 @@ sha1.workspace = true
 socket2.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+tower.workspace = true
 tracing.workspace = true
 url.workspace = true
 
