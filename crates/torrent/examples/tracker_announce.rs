@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
     println!("\n=== Built-in Trackers (Tracker::from_torrent) ===");
-    match tracker.announce(&req).await {
+    match tracker.announce(req).await {
         Ok(resp) => print_response(&resp),
         Err(e) => eprintln!("Tracker failed: {}", e),
     }

@@ -43,17 +43,17 @@ pub use self::http::HttpTracker;
 pub use self::udp::UdpTracker;
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::task::{Context, Poll};
 
 use tokio::task::JoinSet;
+use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 use crate::spec::TorrentSpec;
 use crate::{IntoUrl, Url};
-
-/// Default per-request timeout for tracker announces (15 s).
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Unified tracker client that auto-detects HTTP vs UDP from the URL scheme.
 ///
@@ -70,14 +70,12 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 /// };
 /// let mut req = AnnounceRequest::new([0u8; 20], PeerId::random(), 6881);
 /// req.event = AnnounceEvent::Started;
-/// let _resp = tracker.announce(&req).await;
+/// let _resp = tracker.announce(req).await;
 /// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Tracker {
     trackers: Vec<Inner>,
-    /// Default timeout for dynamically-added trackers via [`add`](Self::add).
-    default_timeout: Duration,
 }
 
 impl Tracker {
@@ -92,15 +90,9 @@ impl Tracker {
     ///
     /// Returns `None` if the URL is invalid or uses an unsupported scheme.
     pub fn single(url: impl IntoUrl) -> Option<Self> {
-        Tracker::single_with_timeout(url, DEFAULT_TIMEOUT)
-    }
-
-    /// Create a single `Tracker` from a URL with a custom timeout.
-    pub fn single_with_timeout(url: impl IntoUrl, timeout: Duration) -> Option<Self> {
-        let inner = Inner::from_url(url.into_url().ok()?, timeout).ok()?;
+        let inner = Inner::from_url(url.into_url().ok()?).ok()?;
         Some(Tracker {
             trackers: vec![inner],
-            default_timeout: timeout,
         })
     }
 
@@ -114,21 +106,13 @@ impl Tracker {
     where
         I::Item: IntoUrl,
     {
-        Tracker::multi_with_timeout(urls, DEFAULT_TIMEOUT)
-    }
-
-    /// Create a `Tracker` from multiple tracker URLs with a custom timeout.
-    pub fn multi_with_timeout<I: IntoIterator>(urls: I, timeout: Duration) -> Option<Self>
-    where
-        I::Item: IntoUrl,
-    {
         let mut seen: HashSet<String> = HashSet::new();
         let mut trackers: Vec<Inner> = Vec::new();
 
         for url in urls {
             if let Ok(url) = url.into_url()
                 && seen.insert(url.as_str().into())
-                && let Ok(inner) = Inner::from_url(url, timeout)
+                && let Ok(inner) = Inner::from_url(url)
             {
                 trackers.push(inner);
             }
@@ -137,10 +121,7 @@ impl Tracker {
         if trackers.is_empty() {
             None
         } else {
-            Some(Tracker {
-                trackers,
-                default_timeout: timeout,
-            })
+            Some(Tracker { trackers })
         }
     }
 
@@ -155,15 +136,7 @@ impl Tracker {
     ///
     /// Returns `None` if no valid tracker URLs were found.
     pub fn from_torrent(spec: impl Into<TorrentSpec>) -> Option<Self> {
-        Tracker::from_torrent_with_timeout(spec, DEFAULT_TIMEOUT)
-    }
-
-    /// Create a `Tracker` from anything that converts into a [`TorrentSpec`]
-    /// with a custom timeout.
-    pub fn from_torrent_with_timeout(
-        spec: impl Into<TorrentSpec>, timeout: Duration,
-    ) -> Option<Self> {
-        Tracker::multi_with_timeout(spec.into().trackers(), timeout)
+        Tracker::multi(spec.into().trackers())
     }
 
     /// Returns the number of trackers.
@@ -186,8 +159,7 @@ impl Tracker {
         if self.trackers.iter().any(|t| t.url() == url.as_str()) {
             return Ok(());
         }
-        self.trackers
-            .push(Inner::from_url(url, self.default_timeout)?);
+        self.trackers.push(Inner::from_url(url)?);
         Ok(())
     }
 
@@ -206,7 +178,7 @@ impl Tracker {
         for url in urls {
             let url = url.into_url()?;
             if seen.insert(url.as_str().into()) {
-                new_trackers.push(Inner::from_url(url, self.default_timeout)?);
+                new_trackers.push(Inner::from_url(url)?);
             }
         }
 
@@ -237,14 +209,14 @@ impl Tracker {
     ///
     /// For a single tracker, delegates directly.
     /// For multiple trackers, acts as [`announce_first`](Self::announce_first).
-    pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
+    pub async fn announce(&self, req: AnnounceRequest) -> Result<AnnounceResponse, Error> {
         self.announce_first(req).await
     }
 
     /// Race all trackers and return the first successful response.
     ///
     /// If all trackers fail, the last error is returned.
-    pub async fn announce_first(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
+    pub async fn announce_first(&self, req: AnnounceRequest) -> Result<AnnounceResponse, Error> {
         let mut set = self.announce_into_set(req);
 
         let mut last_err = None;
@@ -262,7 +234,7 @@ impl Tracker {
     /// Announce to all trackers and collect all successful responses.
     ///
     /// Errors are silently ignored.
-    pub async fn announce_all(&self, req: &AnnounceRequest) -> Vec<AnnounceResponse> {
+    pub async fn announce_all(&self, req: AnnounceRequest) -> Vec<AnnounceResponse> {
         let mut set = self.announce_into_set(req);
 
         let mut results = Vec::new();
@@ -278,14 +250,14 @@ impl Tracker {
     ///
     /// Each task returns `Ok(AnnounceResponse)` on success or `Err(Error)` on failure.
     pub fn announce_into_set(
-        &self, req: &AnnounceRequest,
+        &self, req: AnnounceRequest,
     ) -> JoinSet<Result<AnnounceResponse, Error>> {
         let mut set = JoinSet::new();
-        let req = Arc::new(req.clone());
+        let req = Arc::new(req);
         for inner in &self.trackers {
-            let inner = inner.clone();
+            let mut inner = inner.clone();
             let req = Arc::clone(&req);
-            set.spawn(async move { inner.announce(&req).await });
+            set.spawn(async move { inner.call(Arc::unwrap_or_clone(req)).await });
         }
         set
     }
@@ -306,19 +278,60 @@ impl Inner {
         }
     }
 
-    fn from_url(url: Url, timeout: Duration) -> Result<Self, Error> {
+    fn from_url(url: Url) -> Result<Self, Error> {
         match url.scheme() {
-            "http" | "https" => Ok(Inner::Http(HttpTracker::with_timeout(url, timeout)?)),
-            "udp" => Ok(Inner::Udp(UdpTracker::with_timeout(url, timeout)?)),
+            "http" | "https" => Ok(Inner::Http(HttpTracker::new(url)?)),
+            "udp" => Ok(Inner::Udp(UdpTracker::new(url)?)),
             _ => Err(Error::new(ErrorKind::InvalidInput)),
         }
     }
+}
 
-    async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
+/// [`Service`] impl for the internal tracker variant — dispatches to the
+/// concrete tracker's [`Service`] impl (which includes timeout).
+///
+/// This ensures that [`Tracker`]'s multi-tracker methods
+/// ([`announce_first`](Tracker::announce_first), etc.) benefit from
+/// per-tracker timeout wiring.
+impl Service<AnnounceRequest> for Inner {
+    type Response = AnnounceResponse;
+    type Error = Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self {
-            Inner::Http(t) => t.announce(req).await,
-            Inner::Udp(t) => t.announce(req).await,
+            Inner::Http(t) => t.poll_ready(cx),
+            Inner::Udp(t) => t.poll_ready(cx),
         }
+    }
+
+    fn call(&mut self, req: AnnounceRequest) -> Self::Future {
+        match self {
+            Inner::Http(t) => t.call(req),
+            Inner::Udp(t) => t.call(req),
+        }
+    }
+}
+
+/// Tower [`Service`] implementation for multi-tracker announce.
+///
+/// `call` races all trackers and returns the first successful response
+/// (equivalent to [`announce_first`](Tracker::announce_first)).  Timeout
+/// is applied at the individual tracker level (see [`HttpTracker`] and
+/// [`UdpTracker`] [`Service`] impls), so multi-tracker races automatically
+/// benefit from per-tracker deadline enforcement.
+impl Service<AnnounceRequest> for Tracker {
+    type Response = AnnounceResponse;
+    type Error = Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: AnnounceRequest) -> Self::Future {
+        let this = self.clone();
+        Box::pin(async move { this.announce(req).await })
     }
 }
 
@@ -398,9 +411,18 @@ mod tests {
         let mut req = AnnounceRequest::new([0u8; 20], PeerId::random(), 6881);
         req.compact = false;
         req.numwant = None;
-        let set: JoinSet<Result<AnnounceResponse, Error>> = t.announce_into_set(&req);
+        let set: JoinSet<Result<AnnounceResponse, Error>> = t.announce_into_set(req);
         // Just verify it's not empty when there are trackers
         assert!(!set.is_empty());
+    }
+
+    #[test]
+    fn test_tracker_service_poll_ready() {
+        let mut t = Tracker::single("http://tracker.example.com:6969/announce").unwrap();
+        // tower Service: poll_ready must return Ready for stateless trackers
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(&waker);
+        assert!(t.poll_ready(&mut cx).is_ready());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
-use crate::error::Error;
+use tower::{Service, ServiceBuilder};
+
+use crate::error::{Error, ErrorKind};
 use crate::tracker::{AnnounceEvent, AnnounceRequest};
 
 use super::{SwarmLoop, TorrentEvent};
@@ -41,7 +43,7 @@ impl SwarmLoop {
     pub(super) async fn announce_to_tracker(&mut self, event: AnnounceEvent) -> Result<(), Error> {
         tracing::debug!("announcing to tracker (event: {:?})", event);
         let tracker = match self.tracker.as_ref() {
-            Some(t) => t,
+            Some(t) => t.clone(),
             None => return Ok(()),
         };
 
@@ -61,7 +63,14 @@ impl SwarmLoop {
         req.ip = self.announce_ip;
         req.ipv6 = self.announce_ipv6;
 
-        match tracker.announce(&req).await {
+        // Apply timeout at the call site via tower middleware.
+        // Each inner tracker (HTTP/UDP) is a raw Service — timeout
+        // is a cross-cutting concern applied here through the stack.
+        let mut svc = ServiceBuilder::new()
+            .timeout(self.tracker_timeout)
+            .service(tracker);
+
+        match svc.call(req).await {
             Ok(resp) => {
                 tracing::debug!("tracker announce: {} peers", resp.peers.len());
                 let interval = resp.min_interval.unwrap_or(resp.interval);
@@ -89,17 +98,21 @@ impl SwarmLoop {
                 Ok(())
             }
             Err(e) => {
+                // e is Box<dyn Error + Send + Sync> from tower middleware.
+                // The underlying cause may be a timeout (tower::timeout::error::Elapsed)
+                // or a tracker protocol error (our Error type).
+                let message = e.to_string();
                 self.next_announce = Some(Instant::now() + self.announce_fallback_interval);
                 {
                     let mut ts = self.tracker_status.write().await;
                     ts.next_announce_in = Some(self.announce_fallback_interval);
-                    ts.last_error = Some(e.to_string());
+                    ts.last_error = Some(message.clone());
                 }
                 let _ = self.event_tx.send(TorrentEvent::TrackerError {
-                    message: e.to_string(),
+                    message: message.clone(),
                 });
-                tracing::warn!("failed to announce to tracker: {}", e);
-                Err(e)
+                tracing::warn!("failed to announce to tracker: {}", message);
+                Err(Error::new(ErrorKind::TrackerRequestFailed))
             }
         }
     }

@@ -1,7 +1,10 @@
 use std::fmt;
-use std::time::Duration;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use tokio_rustls::TlsConnector;
+use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 use crate::net::http::{HttpClient, MAX_REDIRECTS, resolve_redirect_url};
@@ -9,9 +12,6 @@ use crate::net::tls::build_tls_connector;
 use crate::{IntoUrl, Url};
 
 use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
-
-/// Timeout for HTTP tracker connect + request + response read.
-use super::DEFAULT_TIMEOUT;
 
 /// Maximum response size to guard against malicious or buggy servers (256 KB).
 pub(crate) const MAX_RESPONSE_SIZE: u64 = 256 * 1024;
@@ -27,8 +27,6 @@ pub struct HttpTracker {
     port: u16,
     /// TLS connector for `https://` URLs; `None` for plain `http://`.
     tls: Option<TlsConnector>,
-    /// Per-request timeout.
-    timeout: Duration,
 }
 
 impl fmt::Debug for HttpTracker {
@@ -47,23 +45,20 @@ impl Clone for HttpTracker {
             host: self.host.clone(),
             port: self.port,
             tls: self.tls.clone(),
-            timeout: self.timeout,
         }
     }
 }
 
 impl HttpTracker {
-    /// Create a new HTTP tracker client with the default 15 s timeout.
+    /// Create a new HTTP tracker client.
     ///
     /// `url` must be a full announce URL (e.g. `http://tracker.example.com:6969/announce`
     /// or `https://tracker.example.com/announce`). Automatically detects TLS.
     /// Accepts `&str`, `String`, `&String`, or `Url`.
+    ///
+    /// Timeout is not embedded — apply [`tower::timeout::TimeoutLayer`]
+    /// at the call site via [`tower::ServiceBuilder`].
     pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
-        HttpTracker::with_timeout(url, DEFAULT_TIMEOUT)
-    }
-
-    /// Create a new HTTP tracker client with a custom timeout.
-    pub fn with_timeout(url: impl IntoUrl, timeout: Duration) -> Result<Self, Error> {
         let url = url.into_url()?;
         let host = url
             .host_str()
@@ -80,7 +75,6 @@ impl HttpTracker {
             host,
             port,
             tls,
-            timeout,
         })
     }
 
@@ -91,7 +85,7 @@ impl HttpTracker {
 
     /// Announce to the HTTP tracker, following redirects (301, 302) up to
     /// `MAX_REDIRECTS` times.
-    pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
+    pub async fn announce(&self, req: AnnounceRequest) -> Result<AnnounceResponse, Error> {
         tracing::info!("HTTP announce to {} (event: {:?})", self.url, req.event);
 
         let mut current_url = self.url.clone();
@@ -102,11 +96,9 @@ impl HttpTracker {
         loop {
             let mut announce_url = current_url.clone();
 
-            announce_url.set_query(Some(&build_query_string(req)));
+            announce_url.set_query(Some(&build_query_string(&req)));
 
-            let buf = tokio::time::timeout(self.timeout, client.get(announce_url))
-                .await
-                .map_err(Error::io)??;
+            let buf = client.get(announce_url).await.map_err(Error::io)?;
 
             // Parse HTTP response: find "\r\n\r\n" separator
             let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
@@ -166,6 +158,35 @@ impl HttpTracker {
                 }
             }
         }
+    }
+}
+
+/// Tower [`Service`] implementation for HTTP tracker announces.
+///
+/// This is a **raw** service — no timeout or retry is applied here.
+/// Wrap with [`tower::ServiceBuilder`] at the call site to add
+/// timeout, retry, rate-limiting, etc.:
+///
+/// ```ignore
+/// use tower::{Service, ServiceBuilder};
+///
+/// let mut svc = ServiceBuilder::new()
+///     .timeout(Duration::from_secs(15))
+///     .service(tracker);
+/// let resp = svc.call(req).await?;
+/// ```
+impl Service<AnnounceRequest> for HttpTracker {
+    type Response = AnnounceResponse;
+    type Error = Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: AnnounceRequest) -> Self::Future {
+        let this = self.clone();
+        Box::pin(async move { this.announce(req).await })
     }
 }
 
