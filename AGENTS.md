@@ -50,6 +50,30 @@ These MUST be followed. Apply them before consulting the reference architecture 
     - Do NOT derive `Clone` or `Eq` for types that own resources, handles, or non-deterministic state (e.g., network connections, file handles, RNG state).
     - Error types must implement `std::error::Error` + `Send + Sync`.
 
+8.  **Tower Service Pattern**. Use `tower::Service` as the primary abstraction for request-response (R-R) components. Follow these rules:
+    - **R-R components implement `Service`**. Tracker announces, DHT RPC calls, and web seed fetches are naturally `Request → Service → Response`. Implement `tower::Service` for each such component.
+
+    - **Timeout at the call site**. Never embed `tokio::time::timeout` inside a `Service::call()` implementation. Apply `tower::timeout::TimeoutLayer` via `tower::ServiceBuilder` at the integration point (e.g., `SwarmLoop`). This keeps business logic pure and timeout policy centralized.
+
+    - **No timeout/retry fields in service structs**. Remove `timeout: Duration` fields from service types. The caller owns timeout policy — services are raw, stateless-per-request delegates.
+
+    - **`poll_ready` returns `Ready` for stateless services**. HTTP trackers, UDP trackers, and DHT RPC have no connection pool; each request creates its own socket/connection. Return `Poll::Ready(Ok(()))` directly.
+
+    - **Use `ServiceBuilder` for middleware composition**. Chain timeout, retry, rate-limiting, and buffer layers declaratively:
+
+      ```rust
+      let mut svc = ServiceBuilder::new()
+          .timeout(config.tracker_timeout)
+          .service(tracker.clone());
+      svc.call(req).await
+      ```
+
+    - **Not for bidirectional streams**. Do NOT model the peer wire protocol as `Service` — it is a bidirectional, asymmetric event stream (`Have`, `Bitfield`, `Choke` arrive unsolicited). Use `Stream` + `Sink` (or `tokio` channels) for peer I/O.
+
+    - **`torrent-core` never depends on tower**. The `Service` trait and middleware live only in the `torrent` crate. `torrent-core` remains sync, pure computation.
+
+    - **`Error` must satisfy `Into<Box<dyn Error + Send + Sync>>`**. This is automatically true if `Error` implements `std::error::Error + Send + Sync` (hard rule 7). Required for tower middleware like `Timeout` and `Retry`.
+
 ## Reference Architecture
 
 The sections below describe the workspace layout, module relationships, and implementation details. They are informative — rely on the Hard Rules above for normative constraints.
@@ -115,6 +139,7 @@ torrent.rs/                  ← workspace root
 | `sha1`                | —                                        | Info hash computation               |
 | `tokio`               | net, rt, macros, time, io-util, fs, sync | Async I/O runtime                   |
 | `tokio-rustls`        | —                                        | TLS streams over tokio              |
+| `tower`               | `util`, `timeout`, `retry`               | Service abstraction and middleware  |
 | `tracing`             | —                                        | Structured logging                  |
 | `url`                 | —                                        | Tracker URL and magnet URI parsing  |
 
@@ -162,8 +187,31 @@ bencode ─── metainfo             session
 - **Fast Extension (BEP 6)**: `compute_allowed_fast_set()` + 5 message types (Suggest, HaveAll/None, Reject, AllowedFast) in `torrent-core`. AllowedFast bypasses choke, HaveAll/HaveNone replaces Bitfield. `Unknown` catch-all for forward compatibility.
 - **LTEP (BEP 10)**: `ExtensionNegotiation` in `torrent-core` for handshake dict encode/decode. Async LTEP negotiation during `PeerConnection::connect()` in `torrent`.
 - **PEX (BEP 11)**: `PexMessage` in `torrent-core` for peer list encode/decode. `SwarmLoop` handler in `torrent` dispatches incoming PEX, broadcasts periodically with `pex_interval`.
-- **Tracker**: `HttpTracker` uses manual HTTP/1.1 (no `reqwest`). `UdpTracker` implements BEP 15 connection protocol + announce + retry. Both in `torrent`.
+- **Tracker**: `HttpTracker` uses manual HTTP/1.1 (no `reqwest`). `UdpTracker` implements BEP 15 connection protocol + announce + retry. Both in `torrent`. Each tracker implements `tower::Service<AnnounceRequest>` — raw, stateless per-request. Timeout is applied at the call site in `SwarmLoop` via `ServiceBuilder::new().timeout(config.tracker_timeout).service(tracker)`.
   - `HttpTracker` supports both `http://` (plain TCP) and `https://` (TLS via `tokio-rustls`).
+- **Tower Service Architecture**: `tower::Service` is the integration point for request-response components. The model:
+
+  ```text
+  SwarmLoop (call site / integration point)
+    │
+    │  ServiceBuilder::new()
+    │    .timeout(config.tracker_timeout)   ← cross-cutting via middleware
+    │    .service(tracker)
+    │    .call(req)
+    │
+    ▼
+  HttpTracker / UdpTracker / DhtRpc / FetchTask
+    └── Service::call() → raw business logic (no timeout, no retry)
+  ```
+
+  **What qualifies as a tower `Service`**:
+  - Tracker announces, DHT RPC, web seed fetches, storage I/O: **yes** — pure request → response.
+  - Peer wire protocol, incoming DHT queries, LSD announcements: **no** — these are bidirectional or unsolicited event streams. Use `Stream` + `Sink` or `tokio::mpsc` channels.
+
+  **Timeout pattern**: Timeout is always applied at the integration point (e.g., `SwarmLoop`, `DhtNode`) via `tower::ServiceBuilder::timeout()`. Services themselves contain no timeout logic — `announce()` and `query()` are raw, blocking only on I/O.
+
+  **Error bridging**: tower middleware uses `Box<dyn Error + Send + Sync>` as the error type. Since `torrent_core::Error` implements `std::error::Error + Send + Sync`, the standard library blanket `From<E> for Box<dyn Error>` provides automatic conversion. At the call site, map the boxed error back to a domain error via `e.to_string()` for logging and `Error::new(ErrorKind::*)` for control flow.
+
 - **Piece**: `PieceManager` (bitfield, progress tracking) + 4 selection strategies (`RarestFirst`, `RandomFirst`, `Sequential`, `EndGame`) in `torrent-core`.
 - **Storage**: `Storage` trait in `torrent-core`. `FileStorage` implementation in `torrent`.
 - **DHT**: 160 K-buckets (K=8), XOR distance, KRPC bencode-based messages in `torrent-core`. Async RPC + 4 query types (`ping`, `find_node`, `get_peers`, `announce_peer`) in `torrent`.
