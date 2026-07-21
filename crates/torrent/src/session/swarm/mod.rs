@@ -278,7 +278,6 @@ impl TorrentHandle {
         let webseed_config = WebSeedConfig {
             min_gap_pieces: config.webseed_min_gap_pieces,
             max_range_bytes: config.webseed_max_range_bytes,
-            timeout: config.webseed_timeout,
             max_concurrent: config.webseed_max_concurrent,
             park_threshold: 5,
             park_retry_interval: Duration::from_secs(60),
