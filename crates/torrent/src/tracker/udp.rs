@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{UdpSocket, lookup_host};
@@ -18,6 +19,14 @@ const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
 
 /// Max retries for connect and announce phases (BEP 15: up to 4 retries).
 const MAX_RETRIES: u32 = 4;
+
+/// Per-packet recv timeout for UDP connect/announce (5 s).
+///
+/// Prevents a single lost datagram from hanging the entire retry loop.
+/// This is a **hardware safety net**, not a policy deadline — use
+/// [`tower::ServiceBuilder::timeout`] at the call site for the overall
+/// announce deadline.
+const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Receive buffer size — enough for compact peer lists with ~200 peers.
 const RECV_BUF_SIZE: usize = 2048;
@@ -134,23 +143,29 @@ impl UdpTracker {
                 }
 
                 let mut buf = vec![0u8; RECV_BUF_SIZE];
-                match socket.recv_from(&mut buf).await {
-                    Ok((len, src)) => {
+                match tokio::time::timeout(RECV_TIMEOUT, socket.recv_from(&mut buf)).await {
+                    Ok(Ok((len, src))) => {
                         if src != addr {
                             continue;
                         }
                         match parse_announce_response(&buf[..len], transaction_id) {
                             Ok(response) => return Ok(response),
                             Err(e) => {
-                                // Connection may have expired; clear cache for next attempt
                                 *self.connection_id.lock().unwrap() = None;
                                 last_err = Some(e);
                                 break;
                             }
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         last_err = Some(Error::tracker_failed(e));
+                        continue;
+                    }
+                    Err(_elapsed) => {
+                        tracing::debug!(
+                            "UDP announce recv timed out after {:.0}s",
+                            RECV_TIMEOUT.as_secs(),
+                        );
                         continue;
                     }
                 }
@@ -237,15 +252,22 @@ async fn connect(socket: &UdpSocket, addr: SocketAddr) -> Result<u64, Error> {
             .map_err(Error::tracker_failed)?;
 
         let mut buf = vec![0u8; 16];
-        match socket.recv_from(&mut buf).await {
-            Ok((len, src)) => {
+        match tokio::time::timeout(RECV_TIMEOUT, socket.recv_from(&mut buf)).await {
+            Ok(Ok((len, src))) => {
                 if src != addr {
                     continue;
                 }
                 return parse_connect_response(&buf[..len], transaction_id);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!("UDP connect recv error: {}", e);
+                continue;
+            }
+            Err(_elapsed) => {
+                tracing::debug!(
+                    "UDP connect recv timed out after {:.0}s",
+                    RECV_TIMEOUT.as_secs()
+                );
                 continue;
             }
         }
