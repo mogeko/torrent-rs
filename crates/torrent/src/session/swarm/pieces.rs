@@ -384,7 +384,7 @@ impl SwarmLoop {
                 .iter()
                 .find(|(addr, p)| {
                     p.peer_interested
-                        && self.upload_mgr.is_unchoked(addr)
+                        && self.choke_manager.is_unchoked(addr)
                         && !self.super_seed_assignments.values().any(|a| a == *addr)
                 })
                 .map(|(addr, _)| *addr);

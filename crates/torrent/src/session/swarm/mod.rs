@@ -29,6 +29,8 @@ use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
+use self::choke::ChokeManager;
+use self::pex::PexManager;
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
 use super::webseed::{
@@ -306,12 +308,15 @@ impl TorrentHandle {
             max_concurrent_pieces: config.max_concurrent_pieces,
             piece_cache_size: config.piece_cache_size,
             endgame_threshold: config.endgame_threshold,
-            choke_interval: config.choke_interval,
-            snub_timeout: config.snub_timeout,
+            choke_manager: ChokeManager::new(
+                config.max_uploads,
+                config.choke_interval,
+                config.snub_timeout,
+            ),
             corrupt_ban_threshold: config.corrupt_ban_threshold,
             announce_fallback_interval: config.announce_fallback_interval,
             pex_enabled: config.pex_enabled,
-            pex_interval: config.pex_interval,
+            pex_manager: PexManager::new(config.pex_interval),
             tracker,
             next_announce: None,
             has_announced: false,
@@ -321,7 +326,6 @@ impl TorrentHandle {
             selector: Box::new(RarestFirst),
             peer_msg_rx,
             peer_msg_tx,
-            upload_mgr: UploadManager::new(config.max_uploads),
             total_downloaded: 0,
             total_uploaded: 0,
             total_wasted: 0,
@@ -401,10 +405,8 @@ pub(crate) struct SwarmLoop {
     pub(crate) piece_cache_size: usize,
     /// EndGame threshold (switch when fewer pieces remain).
     pub(crate) endgame_threshold: usize,
-    /// Choke/unchoke interval.
-    pub(crate) choke_interval: Duration,
-    /// Snub timeout for idle peers.
-    pub(crate) snub_timeout: Duration,
+    /// Choke/unchoke manager (BEP 3 tit-for-tat).
+    pub(crate) choke_manager: ChokeManager,
     /// Corrupt block ban threshold.
     pub(crate) corrupt_ban_threshold: u32,
     /// Re-announce fallback interval on tracker error.
@@ -427,8 +429,6 @@ pub(crate) struct SwarmLoop {
     pub(crate) peer_msg_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
     /// Clone for spawning new reader tasks.
     pub(crate) peer_msg_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    /// Upload slot manager.
-    pub(crate) upload_mgr: UploadManager,
     /// Total bytes downloaded.
     pub(crate) total_downloaded: u64,
     /// Total bytes uploaded.
@@ -442,12 +442,12 @@ pub(crate) struct SwarmLoop {
     /// Cached completed pieces for upload serving (avoid repeated disk reads).
     /// Ordered by insertion time — oldest first for LRU eviction.
     pub(crate) piece_cache: Vec<(u32, Arc<Vec<u8>>)>,
-    /// Recently disconnected peers to announce in PEX dropped field.
-    pub(crate) recently_dropped: Vec<SocketAddr>,
+    /// PEX broadcast manager (BEP 11).
+    pub(crate) pex_manager: PexManager,
     /// Enable Peer Exchange (BEP 11).
     pub(crate) pex_enabled: bool,
-    /// PEX broadcast interval.
-    pub(crate) pex_interval: Duration,
+    /// Recently disconnected peers to announce in PEX dropped field.
+    pub(crate) recently_dropped: Vec<SocketAddr>,
     /// Enable super seeding mode (BEP 16). When enabled, pieces are
     /// uploaded to one peer at a time to minimize redundant uploads
     /// during initial seeding.
@@ -484,9 +484,9 @@ impl SwarmLoop {
         }
 
         let mut status_tick = tokio::time::interval(Duration::from_secs(1));
-        let mut choke_tick = tokio::time::interval(self.choke_interval);
+        let mut choke_tick = tokio::time::interval(self.choke_manager.interval());
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
-        let mut pex_tick = tokio::time::interval(self.pex_interval);
+        let mut pex_tick = tokio::time::interval(self.pex_manager.interval());
 
         // Spawn web seed scheduler + fetchers (BEP 19).
         // The scheduler reads the bitfield, selects gaps, and dispatches
@@ -593,7 +593,9 @@ impl SwarmLoop {
                 }
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
                     self.handle_peer_event(addr, event).await;
-                    if !self.is_seeding().await && let Err(e) = self.fill_pipelines().await {
+                    if !self.piece_mgr.read().await.missing_pieces().is_empty()
+                        && let Err(e) = self.fill_pipelines().await
+                    {
                             tracing::warn!("failed to fill pipelines: {}", e);
                         }
                 }
@@ -615,7 +617,12 @@ impl SwarmLoop {
                     }
                 }
                 _ = choke_tick.tick() => {
-                    if let Err(e) = self.run_choke_unchoke().await {
+                    if let Err(e) = self.choke_manager.run_round(
+                        &mut self.peers,
+                        &mut self.active_downloads,
+                        &self.piece_mgr,
+                        &self.peer_mgr,
+                    ).await {
                         tracing::warn!("failed to run choke/unchoke: {}", e);
                     }
                 }
@@ -624,7 +631,11 @@ impl SwarmLoop {
                 }
                 _ = pex_tick.tick() => {
                     if self.pex_enabled {
-                        if let Err(e) = self.broadcast_pex().await {
+                        if let Err(e) = self.pex_manager.broadcast(
+                            &self.peers,
+                            &mut self.recently_dropped,
+                            &self.peer_mgr,
+                        ).await {
                             tracing::warn!("failed to broadcast PEX: {}", e);
                         }
                     }

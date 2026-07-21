@@ -182,7 +182,7 @@ impl SwarmLoop {
                 begin,
                 length,
             } => {
-                let unchoked = self.upload_mgr.is_unchoked(&addr);
+                let unchoked = self.choke_manager.is_unchoked(&addr);
                 // BEP 6: allow requests for pieces in our_allowed_fast
                 // even when the peer is choked.
                 let peer = self.peers.get(&addr);
