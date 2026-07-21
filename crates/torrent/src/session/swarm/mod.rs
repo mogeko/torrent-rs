@@ -273,12 +273,11 @@ impl TorrentHandle {
             mpsc::channel::<(SocketAddr, PeerEvent)>(config.peer_msg_buffer_size);
 
         let peer_id = PeerId::random();
-        let tracker = Tracker::from_torrent_with_timeout(metainfo.clone(), config.tracker_timeout);
+        let tracker = Tracker::from_torrent(metainfo.clone());
 
         let webseed_config = WebSeedConfig {
             min_gap_pieces: config.webseed_min_gap_pieces,
             max_range_bytes: config.webseed_max_range_bytes,
-            timeout: config.webseed_timeout,
             max_concurrent: config.webseed_max_concurrent,
             park_threshold: 5,
             park_retry_interval: Duration::from_secs(60),
@@ -303,6 +302,7 @@ impl TorrentHandle {
             announce_ip: config.announce_ip,
             announce_ipv6: config.announce_ipv6,
             request_timeout: config.request_timeout,
+            tracker_timeout: config.tracker_timeout,
             max_concurrent_pieces: config.max_concurrent_pieces,
             piece_cache_size: config.piece_cache_size,
             endgame_threshold: config.endgame_threshold,
@@ -392,6 +392,9 @@ pub(crate) struct SwarmLoop {
     pub(crate) announce_ipv6: Option<Ipv6Addr>,
     /// Timeout for a single block request.
     pub(crate) request_timeout: Duration,
+    /// Timeout for tracker announce calls (applied via tower middleware
+    /// at the call site in [`announce_to_tracker`]).
+    pub(crate) tracker_timeout: Duration,
     /// Maximum concurrent piece downloads.
     pub(crate) max_concurrent_pieces: usize,
     /// How many completed pieces to cache for upload serving.

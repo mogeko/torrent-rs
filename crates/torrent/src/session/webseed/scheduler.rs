@@ -243,28 +243,14 @@ impl WebSeedScheduler {
             let Some((idx, _state)) = best_idx else {
                 return;
             };
-            // Adaptive range: size the request to fit within the timeout
-            // based on this URL's observed throughput.  Slow URLs get
-            // smaller ranges so they don't trigger a timeout; fast URLs
-            // get the full max_range_bytes.  Untested URLs (EMA=0) get
-            // the floor: min_gap_pieces × piece_length.
-            let range_from_throughput = (self.urls[idx].health.ema_throughput()
-                * self.config.timeout.as_secs_f64()
-                * 0.8) as u64;
+            // Adaptive range: use the full max_range_bytes.  Slow URLs
+            // naturally finish fewer ranges per dispatch cycle.
             let floor_range = min_gap as u64 * piece_length;
-            let adaptive_max = range_from_throughput.max(floor_range).min(max_range);
+            let adaptive_max = floor_range.max(max_range);
             let end_byte = (start_byte + adaptive_max)
                 .min(total_size)
                 .saturating_sub(1);
-            // Dynamic timeout: proportional to range size.
-            // Floor: 50 KB/s = 20 s/MB. If a URL can't deliver
-            // 1 MB in 20 s, it's effectively dead.
-            let range_size = end_byte - start_byte + 1;
-            let min_throughput: f64 = 51_200.0; // 50 KB/s
-            let dynamic_timeout =
-                Duration::from_secs_f64((range_size as f64 / min_throughput).max(5.0));
             let range_mb = (end_byte - start_byte + 1) as f64 / (1024.0 * 1024.0);
-            let timeout_s = dynamic_timeout.as_secs_f64();
             let ema_kbs = self.urls[idx].health.ema_throughput() / 1024.0;
             let ucb_kbs = self.urls[idx]
                 .health
@@ -282,10 +268,9 @@ impl WebSeedScheduler {
             }
 
             tracing::debug!(
-                "web seed dispatch → {} [{:.1}MB, {:.0}s timeout] (EMA={:.0}KB/s, UCB={:.0}KB/s)",
+                "web seed dispatch → {} [{:.1}MB] (EMA={:.0}KB/s, UCB={:.0}KB/s)",
                 self.urls[idx].url,
                 range_mb,
-                timeout_s,
                 ema_kbs,
                 ucb_kbs,
             );
@@ -295,7 +280,6 @@ impl WebSeedScheduler {
                 .try_send(WorkItem {
                     start_byte,
                     end_byte,
-                    timeout: dynamic_timeout,
                 })
                 .is_ok()
             {

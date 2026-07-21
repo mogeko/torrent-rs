@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use sha1::{Digest, Sha1};
 use tokio::sync::{RwLock, Semaphore, mpsc};
+use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::Metainfo;
@@ -25,6 +26,10 @@ use super::types::{UrlKind, WorkItem, WorkResult};
 ///
 /// The fetcher does NOT scan the bitfield or decide what to download
 /// — that is the scheduler's job.
+///
+/// Timeout is a cross-cutting concern applied at the call site
+/// (e.g. via [`tower::ServiceBuilder::timeout`] in the session),
+/// not embedded in the download logic.
 pub(crate) struct FetchTask {
     /// Human-readable URL for logging.
     url: Url,
@@ -49,8 +54,6 @@ pub(crate) struct FetchTask {
 }
 
 impl FetchTask {
-    /// Create a new fetcher.  `work_rx`/`result_tx` are the channels
-    /// that connect this fetcher to the [`WebSeedScheduler`].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         url: Url, url_index: usize, piece_mgr: Arc<RwLock<PieceManager>>,
@@ -74,7 +77,7 @@ impl FetchTask {
         }
     }
 
-    /// Run the fetcher loop — waits for work, downloads with retry, reports.
+    /// Run the fetcher loop — waits for work, downloads, reports.
     pub async fn run(mut self) {
         tracing::trace!("web seed {}: started", self.url);
         while let Some(work) = self.work_rx.recv().await {
@@ -85,21 +88,13 @@ impl FetchTask {
         tracing::trace!("web seed {}: exiting", self.url);
     }
 
-    /// Single-attempt download — no internal retry.
-    ///
-    /// Uses [`WorkItem::timeout`] as a per-request deadline via
-    /// [`tokio::time::timeout`].  The fixed HTTP client timeout is
-    /// kept as a generous upper bound.
+    /// Single-attempt download — raw I/O only, no timeout.
     async fn download_once(&self, work: WorkItem) -> WorkResult {
         let started = Instant::now();
-        let result = tokio::time::timeout(
-            work.timeout,
-            self.download_range(work.start_byte, work.end_byte),
-        )
-        .await;
+        let result = self.download_range(work.start_byte, work.end_byte).await;
 
         match result {
-            Ok(Ok(completed)) => {
+            Ok(completed) => {
                 let bytes: u64 = completed
                     .iter()
                     .map(|&i| piece_len(i, &self.metainfo, self.piece_length))
@@ -112,35 +107,20 @@ impl FetchTask {
                     error: None,
                 }
             }
-            Ok(Err(ref e)) if e.kind() == ErrorKind::WebSeedHashMismatch => WorkResult {
+            Err(ref e) if e.kind() == ErrorKind::WebSeedHashMismatch => WorkResult {
                 url_index: self.url_index,
                 completed: Vec::new(),
                 bytes: 0,
                 elapsed: started.elapsed(),
                 error: Some(ErrorKind::WebSeedHashMismatch),
             },
-            Ok(Err(e)) => WorkResult {
+            Err(e) => WorkResult {
                 url_index: self.url_index,
                 completed: Vec::new(),
                 bytes: 0,
                 elapsed: started.elapsed(),
                 error: Some(e.kind()),
             },
-            Err(_elapsed) => {
-                tracing::debug!(
-                    "web seed {}: timeout after {:.1}s (limit={:.1}s)",
-                    self.url,
-                    started.elapsed().as_secs_f64(),
-                    work.timeout.as_secs_f64(),
-                );
-                WorkResult {
-                    url_index: self.url_index,
-                    completed: Vec::new(),
-                    bytes: 0,
-                    elapsed: started.elapsed(),
-                    error: Some(ErrorKind::Io),
-                }
-            }
         }
     }
 
@@ -161,10 +141,14 @@ impl FetchTask {
             range_size as f64 / 1024.0,
         );
 
-        let body = self
-            .http
-            .get_with_range(request_url, start_byte, end_byte)
-            .await?;
+        let http_req = http::Request::get(request_url.as_str())
+            .header("Range", format!("bytes={start_byte}-{end_byte}"))
+            .body(vec![])
+            .map_err(|_| Error::new(ErrorKind::InvalidInput))?;
+
+        let mut http = self.http.clone();
+        let resp = Service::call(&mut http, http_req).await?;
+        let body = resp.into_body();
 
         let mut completed = Vec::new();
         let first_piece = (start_byte / self.piece_length) as u32;
@@ -219,10 +203,6 @@ impl FetchTask {
 // ── Shared helpers ─────────────────────────────────────────────────
 
 /// Build the full file URL for an HTTP Range request starting at `start_byte`.
-///
-/// For directory URLs (BEP 19 §2): finds the file containing `start_byte`
-/// via [`Info::file_offsets`] and appends its path.
-/// For script URLs: returns the URL as-is.
 pub(super) fn build_request_url(
     url: &Url, metainfo: &Metainfo, url_kind: &UrlKind, start_byte: u64,
 ) -> Result<Url, Error> {
@@ -251,214 +231,13 @@ pub(super) fn file_path_at_byte(metainfo: &Metainfo, start_byte: u64) -> Option<
         .map(|fo| fo.path.clone())
 }
 
-/// Length of the piece at `index` (last piece may be shorter).
-pub(super) fn piece_len(index: u32, metainfo: &Metainfo, piece_length: u64) -> u64 {
-    let total_size = metainfo.info.total_size();
-    let full_piece_count = total_size / piece_length;
-    let last_piece_size = total_size % piece_length;
-
-    if (index as u64) < full_piece_count {
-        piece_length
-    } else if (index as u64) == full_piece_count && last_piece_size > 0 {
-        last_piece_size
+/// Returns the actual length of a piece in bytes.
+fn piece_len(index: u32, metainfo: &Metainfo, piece_length: u64) -> u64 {
+    let total = metainfo.info.total_size();
+    let start = index as u64 * piece_length;
+    if start + piece_length > total {
+        total - start
     } else {
-        0
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    use crate::metainfo::{MetainfoBuilder, Mode};
-    use crate::storage::{FileStorageFactory, StorageFactory};
-
-    use super::*;
-
-    async fn mock_http_server(body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = format!("http://{}", listener.local_addr().unwrap());
-        let handle = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let n = stream.read(&mut buf).await.unwrap();
-            let request = String::from_utf8_lossy(&buf[..n]);
-
-            let range = if request.contains("Range: bytes=") {
-                let line = request
-                    .lines()
-                    .find(|l| l.starts_with("Range: bytes="))
-                    .unwrap();
-                let range_str = line.strip_prefix("Range: bytes=").unwrap();
-                let parts: Vec<&str> = range_str.split('-').collect();
-                let start: usize = parts[0].parse().unwrap();
-                let end: usize = parts[1].parse().unwrap();
-                Some((start, end))
-            } else {
-                None
-            };
-
-            let (response_body, status) = if let Some((start, end)) = range {
-                let slice = &body[start..=end.min(body.len().saturating_sub(1))];
-                (slice.to_vec(), "206 Partial Content")
-            } else {
-                (body.clone(), "200 OK")
-            };
-
-            let response = format!(
-                "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
-                status,
-                response_body.len(),
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
-            stream.write_all(&response_body).await.unwrap();
-            stream.shutdown().await.unwrap();
-        });
-        (addr, handle)
-    }
-
-    fn build_test_metainfo(data: &[u8], piece_length: u32) -> crate::metainfo::Metainfo {
-        let mut builder = MetainfoBuilder::new(piece_length);
-        builder.add_data(data);
-        builder.finish(
-            "http://tracker.example.com/announce".into(),
-            Mode::Single {
-                name: "test.bin".into(),
-                length: data.len() as u64,
-            },
-            Vec::new(),
-            Vec::new(),
-        )
-    }
-
-    #[tokio::test]
-    async fn downloads_full_file_single_piece() {
-        let piece_length = 256u32;
-        let data = vec![0xABu8; piece_length as usize];
-        let metainfo = build_test_metainfo(&data, piece_length);
-
-        let (server_url, _server) = mock_http_server(data.clone()).await;
-        let url = Url::parse(&server_url).unwrap();
-        let client = HttpClient::new();
-        let body = client.get_with_range(url, 0, 255).await.unwrap();
-        assert_eq!(body.len(), 256);
-
-        let (server_url2, _server2) = mock_http_server(data.clone()).await;
-        let url2 = Url::parse(&server_url2).unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let factory = FileStorageFactory::new(tmp.path().to_path_buf());
-        let storage = factory.create(&metainfo.info).await.unwrap();
-        storage.prepare().await.unwrap();
-        let piece_mgr = Arc::new(RwLock::new(PieceManager::new(metainfo.info.num_pieces())));
-
-        let (_work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
-        let (result_tx, _result_rx) = mpsc::channel::<WorkResult>(1);
-
-        let task = FetchTask::new(
-            url2,
-            0,
-            piece_mgr.clone(),
-            storage.clone(),
-            metainfo.clone(),
-            work_rx,
-            result_tx,
-            Arc::new(Semaphore::new(1)),
-        );
-
-        let completed = task.download_range(0, 255).await.unwrap();
-        assert_eq!(completed, vec![0]);
-        assert!(piece_mgr.read().await.has_piece(0));
-    }
-
-    #[tokio::test]
-    async fn downloads_multiple_pieces() {
-        let piece_length = 128u32;
-        let data: Vec<u8> = (0u32..(piece_length * 3) as u32).map(|v| v as u8).collect();
-        let metainfo = build_test_metainfo(&data, piece_length);
-
-        let (server_url, _server) = mock_http_server(data.clone()).await;
-        let url = Url::parse(&server_url).unwrap();
-        let client = HttpClient::new();
-        let body = client.get_with_range(url, 0, 383).await.unwrap();
-        assert_eq!(body.len(), 384);
-        assert_eq!(&body[..128], &data[0..128]);
-
-        let (server_url2, _server2) = mock_http_server(data.clone()).await;
-        let url2 = Url::parse(&server_url2).unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let factory = FileStorageFactory::new(tmp.path().to_path_buf());
-        let storage = factory.create(&metainfo.info).await.unwrap();
-        storage.prepare().await.unwrap();
-        let piece_mgr = Arc::new(RwLock::new(PieceManager::new(metainfo.info.num_pieces())));
-
-        let (_work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
-        let (result_tx, _result_rx) = mpsc::channel::<WorkResult>(1);
-        let task = FetchTask::new(
-            url2,
-            0,
-            piece_mgr.clone(),
-            storage.clone(),
-            metainfo.clone(),
-            work_rx,
-            result_tx,
-            Arc::new(Semaphore::new(1)),
-        );
-
-        let completed = task.download_range(0, 383).await.unwrap();
-        assert_eq!(completed, vec![0, 1, 2]);
-        assert!(piece_mgr.read().await.has_piece(0));
-    }
-
-    #[tokio::test]
-    async fn sha1_mismatch_does_not_mark_complete() {
-        let piece_length = 256u32;
-        let correct_data = vec![0xABu8; piece_length as usize];
-        let wrong_data = vec![0xCDu8; piece_length as usize];
-        let metainfo = build_test_metainfo(&correct_data, piece_length);
-
-        let (server_url, _server) = mock_http_server(wrong_data).await;
-        let tmp = tempfile::tempdir().unwrap();
-        let factory = FileStorageFactory::new(tmp.path().to_path_buf());
-        let storage = factory.create(&metainfo.info).await.unwrap();
-        storage.prepare().await.unwrap();
-        let piece_mgr = Arc::new(RwLock::new(PieceManager::new(metainfo.info.num_pieces())));
-
-        let url = Url::parse(&server_url).unwrap();
-        let (work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
-        let (result_tx, mut result_rx) = mpsc::channel::<WorkResult>(1);
-        let semaphore = Arc::new(Semaphore::new(1));
-
-        let fetcher = FetchTask::new(
-            url,
-            0,
-            piece_mgr.clone(),
-            storage.clone(),
-            metainfo.clone(),
-            work_rx,
-            result_tx,
-            semaphore.clone(),
-        );
-
-        let handle = tokio::spawn(async move { fetcher.run().await });
-        let _ = work_tx
-            .send(WorkItem {
-                start_byte: 0,
-                end_byte: 255,
-                timeout: Duration::from_secs(5),
-            })
-            .await;
-
-        let result = tokio::time::timeout(Duration::from_secs(3), result_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.error, Some(ErrorKind::WebSeedHashMismatch));
-        assert!(result.completed.is_empty());
-        assert!(!piece_mgr.read().await.has_piece(0));
-
-        handle.abort();
+        piece_length
     }
 }

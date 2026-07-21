@@ -1,23 +1,32 @@
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{UdpSocket, lookup_host};
+use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 use crate::{IntoUrl, Url};
 
 use super::{AnnounceEvent, AnnounceRequest, AnnounceResponse};
 
-/// Per-request timeout (connect + announce).
-use super::DEFAULT_TIMEOUT;
-
 /// Magic connection ID constant used during the connection phase.
 const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
 
 /// Max retries for connect and announce phases (BEP 15: up to 4 retries).
 const MAX_RETRIES: u32 = 4;
+
+/// Per-packet recv timeout for UDP connect/announce (5 s).
+///
+/// Prevents a single lost datagram from hanging the entire retry loop.
+/// This is a **hardware safety net**, not a policy deadline — use
+/// [`tower::ServiceBuilder::timeout`] at the call site for the overall
+/// announce deadline.
+const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Receive buffer size — enough for compact peer lists with ~200 peers.
 const RECV_BUF_SIZE: usize = 2048;
@@ -30,21 +39,17 @@ pub struct UdpTracker {
     connection_id: Arc<Mutex<Option<u64>>>,
     /// Cached resolved address to avoid repeated DNS lookups.
     cached_addr: Arc<Mutex<Option<SocketAddr>>>,
-    /// Per-request timeout.
-    timeout: Duration,
 }
 
 impl UdpTracker {
-    /// Create a new UDP tracker client with the default 15 s timeout.
+    /// Create a new UDP tracker client.
     ///
     /// `url` must be a `udp://` URL (e.g. `udp://tracker.example.com:6969`).
     /// Accepts `&str`, `String`, `&String`, or `Url`.
+    ///
+    /// Timeout is not embedded — apply [`tower::timeout::TimeoutLayer`]
+    /// at the call site via [`tower::ServiceBuilder`].
     pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
-        UdpTracker::with_timeout(url, DEFAULT_TIMEOUT)
-    }
-
-    /// Create a new UDP tracker client with a custom timeout.
-    pub fn with_timeout(url: impl IntoUrl, timeout: Duration) -> Result<Self, Error> {
         let url = url.into_url()?;
 
         if url.scheme() != "udp" {
@@ -55,7 +60,6 @@ impl UdpTracker {
             url,
             connection_id: Arc::new(Mutex::new(None)),
             cached_addr: Arc::new(Mutex::new(None)),
-            timeout,
         })
     }
 
@@ -70,7 +74,7 @@ impl UdpTracker {
     /// tracker support).  Uses the BEP 15 two-phase connect+announce protocol
     /// with retries on both phases. Connection ID is cached across announces
     /// per BEP 15 and re-fetched only on timeout.
-    pub async fn announce(&self, req: &AnnounceRequest) -> Result<AnnounceResponse, Error> {
+    pub async fn announce(&self, req: AnnounceRequest) -> Result<AnnounceResponse, Error> {
         tracing::info!("UDP announce to {}", self.url);
         let Some(host) = self.url.host_str() else {
             return Err(Error::new(ErrorKind::InvalidInput));
@@ -116,7 +120,7 @@ impl UdpTracker {
             let connection_id = if let Some(cached) = *self.connection_id.lock().unwrap() {
                 cached
             } else {
-                match connect(&socket, addr, self.timeout).await {
+                match connect(&socket, addr).await {
                     Ok(id) => {
                         *self.connection_id.lock().unwrap() = Some(id);
                         id
@@ -130,7 +134,7 @@ impl UdpTracker {
 
             // Phase 2: Announce (with retries — UDP is unreliable)
             let transaction_id = rand::random::<u32>();
-            let announce_packet = build_announce_packet(connection_id, transaction_id, req, event);
+            let announce_packet = build_announce_packet(connection_id, transaction_id, &req, event);
 
             for _ in 0..MAX_RETRIES {
                 if let Err(e) = socket.send_to(&announce_packet, addr).await {
@@ -139,7 +143,7 @@ impl UdpTracker {
                 }
 
                 let mut buf = vec![0u8; RECV_BUF_SIZE];
-                match tokio::time::timeout(self.timeout, socket.recv_from(&mut buf)).await {
+                match tokio::time::timeout(RECV_TIMEOUT, socket.recv_from(&mut buf)).await {
                     Ok(Ok((len, src))) => {
                         if src != addr {
                             continue;
@@ -147,19 +151,50 @@ impl UdpTracker {
                         match parse_announce_response(&buf[..len], transaction_id) {
                             Ok(response) => return Ok(response),
                             Err(e) => {
-                                // Connection may have expired; clear cache for next attempt
                                 *self.connection_id.lock().unwrap() = None;
                                 last_err = Some(e);
                                 break;
                             }
                         }
                     }
-                    _ => continue,
+                    Ok(Err(e)) => {
+                        last_err = Some(Error::tracker_failed(e));
+                        continue;
+                    }
+                    Err(_elapsed) => {
+                        tracing::debug!(
+                            "UDP announce recv timed out after {:.0}s",
+                            RECV_TIMEOUT.as_secs(),
+                        );
+                        continue;
+                    }
                 }
             }
         }
 
         Err(last_err.unwrap_or_else(|| Error::new(ErrorKind::TrackerRequestFailed)))
+    }
+}
+
+/// Tower [`Service`] implementation for UDP tracker announces.
+///
+/// This is a **raw** service — no timeout or retry is applied here.
+/// Wrap with [`tower::ServiceBuilder`] at the call site to add
+/// timeout, retry, etc.  BEP 15 protocol-level retry
+/// (connection ID expiry, multi-address fallback) remains inside
+/// `announce()` — those are protocol concerns, not middleware.
+impl Service<AnnounceRequest> for UdpTracker {
+    type Response = AnnounceResponse;
+    type Error = Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: AnnounceRequest) -> Self::Future {
+        let this = self.clone();
+        Box::pin(async move { this.announce(req).await })
     }
 }
 
@@ -205,7 +240,7 @@ fn bind_tracker_socket(v4: bool) -> Result<UdpSocket, Error> {
 }
 
 /// Connect phase: obtain a connection ID from the tracker.
-async fn connect(socket: &UdpSocket, addr: SocketAddr, timeout: Duration) -> Result<u64, Error> {
+async fn connect(socket: &UdpSocket, addr: SocketAddr) -> Result<u64, Error> {
     let transaction_id = rand::random::<u32>();
 
     let connect_packet = build_connect_packet(transaction_id);
@@ -217,14 +252,24 @@ async fn connect(socket: &UdpSocket, addr: SocketAddr, timeout: Duration) -> Res
             .map_err(Error::tracker_failed)?;
 
         let mut buf = vec![0u8; 16];
-        match tokio::time::timeout(timeout, socket.recv_from(&mut buf)).await {
+        match tokio::time::timeout(RECV_TIMEOUT, socket.recv_from(&mut buf)).await {
             Ok(Ok((len, src))) => {
                 if src != addr {
                     continue;
                 }
                 return parse_connect_response(&buf[..len], transaction_id);
             }
-            _ => continue,
+            Ok(Err(e)) => {
+                tracing::warn!("UDP connect recv error: {}", e);
+                continue;
+            }
+            Err(_elapsed) => {
+                tracing::debug!(
+                    "UDP connect recv timed out after {:.0}s",
+                    RECV_TIMEOUT.as_secs()
+                );
+                continue;
+            }
         }
     }
 

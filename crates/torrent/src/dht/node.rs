@@ -47,9 +47,9 @@ pub(crate) struct DhtNode {
     /// Dual-stack Kademlia routing table.
     routing_table: Arc<Mutex<DualRoutingTable>>,
     /// Async UDP RPC client for IPv4 (always present).
-    rpc_v4: Arc<DhtRpc>,
+    rpc_v4: DhtRpc,
     /// Async UDP RPC client for IPv6 (`None` if v6 unavailable).
-    rpc_v6: Option<Arc<DhtRpc>>,
+    rpc_v6: Option<DhtRpc>,
     /// Well-known bootstrap addresses (resolved at construction time).
     bootstrap_nodes: Vec<SocketAddr>,
     /// Secret for token generation (BEP 5 announce_peer validation).

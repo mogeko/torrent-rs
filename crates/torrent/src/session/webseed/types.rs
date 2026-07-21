@@ -16,9 +16,6 @@ pub(crate) struct WebSeedConfig {
     pub min_gap_pieces: u32,
     /// Upper bound for adaptive Range request size. Default: 5 MB.
     pub max_range_bytes: u64,
-    /// Timeout for HTTP connect + download.
-    /// Default: 30 s.
-    pub timeout: Duration,
     /// Maximum concurrent in-flight HTTP Range requests across all
     /// web seed tasks.
     ///
@@ -40,7 +37,6 @@ impl Default for WebSeedConfig {
         WebSeedConfig {
             min_gap_pieces: 4,
             max_range_bytes: 5 * 1024 * 1024, // 5 MB
-            timeout: Duration::from_secs(30),
             max_concurrent: 16,
             park_threshold: 5,
             park_retry_interval: Duration::from_secs(60),
@@ -174,10 +170,6 @@ pub(crate) struct WorkItem {
     pub(crate) start_byte: u64,
     /// Byte offset to end downloading at (inclusive).
     pub(crate) end_byte: u64,
-    /// Per-request timeout computed from the range size.
-    /// Larger ranges get proportionally longer timeouts
-    /// (≈ 20 s/MB at 50 KB/s floor).
-    pub(crate) timeout: Duration,
 }
 
 /// Result of a [`WorkItem`] reported back to the scheduler.
