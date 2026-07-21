@@ -885,7 +885,7 @@ impl SwarmLoop {
             )
         });
 
-        let Some((gap_start, _gap_size)) = gap else {
+        let Some((gap_start, gap_size)) = gap else {
             return;
         };
 
@@ -893,6 +893,15 @@ impl SwarmLoop {
         let end_byte = (start_byte + self.webseed_config.max_range_bytes)
             .min(self.metainfo.info.total_size())
             .saturating_sub(1);
+
+        tracing::debug!(
+            "web seed: found gap of {} pieces at index {}, requesting bytes [{}-{}] ({:.1}KB)",
+            gap_size,
+            gap_start,
+            start_byte,
+            end_byte,
+            (end_byte - start_byte + 1) as f64 / 1024.0,
+        );
 
         let range = PieceRange {
             start_byte,
@@ -904,7 +913,7 @@ impl SwarmLoop {
             }
             Ok(_) => {}
             Err(e) => {
-                tracing::debug!("web seed download failed: {}", e);
+                tracing::debug!("web seed: download failed: {}", e);
             }
         }
     }

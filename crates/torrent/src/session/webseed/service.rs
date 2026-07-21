@@ -78,6 +78,9 @@ impl WebSeedService {
             })
             .collect();
 
+        let count = urls.len();
+        tracing::info!("web seed: initialized with {} URL(s)", count);
+
         WebSeedService {
             inner: Arc::new(WebSeedServiceInner {
                 urls: RwLock::new(urls),
@@ -152,19 +155,27 @@ impl Service<PieceRange> for WebSeedService {
                     }
                     Err(e) => {
                         state.health.record_failure();
+                        let was_active = matches!(state.activity, UrlActivity::Active);
                         let park = state.health.should_park(this.config.park_threshold);
                         state.activity = if park {
                             UrlActivity::Parked
                         } else {
                             UrlActivity::Active
                         };
-                        tracing::debug!(
-                            "web seed {}: failed ({} consecutive, park={}): {}",
-                            url,
-                            state.health.consecutive_failures(),
-                            park,
-                            e,
-                        );
+                        if park && was_active {
+                            tracing::info!(
+                                "web seed {}: parked after {} consecutive failures",
+                                url,
+                                state.health.consecutive_failures(),
+                            );
+                        } else {
+                            tracing::debug!(
+                                "web seed {}: download failed ({} consecutive): {}",
+                                url,
+                                state.health.consecutive_failures(),
+                                e,
+                            );
+                        }
                     }
                 }
             }
@@ -181,20 +192,54 @@ async fn select_best_url(inner: &WebSeedServiceInner) -> Option<Url> {
     let urls = inner.urls.read().await;
     let total_attempts: u64 = urls.iter().map(|s| s.health.download_attempts()).sum();
 
-    urls.iter()
+    let config = &inner.config;
+    let candidates: Vec<&UrlState> = urls
+        .iter()
         .filter(|s| match s.activity {
             UrlActivity::Active => true,
-            UrlActivity::Parked => {
-                s.health.ready_for_retry(inner.config.park_retry_interval)
-            }
+            UrlActivity::Parked => s.health.ready_for_retry(config.park_retry_interval),
         })
-        .max_by(|a, b| {
-            a.health
-                .ucb_score(total_attempts, UCB_EXPLORATION_FACTOR)
-                .partial_cmp(&b.health.ucb_score(total_attempts, UCB_EXPLORATION_FACTOR))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|s| s.url.clone())
+        .collect();
+
+    if candidates.is_empty() {
+        tracing::debug!(
+            "web seed: no available URLs ({} total, {} parked)",
+            urls.len(),
+            urls.iter()
+                .filter(|s| matches!(s.activity, UrlActivity::Parked))
+                .count(),
+        );
+        return None;
+    }
+
+    let best = candidates.iter().max_by(|a, b| {
+        a.health
+            .ucb_score(total_attempts, UCB_EXPLORATION_FACTOR)
+            .partial_cmp(&b.health.ucb_score(total_attempts, UCB_EXPLORATION_FACTOR))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+
+    // Log UCB selection details and notify if a parked URL was unparked.
+    let score = best
+        .health
+        .ucb_score(total_attempts, UCB_EXPLORATION_FACTOR);
+    tracing::debug!(
+        "web seed: selected {} (UCB={:.0}, ema={:.0} B/s, attempts={}, candidates={})",
+        best.url,
+        score,
+        best.health.ema_throughput(),
+        best.health.download_attempts(),
+        candidates.len(),
+    );
+    if matches!(best.activity, UrlActivity::Parked) {
+        tracing::info!(
+            "web seed {}: unparked (retry interval elapsed, {}s since last attempt)",
+            best.url,
+            best.health.ready_for_retry_elapsed(),
+        );
+    }
+
+    Some(best.url.clone())
 }
 
 /// Core download logic — HTTP Range request + SHA-1 verify + storage write.
@@ -238,6 +283,11 @@ async fn download_and_verify(
 
         if chunk.len() as u64 == plen {
             if piece_mgr.read().await.has_piece(piece_index) {
+                tracing::trace!(
+                    "web seed {}: piece {} already held, skipping",
+                    url,
+                    piece_index,
+                );
                 offset = chunk_end;
                 continue;
             }
@@ -245,8 +295,20 @@ async fn download_and_verify(
                 Some(h) => *h,
                 None => break,
             };
+            tracing::trace!(
+                "web seed {}: verifying piece {} ({} bytes)",
+                url,
+                piece_index,
+                chunk.len(),
+            );
             let actual_hash: [u8; 20] = Sha1::digest(chunk).into();
             if actual_hash != expected_hash {
+                tracing::warn!(
+                    "web seed {}: SHA-1 mismatch for piece {} (expected {:02x?})",
+                    url,
+                    piece_index,
+                    &expected_hash[..4],
+                );
                 return Err(Error::new(ErrorKind::WebSeedHashMismatch));
             }
             storage.write_piece(piece_index, chunk).await?;
@@ -256,6 +318,13 @@ async fn download_and_verify(
             }
             completed.push(piece_index);
         } else {
+            tracing::warn!(
+                "web seed {}: short chunk at end ({} bytes, expected {} for piece {})",
+                url,
+                chunk.len(),
+                plen,
+                piece_index,
+            );
             break;
         }
         offset = chunk_end;
@@ -273,9 +342,22 @@ fn build_request_url(
             let file = offsets
                 .iter()
                 .find(|fo| start_byte >= fo.offset && start_byte < fo.offset + fo.length)
-                .ok_or(Error::new(ErrorKind::InvalidInput))?;
-            url.join(&file.path.join("/"))
-                .map_err(|_| Error::new(ErrorKind::InvalidInput))
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        "web seed {}: no file found for byte offset {}",
+                        url,
+                        start_byte,
+                    );
+                    Error::new(ErrorKind::InvalidInput)
+                })?;
+            url.join(&file.path.join("/")).map_err(|_| {
+                tracing::warn!(
+                    "web seed {}: failed to join URL path for file '{}'",
+                    url,
+                    file.path.join("/"),
+                );
+                Error::new(ErrorKind::InvalidInput)
+            })
         }
         UrlKind::Script => Ok(url.clone()),
     }
