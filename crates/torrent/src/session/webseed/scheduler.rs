@@ -207,7 +207,7 @@ impl WebSeedScheduler {
                         }
                         UrlActivity::InFlight => false,
                     };
-                    if !eligible || s.work_tx.is_closed() {
+                    if !eligible || s.work_tx.as_ref().is_none_or(|tx| tx.is_closed()) {
                         return false;
                     }
                     if s.url_kind == UrlKind::Directory {
@@ -277,11 +277,15 @@ impl WebSeedScheduler {
 
             if self.urls[idx]
                 .work_tx
-                .try_send(WorkItem {
-                    start_byte,
-                    end_byte,
+                .as_ref()
+                .and_then(|tx| {
+                    tx.try_send(WorkItem {
+                        start_byte,
+                        end_byte,
+                    })
+                    .ok()
                 })
-                .is_ok()
+                .is_some()
             {
                 self.urls[idx].activity = UrlActivity::InFlight;
 

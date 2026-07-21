@@ -37,7 +37,7 @@ use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
 use super::webseed::{
     FetchTask, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WebSeedScheduler,
-    WorkItem, WorkResult, deduplicate_urls,
+    WebSeedService, WorkItem, WorkResult, deduplicate_urls,
 };
 use super::{
     InfoHash, PeerStatus, SessionConfig, TorrentEvent, TorrentState, TorrentStatus, TrackerStatus,
@@ -342,6 +342,7 @@ impl TorrentHandle {
             completed_files: HashSet::new(),
             web_seeds: self.web_seeds.clone(),
             webseed_config,
+            webseed_service: None, // Created below after scheduler setup
             webseed_scheduler: None,
             webseed_fetchers: Vec::new(),
             webseed_notify,
@@ -459,7 +460,9 @@ pub(crate) struct SwarmLoop {
     pub(crate) web_seeds: Vec<String>,
     /// Web seed configuration.
     pub(crate) webseed_config: WebSeedConfig,
-    /// Handle for the web seed scheduler task.
+    /// Tower-based web seed download service (Phase 10 — future integration).
+    pub(crate) webseed_service: Option<WebSeedService>,
+    /// Handle for the web seed scheduler task (legacy — to be replaced by webseed_service).
     pub(crate) webseed_scheduler: Option<JoinHandle<()>>,
     /// Handles for spawned fetcher tasks (one per URL).
     pub(crate) webseed_fetchers: Vec<JoinHandle<()>>,
@@ -533,7 +536,7 @@ impl SwarmLoop {
                     url: url.clone(),
                     url_kind: UrlKind::classify(&url),
                     health: UrlHealth::default(),
-                    work_tx,
+                    work_tx: Some(work_tx),
                     activity: UrlActivity::Active,
                 });
             }
@@ -554,6 +557,16 @@ impl SwarmLoop {
                 self.webseed_scheduler = Some(tokio::spawn(async move { scheduler.run().await }));
             }
             self.webseed_fetchers = fetchers;
+
+            // Create the tower-based web seed service for future Phase 11 integration.
+            // This will replace the scheduler+fetcher+channel architecture above.
+            self.webseed_service = Some(WebSeedService::new(
+                self.web_seeds.clone(),
+                self.piece_mgr.clone(),
+                self.storage.clone(),
+                self.metainfo.clone(),
+                self.webseed_config.clone(),
+            ));
         }
 
         loop {

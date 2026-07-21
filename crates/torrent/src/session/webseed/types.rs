@@ -189,6 +189,15 @@ pub(crate) struct WorkResult {
     pub(crate) error: Option<ErrorKind>,
 }
 
+/// A byte range to download from a web seed.
+///
+/// Used as the request type for [`super::service::WebSeedService`].
+#[derive(Debug, Clone)]
+pub(crate) struct PieceRange {
+    pub start_byte: u64,
+    pub end_byte: u64,
+}
+
 /// Whether a URL is actively downloading, parked, or currently busy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UrlActivity {
@@ -226,7 +235,8 @@ pub(crate) struct UrlState {
     pub(crate) url: Url,
     pub(crate) url_kind: UrlKind,
     pub(crate) health: UrlHealth,
-    pub(crate) work_tx: mpsc::Sender<WorkItem>,
+    /// Channel for scheduler→fetcher dispatch (`None` for direct Service usage).
+    pub(crate) work_tx: Option<mpsc::Sender<WorkItem>>,
     pub(crate) activity: UrlActivity,
 }
 
