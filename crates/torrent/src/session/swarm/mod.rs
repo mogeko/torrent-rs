@@ -336,6 +336,8 @@ impl TorrentHandle {
                 ..Default::default()
             },
             webseed_service: None,
+            webseed_tasks: JoinSet::new(),
+            webseed_concurrency: config.webseed_concurrency,
             utp_socket,
         };
 
@@ -452,6 +454,10 @@ pub(crate) struct SwarmLoop {
     pub(crate) webseed_config: WebSeedConfig,
     /// Tower-based web seed download service (BEP 19).
     pub(crate) webseed_service: Option<WebSeedService>,
+    /// In-flight web seed download tasks.
+    pub(crate) webseed_tasks: JoinSet<Result<Vec<u32>, Error>>,
+    /// Maximum concurrent web seed HTTP requests.
+    pub(crate) webseed_concurrency: usize,
     /// Shared uTP socket from the session (BEP 29).
     pub(crate) utp_socket: Option<Arc<UtpSocket>>,
 }
@@ -557,6 +563,26 @@ impl SwarmLoop {
                         ).await {
                             tracing::warn!("failed to broadcast PEX: {}", e);
                         }
+                    }
+                }
+                Some(result) = async {
+                    if self.webseed_tasks.is_empty() {
+                        std::future::pending().await
+                    } else {
+                        self.webseed_tasks.join_next().await
+                    }
+                }, if !self.webseed_tasks.is_empty() => {
+                    match result {
+                        Ok(Ok(pieces)) if !pieces.is_empty() => {
+                            tracing::debug!("web seed: downloaded {} pieces", pieces.len());
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!("web seed: download failed: {}", e);
+                        }
+                        Err(join_err) => {
+                            tracing::warn!("web seed: task panicked: {}", join_err);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -864,10 +890,15 @@ impl SwarmLoop {
 
     /// Try to download a missing piece gap via web seed (BEP 19).
     async fn try_webseed_download(&mut self) {
+        // Respect concurrency limit.
+        if self.webseed_tasks.len() >= self.webseed_concurrency {
+            return;
+        }
+
         use crate::session::webseed::{find_largest_gap, gap_within_file};
 
-        let ws = match self.webseed_service.as_mut() {
-            Some(ws) => ws,
+        let ws = match self.webseed_service.as_ref() {
+            Some(ws) => ws.clone(),
             None => return,
         };
 
@@ -895,27 +926,24 @@ impl SwarmLoop {
             .saturating_sub(1);
 
         tracing::debug!(
-            "web seed: found gap of {} pieces at index {}, requesting bytes [{}-{}] ({:.1}KB)",
+            "web seed: found gap of {} pieces at index {}, requesting bytes [{}-{}] ({:.1}KB) [slot {}/{}]",
             gap_size,
             gap_start,
             start_byte,
             end_byte,
             (end_byte - start_byte + 1) as f64 / 1024.0,
+            self.webseed_tasks.len(),
+            self.webseed_concurrency,
         );
 
         let range = PieceRange {
             start_byte,
             end_byte,
         };
-        match ws.call(range).await {
-            Ok(pieces) if !pieces.is_empty() => {
-                tracing::debug!("web seed: downloaded {} pieces", pieces.len());
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::debug!("web seed: download failed: {}", e);
-            }
-        }
+        self.webseed_tasks.spawn(async move {
+            let mut ws = ws;
+            ws.call(range).await
+        });
     }
 }
 

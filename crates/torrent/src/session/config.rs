@@ -178,6 +178,14 @@ pub struct SessionConfig {
     ///
     /// Default: `5 * 1024 * 1024` (5 MB).
     pub webseed_max_range_bytes: u64,
+    /// Maximum concurrent web seed HTTP Range requests per torrent.
+    /// Limits memory usage (each request buffers up to
+    /// `webseed_max_range_bytes`) and prevents overwhelming web seed
+    /// servers. UCB multi-armed bandit selection saturates the
+    /// available slots with the best-performing URLs.
+    ///
+    /// Default: `8`. Range: `1..=16`.
+    pub webseed_concurrency: usize,
 
     // ── DHT ──
     /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
@@ -233,6 +241,7 @@ impl Default for SessionConfig {
             webseed_enabled: true,
             webseed_min_gap_pieces: 4,
             webseed_max_range_bytes: 5 * 1024 * 1024,
+            webseed_concurrency: 8,
             bootstrap_nodes: Some(vec![
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
                 BootstrapNode::from(("dht.transmissionbt.com", 6881)),
@@ -527,6 +536,7 @@ mod serde_tests {
             webseed_enabled: true,
             webseed_min_gap_pieces: 8,
             webseed_max_range_bytes: 10 * 1024 * 1024,
+            webseed_concurrency: 10,
             enable_utp: false,
         };
 
@@ -566,6 +576,7 @@ mod serde_tests {
         assert_eq!(back.webseed_enabled, true);
         assert_eq!(back.webseed_min_gap_pieces, 8);
         assert_eq!(back.webseed_max_range_bytes, 10 * 1024 * 1024);
+        assert_eq!(back.webseed_concurrency, 10);
         assert_eq!(back.enable_utp, false);
     }
 
