@@ -16,6 +16,7 @@ serde = ["torrent-core/serde", "dep:serde"]
 
 [dependencies]
 torrent-core.workspace = true
+http.workspace = true
 rand.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true

@@ -288,6 +288,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "http"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+dependencies = [
+ "bytes",
+ "itoa",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -997,6 +1007,7 @@ dependencies = [
 name = "torrent"
 version = "0.1.10"
 dependencies = [
+ "http",
  "rand 0.10.2",
  "rustls",
  "rustls-native-certs",

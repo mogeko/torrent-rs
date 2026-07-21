@@ -16,6 +16,7 @@ version = "=0.1.10"
 
 [workspace.dependencies]
 bytes = "1.12"
+http = "1.4"
 proptest = "1.11"
 rand = "0.10"
 rustls = "0.23"

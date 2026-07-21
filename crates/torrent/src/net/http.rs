@@ -10,15 +10,20 @@
 //! - Response size capping (anti-DoS)
 //! - Redirect resolution helper
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use http::{Request, Response};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpSocket, lookup_host};
-use tokio_rustls::TlsConnector;
+use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 
+use super::Url;
 use super::tls::build_tls_connector;
-use super::{IntoUrl, Url};
 
 /// Maximum number of redirects to follow before giving up.
 pub(crate) const MAX_REDIRECTS: u32 = 5;
@@ -33,97 +38,72 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> HttpStream for T {}
 
 /// A purpose-built HTTP/1.1 client for BitTorrent use cases.
 ///
-/// Supports plain `http://` (TCP) and `https://` (TLS). Provides both
-/// basic GET and ranged GET for partial content downloads (BEP 19 web
-/// seed).
-pub(crate) struct HttpClient {
-    /// Maximum response size to read (`None` = no cap, reads until EOF).
-    max_response: Option<u64>,
+/// Supports plain `http://` (TCP) and `https://` (TLS).
+/// Implements [`tower::Service`] with standard [`Request`] / [`Response`]
+/// types so callers can compose timeout, retry, and other middleware
+/// via [`tower::ServiceBuilder`].
+///
+/// The client is stateless — each [`call`](Service::call) performs
+/// independent DNS resolution + TCP connect + TLS + HTTP exchange.
+#[derive(Clone)]
+pub(crate) struct HttpClient;
+
+impl HttpClient {
+    /// Create a new HTTP client.
+    pub fn new() -> Self {
+        HttpClient
+    }
+}
+
+/// Tower [`Service`] implementation — raw HTTP request with DNS + TCP + TLS.
+///
+/// Accepts a standard [`http::Request<Vec<u8>>`] and returns an
+/// [`http::Response<Vec<u8>>`].  The request body is ignored for GET
+/// (always sent as empty).  Timeout is **not** applied here — wrap
+/// with [`tower::ServiceBuilder::timeout`] at the call site.
+impl Service<Request<Vec<u8>>> for HttpClient {
+    type Response = Response<Vec<u8>>;
+    type Error = Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
+        let this = self.clone();
+        Box::pin(async move { this.send_request(req).await })
+    }
 }
 
 impl HttpClient {
-    /// Create a new HTTP client with no response size cap.
-    ///
-    /// Use [`with_max_response`](Self::with_max_response) to set a cap.
-    pub fn new() -> Self {
-        HttpClient { max_response: None }
-    }
-
-    /// Create a new HTTP client with a response size cap.
-    ///
-    /// Responses larger than `max_response` bytes are silently
-    /// truncated.  Used by web seed download (BEP 19) to prevent
-    /// unbounded reads from large files.
-    pub fn with_max_response(max_response: u64) -> Self {
-        HttpClient {
-            max_response: Some(max_response),
-        }
-    }
-
-    /// HTTP GET request without a `Range` header.
-    ///
-    /// The `path_and_query` for the request line is derived from `url`
-    /// (path + optional query string). Returns the full response body.
-    ///
-    /// Used by the HTTP tracker for announces.  Callers are expected
-    /// to wrap this with [`tokio::time::timeout`] if they need a
-    /// deadline.
-    pub async fn get(&self, url: impl IntoUrl) -> Result<Vec<u8>, Error> {
-        let url = url.into_url()?;
-        let tls = if url.scheme() == "https" {
-            Some(build_tls_connector()?)
-        } else {
-            None
-        };
-        self.send_request("GET", &url, &tls, None).await
-    }
-
-    /// HTTP GET with a `Range: bytes=start-end` header.
-    ///
-    /// The `path_and_query` for the request line is derived from `url`.
-    /// Returns the body bytes for the requested range (HTTP headers
-    /// are stripped).
-    ///
-    /// Used by web seed download (BEP 19) to fetch partial file content.
-    /// Callers are expected to wrap this with [`tokio::time::timeout`]
-    /// if they need a deadline.
-    pub async fn get_with_range(
-        &self, url: impl IntoUrl, range_start: u64, range_end: u64,
-    ) -> Result<Vec<u8>, Error> {
-        let url = url.into_url()?;
-        let tls = if url.scheme() == "https" {
-            Some(build_tls_connector()?)
-        } else {
-            None
-        };
-        let range = Some((range_start, range_end));
-        let raw = self.send_request("GET", &url, &tls, range).await?;
-        Ok(Self::body_from_response(&raw)?.to_vec())
-    }
-
-    /// `method` is the HTTP method string (e.g. `"GET"`).
-    /// `range` adds a `Range: bytes=start-end` header when `Some`.
-    ///
-    /// `path_and_query` for the HTTP request line is derived from
-    /// `url` via [`path_and_query_from_url`].
-    async fn send_request(
-        &self, method: &str, url: &Url, tls: &Option<TlsConnector>, range: Option<(u64, u64)>,
-    ) -> Result<Vec<u8>, Error> {
-        let host = url
-            .host_str()
+    /// Send an HTTP request — DNS → TCP → TLS → send → receive → parse.
+    async fn send_request(&self, req: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, Error> {
+        let uri = req.uri().clone();
+        let host = uri
+            .host()
             .ok_or(Error::new(ErrorKind::InvalidInput))?
             .to_owned();
-        let port = url.port_or_known_default().unwrap_or(80);
-        let method = method.to_owned();
-        let tls = tls.clone();
-        let path_and_query = path_and_query_from_url(url);
-
-        let addrs = match lookup_host((&*host, port)).await {
-            Ok(a) => a,
-            Err(e) => return Err(Error::io(e)),
+        let port = uri
+            .port_u16()
+            .unwrap_or(if uri.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            });
+        let path_and_query = match uri.path_and_query() {
+            Some(pq) => pq.as_str().to_owned(),
+            None => "/".to_owned(),
+        };
+        let tls = if uri.scheme_str() == Some("https") {
+            Some(build_tls_connector()?)
+        } else {
+            None
         };
 
-        // Try each resolved address until one connects.
+        // ── DNS + TCP connect ──
+        let addrs = lookup_host((&*host, port)).await.map_err(Error::io)?;
+
         let (mut tcp_stream, mut last_err) = (None, None);
         for addr in addrs {
             let socket = if addr.is_ipv4() {
@@ -148,34 +128,53 @@ impl HttpClient {
             return Err(last_err.unwrap_or(Error::new(ErrorKind::Io)));
         };
 
+        // ── TLS handshake (if https) ──
         let mut stream: Box<dyn HttpStream> = if let Some(ref connector) = tls {
             let domain = ServerName::try_from(host.clone()).map_err(Error::invalid_input)?;
-            let tls_stream = match connector.connect(domain, tcp_stream).await {
-                Ok(ts) => ts,
-                Err(e) => return Err(Error::io(e)),
-            };
+            let tls_stream = connector
+                .connect(domain, tcp_stream)
+                .await
+                .map_err(Error::io)?;
             Box::new(tls_stream)
         } else {
             Box::new(tcp_stream)
         };
 
-        // Build the HTTP request line and headers
-        let mut request = format!(
-            "{method} {path_and_query} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: torrent-rs/0.1.0\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
-        );
+        // ── Build HTTP request line from http::Request ──
+        let method = req.method().as_str();
+        let mut http_req = format!("{method} {path_and_query} HTTP/1.1\r\nHost: {host}\r\n",);
 
-        if let Some((start, end)) = range {
-            request.push_str(&format!("Range: bytes={start}-{end}\r\n"));
+        // Copy headers from the http::Request
+        for (name, value) in req.headers() {
+            if let Ok(v) = value.to_str() {
+                http_req.push_str(&format!("{}: {v}\r\n", name.as_str()));
+            }
         }
 
-        request.push_str("\r\n");
-
-        if let Err(e) = stream.write_all(request.as_bytes()).await {
-            return Err(Error::io(e));
+        // Default headers if not overridden
+        if !req.headers().contains_key("user-agent") {
+            http_req.push_str("User-Agent: torrent-rs/0.1.0\r\n");
         }
+        if !req.headers().contains_key("accept-encoding") {
+            http_req.push_str("Accept-Encoding: identity\r\n");
+        }
+        http_req.push_str("Connection: close\r\n");
+        http_req.push_str("\r\n");
+
+        stream
+            .write_all(http_req.as_bytes())
+            .await
+            .map_err(Error::io)?;
+
+        // ── Read response ──
+        let max_response = req
+            .headers()
+            .get("x-max-response")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
 
         let mut buf = Vec::new();
-        match self.max_response {
+        match max_response {
             Some(cap) => {
                 let mut limited = AsyncReadExt::take(&mut stream, cap);
                 limited.read_to_end(&mut buf).await.map_err(Error::io)?;
@@ -185,34 +184,45 @@ impl HttpClient {
             }
         }
 
-        Ok(buf)
-    }
-
-    /// Split HTTP response into body bytes (strips headers at `\r\n\r\n`).
-    ///
-    /// Returns just the body portion after the header separator.
-    /// Returns an error if the separator is not found (malformed response).
-    fn body_from_response(buf: &[u8]) -> Result<&[u8], Error> {
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            Ok(&buf[pos + 4..])
-        } else {
-            Err(Error::new(ErrorKind::Protocol))
-        }
+        // ── Parse HTTP response ──
+        parse_http_response(&buf)
     }
 }
 
-// ── Helpers ────────────────────────────────────────────────────────
+/// Minimal HTTP/1.1 response parser — extracts status code, headers, and body
+/// into an [`http::Response<Vec<u8>>`].
+fn parse_http_response(raw: &[u8]) -> Result<Response<Vec<u8>>, Error> {
+    let header_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or(Error::new(ErrorKind::Protocol))?;
 
-/// Extract the `path_and_query` string from a URL for the HTTP
-/// request line.
-///
-/// Returns `"/path"` when there is no query, or `"/path?query"`
-/// when a query string is present.
-fn path_and_query_from_url(url: &Url) -> String {
-    match url.query() {
-        Some(q) => format!("{}?{}", url.path(), q),
-        None => url.path().to_string(),
+    let header_bytes = &raw[..header_end];
+    let body = raw[header_end + 4..].to_vec();
+
+    let header_str =
+        std::str::from_utf8(header_bytes).map_err(|_| Error::new(ErrorKind::Protocol))?;
+
+    let mut lines = header_str.lines();
+    let status_line = lines.next().unwrap_or("");
+
+    // Parse "HTTP/1.1 200 OK"
+    let code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(500);
+
+    let mut resp = Response::builder().status(code);
+
+    // Parse headers
+    for line in lines {
+        if let Some((name, value)) = line.split_once(": ") {
+            resp = resp.header(name, value);
+        }
     }
+
+    resp.body(body).map_err(|_| Error::new(ErrorKind::Protocol))
 }
 
 // ── Redirect resolution ────────────────────────────────────────────

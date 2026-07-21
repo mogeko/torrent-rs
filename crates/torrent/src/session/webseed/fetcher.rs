@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use sha1::{Digest, Sha1};
 use tokio::sync::{RwLock, Semaphore, mpsc};
+use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::Metainfo;
@@ -140,10 +141,14 @@ impl FetchTask {
             range_size as f64 / 1024.0,
         );
 
-        let body = self
-            .http
-            .get_with_range(request_url, start_byte, end_byte)
-            .await?;
+        let http_req = http::Request::get(request_url.as_str())
+            .header("Range", format!("bytes={start_byte}-{end_byte}"))
+            .body(vec![])
+            .map_err(|_| Error::new(ErrorKind::InvalidInput))?;
+
+        let mut http = self.http.clone();
+        let resp = Service::call(&mut http, http_req).await?;
+        let body = resp.into_body();
 
         let mut completed = Vec::new();
         let first_piece = (start_byte / self.piece_length) as u32;

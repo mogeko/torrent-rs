@@ -91,48 +91,43 @@ impl HttpTracker {
         let mut current_url = self.url.clone();
         let mut tls = self.tls.clone();
         let mut redirects_remaining = MAX_REDIRECTS;
-        let client = HttpClient::with_max_response(MAX_RESPONSE_SIZE);
+        let mut client = HttpClient::new();
 
         loop {
             let mut announce_url = current_url.clone();
-
             announce_url.set_query(Some(&build_query_string(&req)));
 
-            let buf = client.get(announce_url).await.map_err(Error::io)?;
-
-            // Parse HTTP response: find "\r\n\r\n" separator
-            let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
-                tracing::warn!("HTTP announce: missing header separator");
-                return Err(Error::new(ErrorKind::TrackerInvalidResponse));
-            };
-
-            let body = &buf[header_end + 4..];
-
-            // Parse status code from first line
-            let headers_str = std::str::from_utf8(&buf[..header_end])
+            let http_req = http::Request::get(announce_url.as_str())
+                .header("x-max-response", MAX_RESPONSE_SIZE.to_string())
+                .body(vec![])
                 .map_err(|_| Error::new(ErrorKind::TrackerInvalidResponse))?;
-            let first_line = headers_str.lines().next().unwrap_or("");
-            let status_code = first_line.split_whitespace().nth(1).unwrap_or("");
+
+            let resp = Service::call(&mut client, http_req)
+                .await
+                .map_err(Error::io)?;
+
+            let status_code = resp.status().as_u16();
+            let location = resp
+                .headers()
+                .get(http::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_owned());
+            let body = resp.into_body();
 
             match status_code {
-                "301" | "302" => {
+                301 | 302 => {
                     redirects_remaining -= 1;
                     if redirects_remaining == 0 {
                         tracing::warn!("HTTP announce: too many redirects");
                         return Err(Error::new(ErrorKind::TrackerRequestFailed));
                     }
 
-                    let location = headers_str
-                        .lines()
-                        .find(|l| l.to_ascii_lowercase().starts_with("location: "))
-                        .and_then(|l| l.split_once(": ").map(|x| x.1))
-                        .map(|l| l.trim())
-                        .unwrap_or("");
+                    let location = location.unwrap_or_default();
                     if location.is_empty() {
                         return Err(Error::new(ErrorKind::TrackerProtocolError));
                     }
 
-                    let new_url = resolve_redirect_url(&current_url, location)?;
+                    let new_url = resolve_redirect_url(&current_url, &location)?;
                     tracing::info!(
                         "HTTP redirect #{}/{}: {} -> {}",
                         MAX_REDIRECTS - redirects_remaining,
@@ -141,7 +136,6 @@ impl HttpTracker {
                         new_url,
                     );
 
-                    // If redirect changes scheme to https, lazily build TLS connector.
                     if new_url.scheme() == "https" && tls.is_none() {
                         tls = Some(build_tls_connector()?);
                     } else if new_url.scheme() == "http" {
@@ -149,9 +143,8 @@ impl HttpTracker {
                     }
 
                     current_url = new_url;
-                    continue;
                 }
-                "200" => return AnnounceResponse::from_bencode(body),
+                200 => return AnnounceResponse::from_bencode(&body),
                 _ => {
                     tracing::warn!("HTTP announce: unexpected status {}", status_code);
                     return Err(Error::new(ErrorKind::TrackerRequestFailed));
