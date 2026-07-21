@@ -25,7 +25,6 @@ use crate::net::http::HttpClient;
 use crate::piece::PieceManager;
 use crate::storage::Storage;
 
-use super::fetcher::build_request_url;
 use super::types::{PieceRange, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig};
 
 /// Exploration weight for the UCB bandit formula (bytes/sec).
@@ -57,15 +56,10 @@ impl WebSeedService {
                 Url::parse(&s)
                     .map_err(|e| tracing::warn!("invalid web seed URL '{}': {}", s, e))
                     .ok()
-                    .map(|url| {
-                        let url_kind = UrlKind::classify(&url);
-                        UrlState {
-                            url,
-                            url_kind,
-                            health: UrlHealth::default(),
-                            work_tx: None,
-                            activity: UrlActivity::Active,
-                        }
+                    .map(|url| UrlState {
+                        url,
+                        health: UrlHealth::default(),
+                        activity: UrlActivity::Active,
                     })
             })
             .collect();
@@ -99,7 +93,6 @@ impl Service<PieceRange> for WebSeedService {
         let storage = self.storage.clone();
         let piece_length = self.piece_length;
         let metainfo = self.metainfo.clone();
-        let park_threshold = self.config.park_threshold;
 
         Box::pin(async move {
             let Some(url) = best_url else {
@@ -110,7 +103,7 @@ impl Service<PieceRange> for WebSeedService {
             let result = download_and_verify(
                 &url,
                 &http,
-                &*piece_mgr,
+                &piece_mgr,
                 &*storage,
                 piece_length,
                 &metainfo,
@@ -155,7 +148,7 @@ impl WebSeedService {
         self.urls
             .iter()
             .filter(|s| match s.activity {
-                UrlActivity::Active | UrlActivity::InFlight => true,
+                UrlActivity::Active => true,
                 UrlActivity::Parked => s.health.ready_for_retry(self.config.park_retry_interval),
             })
             .max_by(|a, b| {
@@ -166,43 +159,10 @@ impl WebSeedService {
             })
             .map(|s| s.url.clone())
     }
-
-    /// Mark a URL as in-flight (reserved for a pending request).
-    pub fn mark_in_flight(&mut self, url: &Url) {
-        if let Some(state) = self.urls.iter_mut().find(|s| &s.url == url) {
-            state.activity = UrlActivity::InFlight;
-        }
-    }
-
-    /// Record a download result for URL health tracking.
-    pub fn record_result(
-        &mut self, url: &Url, bytes: u64, elapsed: std::time::Duration, error: Option<ErrorKind>,
-    ) {
-        if let Some(state) = self.urls.iter_mut().find(|s| &s.url == url) {
-            match error {
-                None => {
-                    state.health.record_success(bytes, elapsed);
-                    state.activity = UrlActivity::Active;
-                }
-                Some(ErrorKind::WebSeedHashMismatch) => {
-                    // Permanent failure — URL will be filtered out
-                    state.activity = UrlActivity::Parked;
-                    state.health.record_failure();
-                }
-                Some(_) => {
-                    state.health.record_failure();
-                    if state.health.should_park(self.config.park_threshold) {
-                        state.activity = UrlActivity::Parked;
-                    } else {
-                        state.activity = UrlActivity::Active;
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Core download logic — shared between `Service::call` and direct usage.
+#[allow(clippy::too_many_arguments)]
 async fn download_and_verify(
     url: &Url, http: &HttpClient, piece_mgr: &RwLock<PieceManager>, storage: &dyn Storage,
     piece_length: u64, metainfo: &Metainfo, start_byte: u64, end_byte: u64,
@@ -265,6 +225,24 @@ async fn download_and_verify(
         offset = chunk_end;
     }
     Ok(completed)
+}
+
+/// Build the full file URL for an HTTP Range request.
+fn build_request_url(
+    url: &Url, metainfo: &Metainfo, url_kind: &UrlKind, start_byte: u64,
+) -> Result<Url, Error> {
+    match url_kind {
+        UrlKind::Directory => {
+            let offsets = metainfo.info.file_offsets();
+            let file = offsets
+                .iter()
+                .find(|fo| start_byte >= fo.offset && start_byte < fo.offset + fo.length)
+                .ok_or(Error::new(ErrorKind::InvalidInput))?;
+            url.join(&file.path.join("/"))
+                .map_err(|_| Error::new(ErrorKind::InvalidInput))
+        }
+        UrlKind::Script => Ok(url.clone()),
+    }
 }
 
 fn piece_len(index: u32, metainfo: &Metainfo, piece_length: u64) -> u64 {

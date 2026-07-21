@@ -178,16 +178,6 @@ pub struct SessionConfig {
     ///
     /// Default: `5 * 1024 * 1024` (5 MB).
     pub webseed_max_range_bytes: u64,
-    /// Maximum concurrent web seed HTTP Range requests across all URLs.
-    ///
-    /// Prevents TLS-handshake CPU spikes from starving a
-    /// [`current_thread`](https://docs.rs/tokio/latest/tokio/runtime/index.html#current-thread-scheduler)
-    /// runtime and caps connections to origin servers. On a
-    /// [`multi_thread`](https://docs.rs/tokio/latest/tokio/runtime/index.html#multi-thread-scheduler)
-    /// runtime, raise this for higher throughput (e.g. `num_workers * 8`).
-    ///
-    /// Default: `16`.
-    pub webseed_max_concurrent: usize,
 
     // ── DHT ──
     /// DHT bootstrap nodes. Set to `None` to disable DHT entirely.
@@ -243,8 +233,6 @@ impl Default for SessionConfig {
             webseed_enabled: true,
             webseed_min_gap_pieces: 4,
             webseed_max_range_bytes: 5 * 1024 * 1024,
-
-            webseed_max_concurrent: 16,
             bootstrap_nodes: Some(vec![
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
                 BootstrapNode::from(("dht.transmissionbt.com", 6881)),
@@ -501,7 +489,6 @@ mod serde_tests {
         assert_eq!(back.pex_enabled, config.pex_enabled);
         assert_eq!(back.pex_interval, config.pex_interval);
         assert_eq!(back.peer_msg_buffer_size, config.peer_msg_buffer_size);
-        assert_eq!(back.webseed_max_concurrent, config.webseed_max_concurrent);
         assert_eq!(back.enable_utp, config.enable_utp);
     }
 
@@ -540,7 +527,6 @@ mod serde_tests {
             webseed_enabled: true,
             webseed_min_gap_pieces: 8,
             webseed_max_range_bytes: 10 * 1024 * 1024,
-            webseed_max_concurrent: 16,
             enable_utp: false,
         };
 
@@ -580,7 +566,6 @@ mod serde_tests {
         assert_eq!(back.webseed_enabled, true);
         assert_eq!(back.webseed_min_gap_pieces, 8);
         assert_eq!(back.webseed_max_range_bytes, 10 * 1024 * 1024);
-        assert_eq!(back.webseed_max_concurrent, 16);
         assert_eq!(back.enable_utp, false);
     }
 
