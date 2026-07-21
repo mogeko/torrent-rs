@@ -178,10 +178,6 @@ pub struct SessionConfig {
     ///
     /// Default: `5 * 1024 * 1024` (5 MB).
     pub webseed_max_range_bytes: u64,
-    /// Timeout for web seed HTTP connect + download.
-    ///
-    /// Default: `30` s.
-    pub webseed_timeout: Duration,
     /// Maximum concurrent web seed HTTP Range requests across all URLs.
     ///
     /// Prevents TLS-handshake CPU spikes from starving a
@@ -247,7 +243,7 @@ impl Default for SessionConfig {
             webseed_enabled: true,
             webseed_min_gap_pieces: 4,
             webseed_max_range_bytes: 5 * 1024 * 1024,
-            webseed_timeout: Duration::from_secs(30),
+
             webseed_max_concurrent: 16,
             bootstrap_nodes: Some(vec![
                 BootstrapNode::from(("router.bittorrent.com", 6881)),
@@ -544,7 +540,6 @@ mod serde_tests {
             webseed_enabled: true,
             webseed_min_gap_pieces: 8,
             webseed_max_range_bytes: 10 * 1024 * 1024,
-            webseed_timeout: Duration::from_secs(60),
             webseed_max_concurrent: 16,
             enable_utp: false,
         };
@@ -585,7 +580,6 @@ mod serde_tests {
         assert_eq!(back.webseed_enabled, true);
         assert_eq!(back.webseed_min_gap_pieces, 8);
         assert_eq!(back.webseed_max_range_bytes, 10 * 1024 * 1024);
-        assert_eq!(back.webseed_timeout, Duration::from_secs(60));
         assert_eq!(back.webseed_max_concurrent, 16);
         assert_eq!(back.enable_utp, false);
     }
