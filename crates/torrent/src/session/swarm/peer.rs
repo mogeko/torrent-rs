@@ -17,7 +17,7 @@ impl SwarmLoop {
                 if let Some(peer) = self.peers.get(&addr) {
                     for slot in &peer.pipeline {
                         if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b))
-                            && let Some(dl) = self.active_downloads.get_mut(&index)
+                            && let Some(dl) = self.piece_pipeline.active_downloads_mut().get_mut(&index)
                         {
                             let block_idx = (begin / dl.block_size) as usize;
                             if block_idx < dl.requested.len() {
@@ -50,7 +50,7 @@ impl SwarmLoop {
                     if let Some(peer) = self.peers.get(&addr) {
                         for slot in &peer.pipeline {
                             if let Some((index, begin)) = slot.map(|(i, b, _)| (i, b))
-                                && let Some(dl) = self.active_downloads.get_mut(&index)
+                                && let Some(dl) = self.piece_pipeline.active_downloads_mut().get_mut(&index)
                             {
                                 let block_idx = (begin / dl.block_size) as usize;
                                 if block_idx < dl.requested.len() {
@@ -98,7 +98,7 @@ impl SwarmLoop {
                     if let Some((index, begin, _)) = *slot
                         && !peer.peer_allowed_fast.contains(&index)
                     {
-                        if let Some(dl) = self.active_downloads.get_mut(&index) {
+                        if let Some(dl) = self.piece_pipeline.active_downloads_mut().get_mut(&index) {
                             let block_idx = (begin / dl.block_size) as usize;
                             if block_idx < dl.requested.len() {
                                 dl.requested[block_idx] = None;
@@ -164,7 +164,7 @@ impl SwarmLoop {
                     p.remove_request(index, begin);
                 }
 
-                let piece_complete = if let Some(dl) = self.active_downloads.get_mut(&index) {
+                let piece_complete = if let Some(dl) = self.piece_pipeline.active_downloads_mut().get_mut(&index) {
                     dl.mark_received(begin, &data)
                 } else {
                     false
@@ -238,7 +238,7 @@ impl SwarmLoop {
                 if let Some(p) = self.peers.get_mut(&addr) {
                     p.remove_request(index, begin);
                 }
-                if let Some(dl) = self.active_downloads.get_mut(&index) {
+                if let Some(dl) = self.piece_pipeline.active_downloads_mut().get_mut(&index) {
                     let block_idx = (begin / dl.block_size) as usize;
                     if block_idx < dl.requested.len() {
                         dl.requested[block_idx] = None;
@@ -277,7 +277,7 @@ impl SwarmLoop {
                 if let Some(p) = self.peers.get_mut(&addr) {
                     p.remove_request(index, begin);
                 }
-                if let Some(dl) = self.active_downloads.get_mut(&index) {
+                if let Some(dl) = self.piece_pipeline.active_downloads_mut().get_mut(&index) {
                     let block_idx = (begin / dl.block_size) as usize;
                     if block_idx < dl.requested.len() {
                         dl.requested[block_idx] = None;

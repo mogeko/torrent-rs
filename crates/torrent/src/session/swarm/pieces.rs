@@ -1,211 +1,15 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
 
 use sha1::{Digest, Sha1};
 
 use crate::error::Error;
 use crate::peer::PeerMessage;
-use crate::piece::EndGame;
 
-use super::types::{ActiveDownload, BLOCK_SIZE};
 use super::{InfoHash, SwarmLoop, TorrentEvent};
 
 impl SwarmLoop {
-    /// Fill request pipelines for all peers that can accept more requests.
-    pub(super) async fn fill_pipelines(&mut self) -> Result<(), Error> {
-        let num_pieces = self.metainfo.info.num_pieces();
-        let mut availability = vec![0usize; num_pieces];
-        for peer in self.peers.values() {
-            if peer.am_choked || peer.bitfield.is_empty() {
-                continue;
-            }
-            for (i, &has) in peer.bitfield.iter().enumerate() {
-                if i >= num_pieces {
-                    break;
-                }
-                if has {
-                    availability[i] += 1;
-                }
-            }
-        }
-
-        let our_bf = {
-            let pm = self.piece_mgr.read().await;
-            pm.bitfield().to_vec()
-        };
-
-        let missing_count = our_bf.iter().filter(|&&b| !b).count();
-        let in_endgame = missing_count > 0 && missing_count < self.endgame_threshold;
-        if in_endgame {
-            self.selector = Box::new(EndGame);
-        }
-
-        let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
-        for addr in peer_addrs {
-            let can_req_normal = self.peers.get(&addr).is_some_and(|p| p.can_request());
-            // BEP 6: even when choked, the peer may still request pieces
-            // that are in its peer_allowed_fast set.
-            let can_req_fast = self
-                .peers
-                .get(&addr)
-                .is_some_and(|p| p.am_choked && !p.peer_allowed_fast.is_empty());
-            if !can_req_normal && !can_req_fast {
-                continue;
-            }
-            let only_allowed_fast = !can_req_normal && can_req_fast;
-
-            let block_opt = self.find_block_for_peer(&addr, in_endgame, only_allowed_fast);
-
-            let (index, begin) = if let Some(blk) = block_opt {
-                blk
-            } else if self.active_downloads.len() < self.max_concurrent_pieces {
-                // If the peer hasn't sent its bitfield yet we cannot
-                // tell which pieces it has — skip for now.
-                let peer_has_bitfield = self
-                    .peers
-                    .get(&addr)
-                    .is_some_and(|p| !p.bitfield.is_empty());
-                if !peer_has_bitfield {
-                    continue;
-                }
-
-                let selected = self.selector.select(&our_bf, &availability);
-                if let Some(idx) = selected {
-                    // Don't overwrite an existing download for the same piece.
-                    if self.active_downloads.contains_key(&idx) {
-                        continue;
-                    }
-                    let piece_len = self.piece_len_for_index(idx);
-                    if piece_len == 0 {
-                        continue;
-                    }
-                    let dl = ActiveDownload::new(idx, piece_len, BLOCK_SIZE);
-                    #[allow(clippy::unwrap_used)]
-                    let blk_begin = dl.next_unrequested().unwrap();
-                    self.active_downloads.insert(idx, dl);
-                    (idx, blk_begin)
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            };
-
-            let dl = match self.active_downloads.get(&index) {
-                Some(d) => d,
-                None => continue,
-            };
-            let len = dl.block_len(begin);
-            if len == 0 {
-                continue;
-            }
-
-            let msg = PeerMessage::Request {
-                index,
-                begin,
-                length: len,
-            };
-            self.peer_mgr.read().await.send_to(&addr, &msg).await?;
-
-            if let Some(peer) = self.peers.get_mut(&addr) {
-                peer.push_request(index, begin);
-            }
-            if let Some(dl) = self.active_downloads.get_mut(&index) {
-                dl.mark_requested(begin, addr);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Find the next block to request from a specific peer.
-    ///
-    /// When `only_allowed_fast` is true, only pieces in the peer's
-    /// `peer_allowed_fast` set are considered (BEP 6).
-    pub(super) fn find_block_for_peer(
-        &self, addr: &SocketAddr, in_endgame: bool, only_allowed_fast: bool,
-    ) -> Option<(u32, u32)> {
-        let peer = self.peers.get(addr)?;
-        if peer.bitfield.is_empty() {
-            return None;
-        }
-
-        for (idx, dl) in &self.active_downloads {
-            let idx_usize = *idx as usize;
-            if idx_usize >= peer.bitfield.len() || !peer.bitfield[idx_usize] {
-                continue;
-            }
-            // BEP 6: when only_allowed_fast is set, filter to allowed pieces.
-            if only_allowed_fast && !peer.peer_allowed_fast.contains(idx) {
-                continue;
-            }
-
-            if let Some(begin) = dl.next_unrequested() {
-                return Some((*idx, begin));
-            }
-
-            if in_endgame {
-                for (block_i, assigned) in dl.requested.iter().enumerate() {
-                    if assigned.as_ref() == Some(addr) {
-                        continue;
-                    }
-                    if assigned.is_some() {
-                        return Some((*idx, block_i as u32 * dl.block_size));
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Expire stale block requests (timeout > request_timeout).
-    pub(super) async fn expire_stale_requests(&mut self) {
-        let now = Instant::now();
-        let timeout = self.request_timeout;
-        let mut dead_peers = Vec::new();
-
-        for (addr, peer) in &mut self.peers {
-            let had_requests = peer.pipeline.iter().any(Option::is_some);
-            if !had_requests {
-                continue;
-            }
-            let mut all_expired = true;
-            for slot in &mut peer.pipeline {
-                if let Some((index, begin, sent_at)) = *slot {
-                    if now.duration_since(sent_at) > timeout {
-                        if let Some(dl) = self.active_downloads.get_mut(&index) {
-                            let block_idx = (begin / dl.block_size) as usize;
-                            if block_idx < dl.requested.len() {
-                                dl.requested[block_idx] = None;
-                            }
-                        }
-                        *slot = None;
-                    } else {
-                        all_expired = false;
-                    }
-                }
-            }
-            if all_expired {
-                dead_peers.push(*addr);
-            }
-        }
-
-        for addr in &dead_peers {
-            for dl in self.active_downloads.values_mut() {
-                for assigned in &mut dl.requested {
-                    if *assigned == Some(*addr) {
-                        *assigned = None;
-                    }
-                }
-            }
-            self.peers.remove(addr);
-            self.peer_mgr.write().await.remove_peer(addr);
-        }
-    }
-
     /// Verify SHA-1 hash of a completed piece and mark it as done.
     pub(super) async fn verify_and_complete_piece(&mut self, index: u32) -> Result<bool, Error> {
         let piece_len = self.piece_len_for_index(index) as usize;
@@ -216,14 +20,14 @@ impl SwarmLoop {
         };
 
         // Verify hash via reference (avoids unnecessary piece-sized allocation).
-        let hash_ok = match self.active_downloads.get(&index) {
+        let hash_ok = match self.piece_pipeline.active_downloads_mut().get(&index) {
             Some(dl) => verify_piece_hash(&dl.data[..piece_len], expected),
             None => return Ok(false),
         };
 
         if hash_ok {
             // Clone piece data for caching (only on success).
-            let data = match self.active_downloads.get(&index) {
+            let data = match self.piece_pipeline.active_downloads_mut().get(&index) {
                 Some(dl) => dl.data[..piece_len].to_vec(),
                 None => return Ok(false),
             };
@@ -259,7 +63,7 @@ impl SwarmLoop {
                 self.piece_cache.remove(0);
             }
             self.piece_cache.push((index, Arc::new(data)));
-            self.active_downloads.remove(&index);
+            self.piece_pipeline.active_downloads_mut().remove(&index);
             Ok(true)
         } else {
             // Corrupt piece: penalize peers that contributed blocks.
@@ -268,7 +72,7 @@ impl SwarmLoop {
             // Ban threshold is 10 to tolerate false positives in EndGame.
             self.total_wasted += self.piece_len_for_index(index);
             let mut penalized: HashSet<SocketAddr> = HashSet::new();
-            if let Some(dl) = self.active_downloads.get(&index) {
+            if let Some(dl) = self.piece_pipeline.active_downloads_mut().get(&index) {
                 for addr in dl.requested.iter().flatten() {
                     if penalized.insert(*addr) {
                         if let Some(peer) = self.peers.get_mut(addr) {
@@ -295,7 +99,7 @@ impl SwarmLoop {
                 self.peer_mgr.write().await.remove_peer(addr);
             }
 
-            self.active_downloads.remove(&index);
+            self.piece_pipeline.active_downloads_mut().remove(&index);
             let _ = self.event_tx.send(TorrentEvent::PieceFailed { index });
             Ok(false)
         }

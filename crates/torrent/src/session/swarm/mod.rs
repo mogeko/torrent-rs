@@ -2,10 +2,11 @@ mod announce;
 mod choke;
 mod peer;
 mod pex;
+mod piece_pipeline;
 mod pieces;
 mod types;
 
-pub(crate) use types::{ActiveDownload, PeerEvent, PeerInfo};
+pub(crate) use types::{PeerEvent, PeerInfo};
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -24,13 +25,14 @@ use crate::peer::utp::UtpSocket;
 use crate::peer::{
     ExtensionNegotiation, PeerConnection, PeerId, PeerMessage, compute_allowed_fast_set,
 };
-use crate::piece::{PieceManager, PieceSelector, RarestFirst};
+use crate::piece::{PieceManager, RarestFirst};
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
 use self::choke::ChokeManager;
 use self::pex::PexManager;
+use self::piece_pipeline::PiecePipeline;
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
 use super::webseed::{
@@ -303,11 +305,8 @@ impl TorrentHandle {
             listen_port: config.listen_port,
             announce_ip: config.announce_ip,
             announce_ipv6: config.announce_ipv6,
-            request_timeout: config.request_timeout,
             tracker_timeout: config.tracker_timeout,
-            max_concurrent_pieces: config.max_concurrent_pieces,
             piece_cache_size: config.piece_cache_size,
-            endgame_threshold: config.endgame_threshold,
             choke_manager: ChokeManager::new(
                 config.max_uploads,
                 config.choke_interval,
@@ -322,8 +321,12 @@ impl TorrentHandle {
             has_announced: false,
             announced_completed: false,
             peers: HashMap::new(),
-            active_downloads: HashMap::new(),
-            selector: Box::new(RarestFirst),
+            piece_pipeline: PiecePipeline::new(
+                Box::new(RarestFirst),
+                config.max_concurrent_pieces,
+                config.endgame_threshold,
+                config.request_timeout,
+            ),
             peer_msg_rx,
             peer_msg_tx,
             total_downloaded: 0,
@@ -394,17 +397,10 @@ pub(crate) struct SwarmLoop {
     pub(crate) announce_ip: Option<Ipv4Addr>,
     /// Explicit IPv6 address to announce (BEP 7).
     pub(crate) announce_ipv6: Option<Ipv6Addr>,
-    /// Timeout for a single block request.
-    pub(crate) request_timeout: Duration,
-    /// Timeout for tracker announce calls (applied via tower middleware
-    /// at the call site in [`announce_to_tracker`]).
+    /// Timeout for tracker announce calls.
     pub(crate) tracker_timeout: Duration,
-    /// Maximum concurrent piece downloads.
-    pub(crate) max_concurrent_pieces: usize,
     /// How many completed pieces to cache for upload serving.
     pub(crate) piece_cache_size: usize,
-    /// EndGame threshold (switch when fewer pieces remain).
-    pub(crate) endgame_threshold: usize,
     /// Choke/unchoke manager (BEP 3 tit-for-tat).
     pub(crate) choke_manager: ChokeManager,
     /// Corrupt block ban threshold.
@@ -421,10 +417,8 @@ pub(crate) struct SwarmLoop {
     pub(crate) announced_completed: bool,
     /// Per-peer protocol state.
     pub(crate) peers: HashMap<SocketAddr, PeerInfo>,
-    /// Currently active piece downloads.
-    pub(crate) active_downloads: HashMap<u32, ActiveDownload>,
-    /// Piece selection strategy (default: rarest-first).
-    pub(crate) selector: Box<dyn PieceSelector>,
+    /// Piece download pipeline (selection, assignment, expiry).
+    pub(crate) piece_pipeline: PiecePipeline,
     /// Receive peer messages from reader tasks.
     pub(crate) peer_msg_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
     /// Clone for spawning new reader tasks.
@@ -594,7 +588,9 @@ impl SwarmLoop {
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
                     self.handle_peer_event(addr, event).await;
                     if !self.piece_mgr.read().await.missing_pieces().is_empty()
-                        && let Err(e) = self.fill_pipelines().await
+                        && let Err(e) = self.piece_pipeline.fill(
+                            &mut self.peers, &self.piece_mgr, &self.peer_mgr, &self.metainfo,
+                        ).await
                     {
                             tracing::warn!("failed to fill pipelines: {}", e);
                         }
@@ -619,7 +615,7 @@ impl SwarmLoop {
                 _ = choke_tick.tick() => {
                     if let Err(e) = self.choke_manager.run_round(
                         &mut self.peers,
-                        &mut self.active_downloads,
+                        self.piece_pipeline.active_downloads_mut(),
                         &self.piece_mgr,
                         &self.peer_mgr,
                     ).await {
@@ -627,7 +623,7 @@ impl SwarmLoop {
                     }
                 }
                 _ = stale_tick.tick() => {
-                    self.expire_stale_requests().await;
+                    self.piece_pipeline.expire_stale(&mut self.peers, &self.peer_mgr).await;
                 }
                 _ = pex_tick.tick() => {
                     if self.pex_enabled {
