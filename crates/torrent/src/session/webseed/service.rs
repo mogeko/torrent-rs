@@ -1,9 +1,11 @@
 //! WebSeed download service — implements `tower::Service<PieceRange>`.
 //!
 //! Each `call()` selects the best URL via UCB scoring, downloads the
-//! byte range via HTTP Range request, verifies SHA-1 hashes, and writes
-//! completed pieces to storage.  URL health tracking and parking are
-//! handled internally.
+//! byte range via HTTP Range request, verifies SHA-1 hashes, writes
+//! completed pieces to storage, and updates per-URL health state.
+//! Uses the `Arc<Inner>` pattern (same as [`DhtRpc`]) so that
+//! [`Service::call`] can update shared mutable state from within
+//! the returned Future.
 //!
 //! This replaces the scheduler+fetcher+channel architecture with a
 //! single composable tower Service.
@@ -30,19 +32,31 @@ use super::types::{PieceRange, UrlActivity, UrlHealth, UrlKind, UrlState, WebSee
 /// Exploration weight for the UCB bandit formula (bytes/sec).
 const UCB_EXPLORATION_FACTOR: f64 = 100_000.0;
 
-/// Web seed download service — one per torrent.
+/// Shared mutable state for [`WebSeedService`].
 ///
-/// Implements [`Service<PieceRange>`] so callers can compose timeout,
-/// retry, and concurrency-limiting middleware via [`tower::ServiceBuilder`].
-/// URL health tracking and UCB selection are handled internally.
-pub(crate) struct WebSeedService {
-    urls: Vec<UrlState>,
+/// URL health and activity are behind a [`RwLock`] so that clone-
+/// based [`Service::call`] futures can update them after each
+/// HTTP Range download.
+struct WebSeedServiceInner {
+    urls: RwLock<Vec<UrlState>>,
     http: HttpClient,
     piece_mgr: Arc<RwLock<PieceManager>>,
     storage: Arc<dyn Storage>,
     piece_length: u64,
     metainfo: Metainfo,
     config: WebSeedConfig,
+}
+
+/// Web seed download service — one per torrent.
+///
+/// Thin `Arc`-based handle — cloning is cheap (same pattern as
+/// [`DhtRpc`]).  Implements [`Service<PieceRange>`] so callers
+/// can compose timeout, retry, and concurrency-limiting middleware
+/// via [`tower::ServiceBuilder`].  URL health tracking and UCB
+/// selection are handled internally via the shared [`WebSeedServiceInner`].
+#[derive(Clone)]
+pub(crate) struct WebSeedService {
+    inner: Arc<WebSeedServiceInner>,
 }
 
 impl WebSeedService {
@@ -65,13 +79,15 @@ impl WebSeedService {
             .collect();
 
         WebSeedService {
-            urls,
-            http: HttpClient::new(),
-            piece_mgr,
-            storage,
-            piece_length: metainfo.info.piece_length,
-            metainfo,
-            config,
+            inner: Arc::new(WebSeedServiceInner {
+                urls: RwLock::new(urls),
+                http: HttpClient::new(),
+                piece_mgr,
+                storage,
+                piece_length: metainfo.info.piece_length,
+                metainfo,
+                config,
+            }),
         }
     }
 }
@@ -86,15 +102,10 @@ impl Service<PieceRange> for WebSeedService {
     }
 
     fn call(&mut self, range: PieceRange) -> Self::Future {
-        // Select best available URL via UCB
-        let best_url = self.select_best_url();
-        let http = self.http.clone();
-        let piece_mgr = self.piece_mgr.clone();
-        let storage = self.storage.clone();
-        let piece_length = self.piece_length;
-        let metainfo = self.metainfo.clone();
-
+        let this = self.inner.clone();
         Box::pin(async move {
+            let best_url = select_best_url(&this).await;
+
             let Some(url) = best_url else {
                 return Err(Error::new(ErrorKind::TrackerRequestFailed));
             };
@@ -102,36 +113,59 @@ impl Service<PieceRange> for WebSeedService {
             let started = Instant::now();
             let result = download_and_verify(
                 &url,
-                &http,
-                &piece_mgr,
-                &*storage,
-                piece_length,
-                &metainfo,
+                &this.http,
+                &this.piece_mgr,
+                &*this.storage,
+                this.piece_length,
+                &this.metainfo,
                 range.start_byte,
                 range.end_byte,
             )
             .await;
 
-            // Update health (this is a simplified version — full UCB tracking
-            // requires mutable self access which Service::call doesn't provide
-            // directly.  For now we log the result.)
-            match &result {
-                Ok(pieces) => {
-                    let elapsed = started.elapsed();
-                    let bytes: u64 = pieces
+            // --- URL health update (now live, not dead code) ---
+            let bytes: u64 = result
+                .as_ref()
+                .ok()
+                .map(|pieces| {
+                    pieces
                         .iter()
-                        .map(|&i| piece_len(i, &metainfo, piece_length))
-                        .sum();
-                    tracing::debug!(
-                        "web seed {}: {} pieces ({:.1}KB) in {:.1}s",
-                        url,
-                        pieces.len(),
-                        bytes as f64 / 1024.0,
-                        elapsed.as_secs_f64()
-                    );
-                }
-                Err(e) => {
-                    tracing::debug!("web seed {}: download failed: {}", url, e);
+                        .map(|&i| piece_len(i, &this.metainfo, this.piece_length))
+                        .sum()
+                })
+                .unwrap_or(0);
+
+            let mut urls = this.urls.write().await;
+            if let Some(state) = urls.iter_mut().find(|s| s.url == url) {
+                match &result {
+                    Ok(_) => {
+                        state.health.record_success(bytes, started.elapsed());
+                        state.activity = UrlActivity::Active;
+                        tracing::debug!(
+                            "web seed {}: {} pieces ({:.1}KB) in {:.1}s (ema={:.0} B/s)",
+                            url,
+                            result.as_ref().unwrap().len(),
+                            bytes as f64 / 1024.0,
+                            started.elapsed().as_secs_f64(),
+                            state.health.ema_throughput(),
+                        );
+                    }
+                    Err(e) => {
+                        state.health.record_failure();
+                        let park = state.health.should_park(this.config.park_threshold);
+                        state.activity = if park {
+                            UrlActivity::Parked
+                        } else {
+                            UrlActivity::Active
+                        };
+                        tracing::debug!(
+                            "web seed {}: failed ({} consecutive, park={}): {}",
+                            url,
+                            state.health.consecutive_failures(),
+                            park,
+                            e,
+                        );
+                    }
                 }
             }
 
@@ -140,28 +174,30 @@ impl Service<PieceRange> for WebSeedService {
     }
 }
 
-impl WebSeedService {
-    /// Select the best available URL via UCB score.
-    fn select_best_url(&self) -> Option<Url> {
-        let total_attempts: u64 = self.urls.iter().map(|s| s.health.download_attempts()).sum();
+// ── Internal helpers ───────────────────────────────────────────────
 
-        self.urls
-            .iter()
-            .filter(|s| match s.activity {
-                UrlActivity::Active => true,
-                UrlActivity::Parked => s.health.ready_for_retry(self.config.park_retry_interval),
-            })
-            .max_by(|a, b| {
-                a.health
-                    .ucb_score(total_attempts, UCB_EXPLORATION_FACTOR)
-                    .partial_cmp(&b.health.ucb_score(total_attempts, UCB_EXPLORATION_FACTOR))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|s| s.url.clone())
-    }
+/// Select the best available URL via UCB multi-armed bandit.
+async fn select_best_url(inner: &WebSeedServiceInner) -> Option<Url> {
+    let urls = inner.urls.read().await;
+    let total_attempts: u64 = urls.iter().map(|s| s.health.download_attempts()).sum();
+
+    urls.iter()
+        .filter(|s| match s.activity {
+            UrlActivity::Active => true,
+            UrlActivity::Parked => {
+                s.health.ready_for_retry(inner.config.park_retry_interval)
+            }
+        })
+        .max_by(|a, b| {
+            a.health
+                .ucb_score(total_attempts, UCB_EXPLORATION_FACTOR)
+                .partial_cmp(&b.health.ucb_score(total_attempts, UCB_EXPLORATION_FACTOR))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|s| s.url.clone())
 }
 
-/// Core download logic — shared between `Service::call` and direct usage.
+/// Core download logic — HTTP Range request + SHA-1 verify + storage write.
 #[allow(clippy::too_many_arguments)]
 async fn download_and_verify(
     url: &Url, http: &HttpClient, piece_mgr: &RwLock<PieceManager>, storage: &dyn Storage,
