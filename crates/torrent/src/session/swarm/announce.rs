@@ -1,7 +1,5 @@
 use std::time::{Duration, Instant};
 
-use tower::{Service, ServiceBuilder};
-
 use crate::error::{Error, ErrorKind};
 use crate::tracker::{AnnounceEvent, AnnounceRequest};
 
@@ -63,15 +61,11 @@ impl SwarmLoop {
         req.ip = self.announce_ip;
         req.ipv6 = self.announce_ipv6;
 
-        // Apply timeout at the call site via tower middleware.
-        // Each inner tracker (HTTP/UDP) is a raw Service — timeout
-        // is a cross-cutting concern applied here through the stack.
-        let mut svc = ServiceBuilder::new()
-            .timeout(self.tracker_timeout)
-            .service(tracker);
-
-        match svc.call(req).await {
-            Ok(resp) => {
+        // Apply timeout at the call site via tokio::time::timeout.
+        // Each inner tracker (HTTP/UDP) is raw — timeout is a
+        // cross-cutting concern applied here.
+        match tokio::time::timeout(self.tracker_timeout, tracker.announce(req)).await {
+            Ok(Ok(resp)) => {
                 tracing::debug!("tracker announce: {} peers", resp.peers.len());
                 let interval = resp.min_interval.unwrap_or(resp.interval);
                 self.next_announce = Some(Instant::now() + Duration::from_secs(interval as u64));
@@ -97,10 +91,8 @@ impl SwarmLoop {
 
                 Ok(())
             }
-            Err(e) => {
-                // e is Box<dyn Error + Send + Sync> from tower middleware.
-                // The underlying cause may be a timeout (tower::timeout::error::Elapsed)
-                // or a tracker protocol error (our Error type).
+            Ok(Err(e)) => {
+                // Tracker returned a protocol error — our typed Error.
                 let message = e.to_string();
                 self.next_announce = Some(Instant::now() + self.announce_fallback_interval);
                 {
@@ -112,6 +104,24 @@ impl SwarmLoop {
                     message: message.clone(),
                 });
                 tracing::warn!("failed to announce to tracker: {}", message);
+                Err(Error::new(ErrorKind::TrackerRequestFailed))
+            }
+            Err(_elapsed) => {
+                // Timeout — tokio::time::timeout elapsed.
+                let message = format!(
+                    "tracker announce timed out after {:.0}s",
+                    self.tracker_timeout.as_secs_f64()
+                );
+                self.next_announce = Some(Instant::now() + self.announce_fallback_interval);
+                {
+                    let mut ts = self.tracker_status.write().await;
+                    ts.next_announce_in = Some(self.announce_fallback_interval);
+                    ts.last_error = Some(message.clone());
+                }
+                let _ = self.event_tx.send(TorrentEvent::TrackerError {
+                    message: message.clone(),
+                });
+                tracing::warn!("{}", message);
                 Err(Error::new(ErrorKind::TrackerRequestFailed))
             }
         }

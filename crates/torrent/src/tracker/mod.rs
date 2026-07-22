@@ -43,13 +43,9 @@ pub use self::http::HttpTracker;
 pub use self::udp::UdpTracker;
 
 use std::collections::HashSet;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use tokio::task::JoinSet;
-use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 use crate::spec::TorrentSpec;
@@ -255,9 +251,9 @@ impl Tracker {
         let mut set = JoinSet::new();
         let req = Arc::new(req);
         for inner in &self.trackers {
-            let mut inner = inner.clone();
+            let inner = inner.clone();
             let req = Arc::clone(&req);
-            set.spawn(async move { inner.call(Arc::unwrap_or_clone(req)).await });
+            set.spawn(async move { inner.announce(Arc::unwrap_or_clone(req)).await });
         }
         set
     }
@@ -285,53 +281,17 @@ impl Inner {
             _ => Err(Error::new(ErrorKind::InvalidInput)),
         }
     }
-}
 
-/// [`Service`] impl for the internal tracker variant — dispatches to the
-/// concrete tracker's [`Service`] impl (which includes timeout).
-///
-/// This ensures that [`Tracker`]'s multi-tracker methods
-/// ([`announce_first`](Tracker::announce_first), etc.) benefit from
-/// per-tracker timeout wiring.
-impl Service<AnnounceRequest> for Inner {
-    type Response = AnnounceResponse;
-    type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    /// Announce to this tracker.
+    ///
+    /// Dispatches to the concrete tracker's `announce` method.
+    /// Timeout is not embedded — apply [`tokio::time::timeout`]
+    /// at the call site.
+    pub(crate) async fn announce(&self, req: AnnounceRequest) -> Result<AnnounceResponse, Error> {
         match self {
-            Inner::Http(t) => t.poll_ready(cx),
-            Inner::Udp(t) => t.poll_ready(cx),
+            Inner::Http(t) => t.announce(req).await,
+            Inner::Udp(t) => t.announce(req).await,
         }
-    }
-
-    fn call(&mut self, req: AnnounceRequest) -> Self::Future {
-        match self {
-            Inner::Http(t) => t.call(req),
-            Inner::Udp(t) => t.call(req),
-        }
-    }
-}
-
-/// Tower [`Service`] implementation for multi-tracker announce.
-///
-/// `call` races all trackers and returns the first successful response
-/// (equivalent to [`announce_first`](Tracker::announce_first)).  Timeout
-/// is applied at the individual tracker level (see [`HttpTracker`] and
-/// [`UdpTracker`] [`Service`] impls), so multi-tracker races automatically
-/// benefit from per-tracker deadline enforcement.
-impl Service<AnnounceRequest> for Tracker {
-    type Response = AnnounceResponse;
-    type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: AnnounceRequest) -> Self::Future {
-        let this = self.clone();
-        Box::pin(async move { this.announce(req).await })
     }
 }
 
@@ -414,15 +374,6 @@ mod tests {
         let set: JoinSet<Result<AnnounceResponse, Error>> = t.announce_into_set(req);
         // Just verify it's not empty when there are trackers
         assert!(!set.is_empty());
-    }
-
-    #[test]
-    fn test_tracker_service_poll_ready() {
-        let mut t = Tracker::single("http://tracker.example.com:6969/announce").unwrap();
-        // tower Service: poll_ready must return Ready for stateless trackers
-        let waker = std::task::Waker::noop();
-        let mut cx = Context::from_waker(&waker);
-        assert!(t.poll_ready(&mut cx).is_ready());
     }
 
     #[test]

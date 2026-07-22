@@ -1,24 +1,19 @@
-//! WebSeed download service — implements `tower::Service<PieceRange>`.
+//! WebSeed download service — concurrent HTTP Range downloads.
 //!
-//! Each `call()` selects the best URL via UCB scoring, downloads the
+//! Each download selects the best URL via UCB scoring, downloads the
 //! byte range via HTTP Range request, verifies SHA-1 hashes, writes
 //! completed pieces to storage, and updates per-URL health state.
 //! Uses the `Arc<Inner>` pattern (same as [`DhtRpc`]) so that
-//! [`Service::call`] can update shared mutable state from within
-//! the returned Future.
+//! the download future can update shared mutable state.
 //!
 //! This replaces the scheduler+fetcher+channel architecture with a
-//! single composable tower Service.
+//! single composable service.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Instant;
 
 use sha1::{Digest, Sha1};
 use tokio::sync::RwLock;
-use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 use crate::metainfo::Metainfo;
@@ -35,7 +30,7 @@ const UCB_EXPLORATION_FACTOR: f64 = 100_000.0;
 /// Shared mutable state for [`WebSeedService`].
 ///
 /// URL health and activity are behind a [`RwLock`] so that clone-
-/// based [`Service::call`] futures can update them after each
+/// based download futures can update them after each
 /// HTTP Range download.
 struct WebSeedServiceInner {
     urls: RwLock<Vec<UrlState>>,
@@ -50,10 +45,12 @@ struct WebSeedServiceInner {
 /// Web seed download service — one per torrent.
 ///
 /// Thin `Arc`-based handle — cloning is cheap (same pattern as
-/// [`DhtRpc`]).  Implements [`Service<PieceRange>`] so callers
-/// can compose timeout, retry, and concurrency-limiting middleware
-/// via [`tower::ServiceBuilder`].  URL health tracking and UCB
+/// [`DhtRpc`]).  Call [`download`](WebSeedService::download) to
+/// fetch a byte range.  URL health tracking and UCB
 /// selection are handled internally via the shared [`WebSeedServiceInner`].
+///
+/// Timeout is not embedded — apply [`tokio::time::timeout`]
+/// at the call site.
 #[derive(Clone)]
 pub(crate) struct WebSeedService {
     inner: Arc<WebSeedServiceInner>,
@@ -93,95 +90,110 @@ impl WebSeedService {
             }),
         }
     }
-}
 
-impl Service<PieceRange> for WebSeedService {
-    type Response = Vec<u32>;
-    type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
+    /// Check whether any web seed URL is currently available for download.
+    ///
+    /// Returns `true` if at least one URL is [`UrlActivity::Active`] or a
+    /// [`UrlActivity::Parked`] URL is ready for retry.  Callers should
+    /// skip spawning download tasks when this returns `false` to avoid
+    /// wasting work on tasks that will immediately fail.
+    pub(crate) fn has_available_urls(&self) -> bool {
+        let urls = match self.inner.urls.try_read() {
+            Ok(urls) => urls,
+            Err(_) => return false, // lock contended — assume unavailable
+        };
+        urls.iter().any(|s| match s.activity {
+            UrlActivity::Active => true,
+            UrlActivity::Parked => s
+                .health
+                .ready_for_retry(self.inner.config.park_retry_interval),
+        })
     }
 
-    fn call(&mut self, range: PieceRange) -> Self::Future {
+    /// Download a byte range from the best available web seed URL.
+    ///
+    /// Selects the best URL via UCB scoring, downloads the byte range
+    /// via HTTP Range request, verifies SHA-1 hashes, writes completed
+    /// pieces to storage, and updates per-URL health state.
+    ///
+    /// Timeout is not embedded — apply [`tokio::time::timeout`]
+    /// at the call site.
+    pub(crate) async fn download(&mut self, range: PieceRange) -> Result<Vec<u32>, Error> {
         let this = self.inner.clone();
-        Box::pin(async move {
-            let best_url = select_best_url(&this).await;
+        let best_url = select_best_url(&this).await;
 
-            let Some(url) = best_url else {
-                return Err(Error::new(ErrorKind::TrackerRequestFailed));
-            };
+        let Some(url) = best_url else {
+            return Err(Error::new(ErrorKind::TrackerRequestFailed));
+        };
 
-            let started = Instant::now();
-            let result = download_and_verify(
-                &url,
-                &this.http,
-                &this.piece_mgr,
-                &*this.storage,
-                this.piece_length,
-                &this.metainfo,
-                range.start_byte,
-                range.end_byte,
-            )
-            .await;
+        let started = Instant::now();
+        let result = download_and_verify(
+            &url,
+            &this.http,
+            &this.piece_mgr,
+            &*this.storage,
+            this.piece_length,
+            &this.metainfo,
+            range.start_byte,
+            range.end_byte,
+        )
+        .await;
 
-            // --- URL health update (now live, not dead code) ---
-            let bytes: u64 = result
-                .as_ref()
-                .ok()
-                .map(|pieces| {
-                    pieces
-                        .iter()
-                        .map(|&i| piece_len(i, &this.metainfo, this.piece_length))
-                        .sum()
-                })
-                .unwrap_or(0);
+        // --- URL health update (now live, not dead code) ---
+        let bytes: u64 = result
+            .as_ref()
+            .ok()
+            .map(|pieces| {
+                pieces
+                    .iter()
+                    .map(|&i| piece_len(i, &this.metainfo, this.piece_length))
+                    .sum()
+            })
+            .unwrap_or(0);
 
-            let mut urls = this.urls.write().await;
-            if let Some(state) = urls.iter_mut().find(|s| s.url == url) {
-                match &result {
-                    Ok(_) => {
-                        state.health.record_success(bytes, started.elapsed());
-                        state.activity = UrlActivity::Active;
-                        tracing::debug!(
-                            "web seed {}: {} pieces ({:.1}KB) in {:.1}s (ema={:.0} B/s)",
+        let mut urls = this.urls.write().await;
+        if let Some(state) = urls.iter_mut().find(|s| s.url == url) {
+            match &result {
+                Ok(_) => {
+                    state.health.record_success(bytes, started.elapsed());
+                    state.activity = UrlActivity::Active;
+                    tracing::debug!(
+                        "web seed {}: {} pieces ({:.1}KB) in {:.1}s (ema={:.0} B/s)",
+                        url,
+                        result.as_ref().unwrap().len(),
+                        bytes as f64 / 1024.0,
+                        started.elapsed().as_secs_f64(),
+                        state.health.ema_throughput(),
+                    );
+                }
+                Err(e) => {
+                    state.health.record_failure();
+                    let was_active = matches!(state.activity, UrlActivity::Active);
+                    let park = state.health.should_park(this.config.park_threshold);
+                    state.activity = if park {
+                        UrlActivity::Parked
+                    } else {
+                        UrlActivity::Active
+                    };
+                    if park && was_active {
+                        tracing::info!(
+                            "web seed {}: parked after {} consecutive failures",
                             url,
-                            result.as_ref().unwrap().len(),
-                            bytes as f64 / 1024.0,
-                            started.elapsed().as_secs_f64(),
-                            state.health.ema_throughput(),
+                            state.health.consecutive_failures(),
                         );
-                    }
-                    Err(e) => {
-                        state.health.record_failure();
-                        let was_active = matches!(state.activity, UrlActivity::Active);
-                        let park = state.health.should_park(this.config.park_threshold);
-                        state.activity = if park {
-                            UrlActivity::Parked
-                        } else {
-                            UrlActivity::Active
-                        };
-                        if park && was_active {
-                            tracing::info!(
-                                "web seed {}: parked after {} consecutive failures",
-                                url,
-                                state.health.consecutive_failures(),
-                            );
-                        } else {
-                            tracing::debug!(
-                                "web seed {}: download failed ({} consecutive): {}",
-                                url,
-                                state.health.consecutive_failures(),
-                                e,
-                            );
-                        }
+                    } else {
+                        tracing::debug!(
+                            "web seed {}: download failed ({} consecutive): {}",
+                            url,
+                            state.health.consecutive_failures(),
+                            e,
+                        );
                     }
                 }
             }
+        }
 
-            result
-        })
+        result
     }
 }
 
@@ -266,8 +278,7 @@ async fn download_and_verify(
         .body(vec![])
         .map_err(|_| Error::new(ErrorKind::InvalidInput))?;
 
-    let mut http = http.clone();
-    let resp = Service::call(&mut http, http_req).await?;
+    let resp = http.send_request(http_req).await?;
     let body = resp.into_body();
 
     let mut completed = Vec::new();

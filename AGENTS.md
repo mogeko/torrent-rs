@@ -45,34 +45,21 @@ These MUST be followed. Apply them before consulting the reference architecture 
     - Use `#[non_exhaustive]` on `pub` enums/structs that may gain variants/fields.
     - Document protocol references with BEP numbers: `/// Implements BEP 0003: The BitTorrent Protocol Specification`.
 
-7.  **Trait Derivation**.
+7.  **Error Handling**.
     - Derive `Debug`, `Clone`, `PartialEq`, and `Eq` for all public value types that have value semantics and no hidden side effects.
     - Do NOT derive `Clone` or `Eq` for types that own resources, handles, or non-deterministic state (e.g., network connections, file handles, RNG state).
     - Error types must implement `std::error::Error` + `Send + Sync`.
 
-8.  **Tower Service Pattern**. Use `tower::Service` as the primary abstraction for request-response (R-R) components. Follow these rules:
-    - **R-R components implement `Service`**. Tracker announces, DHT RPC calls, and web seed fetches are naturally `Request → Service → Response`. Implement `tower::Service` for each such component.
+8.  **Timeout**. Apply timeout at the call site — never embed it inside business logic. Use [`tokio::time::timeout`](https://docs.rs/tokio/latest/tokio/time/fn.timeout.html) at integration points (e.g., `SwarmLoop`, `DhtNode`). Tracker `announce()`, DHT `query()`, and web seed `download()` are raw I/O with no timeout embedded — the caller owns timeout policy.
 
-    - **Timeout at the call site**. Never embed `tokio::time::timeout` inside a `Service::call()` implementation. Apply `tower::timeout::TimeoutLayer` via `tower::ServiceBuilder` at the integration point (e.g., `SwarmLoop`). This keeps business logic pure and timeout policy centralized.
-
-    - **No timeout/retry fields in service structs**. Remove `timeout: Duration` fields from service types. The caller owns timeout policy — services are raw, stateless-per-request delegates.
-
-    - **`poll_ready` returns `Ready` for stateless services**. HTTP trackers, UDP trackers, and DHT RPC have no connection pool; each request creates its own socket/connection. Return `Poll::Ready(Ok(()))` directly.
-
-    - **Use `ServiceBuilder` for middleware composition**. Chain timeout, retry, rate-limiting, and buffer layers declaratively:
-
-      ```rust
-      let mut svc = ServiceBuilder::new()
-          .timeout(config.tracker_timeout)
-          .service(tracker.clone());
-      svc.call(req).await
-      ```
-
-    - **Not for bidirectional streams**. Do NOT model the peer wire protocol as `Service` — it is a bidirectional, asymmetric event stream (`Have`, `Bitfield`, `Choke` arrive unsolicited). Use `Stream` + `Sink` (or `tokio` channels) for peer I/O.
-
-    - **`torrent-core` never depends on tower**. The `Service` trait and middleware live only in the `torrent` crate. `torrent-core` remains sync, pure computation.
-
-    - **`Error` must satisfy `Into<Box<dyn Error + Send + Sync>>`**. This is automatically true if `Error` implements `std::error::Error + Send + Sync` (hard rule 7). Required for tower middleware like `Timeout` and `Retry`.
+    ```rust
+    // ✓ Timeout at the integration point
+    match tokio::time::timeout(tracker_timeout, tracker.announce(req)).await {
+        Ok(Ok(resp)) => { /* success */ }
+        Ok(Err(e))   => { /* tracker error */ }
+        Err(_elapsed) => { /* timeout */ }
+    }
+    ```
 
 ## Reference Architecture
 
@@ -139,7 +126,6 @@ torrent.rs/                  ← workspace root
 | `sha1`                | —                                        | Info hash computation               |
 | `tokio`               | net, rt, macros, time, io-util, fs, sync | Async I/O runtime                   |
 | `tokio-rustls`        | —                                        | TLS streams over tokio              |
-| `tower`               | `util`, `timeout`, `retry`               | Service abstraction and middleware  |
 | `tracing`             | —                                        | Structured logging                  |
 | `url`                 | —                                        | Tracker URL and magnet URI parsing  |
 
@@ -187,30 +173,18 @@ bencode ─── metainfo             session
 - **Fast Extension (BEP 6)**: `compute_allowed_fast_set()` + 5 message types (Suggest, HaveAll/None, Reject, AllowedFast) in `torrent-core`. AllowedFast bypasses choke, HaveAll/HaveNone replaces Bitfield. `Unknown` catch-all for forward compatibility.
 - **LTEP (BEP 10)**: `ExtensionNegotiation` in `torrent-core` for handshake dict encode/decode. Async LTEP negotiation during `PeerConnection::connect()` in `torrent`.
 - **PEX (BEP 11)**: `PexMessage` in `torrent-core` for peer list encode/decode. `SwarmLoop` handler in `torrent` dispatches incoming PEX, broadcasts periodically with `pex_interval`.
-- **Tracker**: `HttpTracker` uses manual HTTP/1.1 (no `reqwest`). `UdpTracker` implements BEP 15 connection protocol + announce + retry. Both in `torrent`. Each tracker implements `tower::Service<AnnounceRequest>` — raw, stateless per-request. Timeout is applied at the call site in `SwarmLoop` via `ServiceBuilder::new().timeout(config.tracker_timeout).service(tracker)`.
+- **Tracker**: `HttpTracker` uses manual HTTP/1.1 (no `reqwest`). `UdpTracker` implements BEP 15 connection protocol + announce + retry. Both in `torrent`. Each tracker exposes an `announce(&self, req) -> Result<AnnounceResponse, Error>` method — raw, stateless per-request. Timeout is applied at the call site in `SwarmLoop` via `tokio::time::timeout(config.tracker_timeout, tracker.announce(req))`.
   - `HttpTracker` supports both `http://` (plain TCP) and `https://` (TLS via `tokio-rustls`).
-- **Tower Service Architecture**: `tower::Service` is the integration point for request-response components. The model:
+- **Timeout**: All network I/O methods (`announce()`, `query()`, `download()`) are raw — they contain no timeout logic. Timeout is applied at the integration point via `tokio::time::timeout`. This keeps business logic pure and timeout policy centralized at the caller:
 
-  ```text
-  SwarmLoop (call site / integration point)
-    │
-    │  ServiceBuilder::new()
-    │    .timeout(config.tracker_timeout)   ← cross-cutting via middleware
-    │    .service(tracker)
-    │    .call(req)
-    │
-    ▼
-  HttpTracker / UdpTracker / DhtRpc / FetchTask
-    └── Service::call() → raw business logic (no timeout, no retry)
+  ```rust
+  // In SwarmLoop::announce_to_tracker
+  match tokio::time::timeout(self.tracker_timeout, tracker.announce(req)).await {
+      Ok(Ok(resp)) => { /* success */ }
+      Ok(Err(e))   => { /* tracker protocol error, typed */ }
+      Err(_elapsed) => { /* timeout */ }
+  }
   ```
-
-  **What qualifies as a tower `Service`**:
-  - Tracker announces, DHT RPC, web seed fetches, storage I/O: **yes** — pure request → response.
-  - Peer wire protocol, incoming DHT queries, LSD announcements: **no** — these are bidirectional or unsolicited event streams. Use `Stream` + `Sink` or `tokio::mpsc` channels.
-
-  **Timeout pattern**: Timeout is always applied at the integration point (e.g., `SwarmLoop`, `DhtNode`) via `tower::ServiceBuilder::timeout()`. Services themselves contain no timeout logic — `announce()` and `query()` are raw, blocking only on I/O.
-
-  **Error bridging**: tower middleware uses `Box<dyn Error + Send + Sync>` as the error type. Since `torrent_core::Error` implements `std::error::Error + Send + Sync`, the standard library blanket `From<E> for Box<dyn Error>` provides automatic conversion. At the call site, map the boxed error back to a domain error via `e.to_string()` for logging and `Error::new(ErrorKind::*)` for control flow.
 
 - **Piece**: `PieceManager` (bitfield, progress tracking) + 4 selection strategies (`RarestFirst`, `RandomFirst`, `Sequential`, `EndGame`) in `torrent-core`.
 - **Storage**: `Storage` trait in `torrent-core`. `FileStorage` implementation in `torrent`.

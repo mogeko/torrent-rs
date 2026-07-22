@@ -2,7 +2,6 @@ use std::future::Future;
 use std::pin::Pin;
 
 use tokio::task::JoinSet;
-use tower::Service;
 
 use crate::error::Error;
 use crate::session::swarm::{SwarmContext, SwarmExtension};
@@ -76,11 +75,16 @@ impl SwarmExtension for WebSeedExtension {
             }
 
             // Submit new gap downloads up to the concurrency limit.
+            // If no URLs are available (all parked and not ready for retry),
+            // skip spawning to avoid wasting work on tasks that will fail.
+            let Some(ws) = self.service.as_ref() else {
+                return Ok(());
+            };
+            if !ws.has_available_urls() {
+                return Ok(());
+            }
             while self.tasks.len() < self.concurrency {
-                let ws = match self.service.as_ref() {
-                    Some(ws) => ws.clone(),
-                    None => return Ok(()),
-                };
+                let ws = ws.clone();
 
                 let (bitfield, piece_length) = {
                     let pm = ctx.piece_mgr.read().await;
@@ -122,7 +126,7 @@ impl SwarmExtension for WebSeedExtension {
                 };
                 self.tasks.spawn(async move {
                     let mut ws = ws;
-                    ws.call(range).await
+                    ws.download(range).await
                 });
             }
 
