@@ -2,7 +2,6 @@ use std::future::Future;
 use std::pin::Pin;
 
 use tokio::task::JoinSet;
-use tower::Service;
 
 use crate::error::Error;
 use crate::session::swarm::{SwarmContext, SwarmExtension};
@@ -122,7 +121,7 @@ impl SwarmExtension for WebSeedExtension {
                 };
                 self.tasks.spawn(async move {
                     let mut ws = ws;
-                    ws.call(range).await
+                    ws.download(range).await
                 });
             }
 

@@ -10,15 +10,10 @@
 //! - Response size capping (anti-DoS)
 //! - Redirect resolution helper
 
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
 use http::{Request, Response};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpSocket, lookup_host};
-use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 
@@ -39,12 +34,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> HttpStream for T {}
 /// A purpose-built HTTP/1.1 client for BitTorrent use cases.
 ///
 /// Supports plain `http://` (TCP) and `https://` (TLS).
-/// Implements [`tower::Service`] with standard [`Request`] / [`Response`]
-/// types so callers can compose timeout, retry, and other middleware
-/// via [`tower::ServiceBuilder`].
-///
-/// The client is stateless — each [`call`](Service::call) performs
+/// Each [`send_request`](HttpClient::send_request) performs
 /// independent DNS resolution + TCP connect + TLS + HTTP exchange.
+///
+/// The client is stateless — timeout should be applied at the
+/// call site via [`tokio::time::timeout`].
 #[derive(Clone)]
 pub(crate) struct HttpClient;
 
@@ -53,32 +47,16 @@ impl HttpClient {
     pub fn new() -> Self {
         HttpClient
     }
-}
 
-/// Tower [`Service`] implementation — raw HTTP request with DNS + TCP + TLS.
-///
-/// Accepts a standard [`http::Request<Vec<u8>>`] and returns an
-/// [`http::Response<Vec<u8>>`].  The request body is ignored for GET
-/// (always sent as empty).  Timeout is **not** applied here — wrap
-/// with [`tower::ServiceBuilder::timeout`] at the call site.
-impl Service<Request<Vec<u8>>> for HttpClient {
-    type Response = Response<Vec<u8>>;
-    type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
-        let this = self.clone();
-        Box::pin(async move { this.send_request(req).await })
-    }
-}
-
-impl HttpClient {
     /// Send an HTTP request — DNS → TCP → TLS → send → receive → parse.
-    async fn send_request(&self, req: Request<Vec<u8>>) -> Result<Response<Vec<u8>>, Error> {
+    ///
+    /// Accepts a standard [`http::Request<Vec<u8>>`] and returns an
+    /// [`http::Response<Vec<u8>>`].  The request body is ignored for GET
+    /// (always sent as empty).  Timeout is **not** applied here — wrap
+    /// with [`tokio::time::timeout`] at the call site.
+    pub(crate) async fn send_request(
+        &self, req: Request<Vec<u8>>,
+    ) -> Result<Response<Vec<u8>>, Error> {
         let uri = req.uri().clone();
         let host = uri
             .host()

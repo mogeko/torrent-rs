@@ -1,13 +1,9 @@
-use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{UdpSocket, lookup_host};
-use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 use crate::{IntoUrl, Url};
@@ -24,7 +20,7 @@ const MAX_RETRIES: u32 = 4;
 ///
 /// Prevents a single lost datagram from hanging the entire retry loop.
 /// This is a **hardware safety net**, not a policy deadline — use
-/// [`tower::ServiceBuilder::timeout`] at the call site for the overall
+/// [`tokio::time::timeout`] at the call site for the overall
 /// announce deadline.
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -47,8 +43,8 @@ impl UdpTracker {
     /// `url` must be a `udp://` URL (e.g. `udp://tracker.example.com:6969`).
     /// Accepts `&str`, `String`, `&String`, or `Url`.
     ///
-    /// Timeout is not embedded — apply [`tower::timeout::TimeoutLayer`]
-    /// at the call site via [`tower::ServiceBuilder`].
+    /// Timeout is not embedded — apply [`tokio::time::timeout`]
+    /// at the call site.
     pub fn new(url: impl IntoUrl) -> Result<Self, Error> {
         let url = url.into_url()?;
 
@@ -173,28 +169,6 @@ impl UdpTracker {
         }
 
         Err(last_err.unwrap_or_else(|| Error::new(ErrorKind::TrackerRequestFailed)))
-    }
-}
-
-/// Tower [`Service`] implementation for UDP tracker announces.
-///
-/// This is a **raw** service — no timeout or retry is applied here.
-/// Wrap with [`tower::ServiceBuilder`] at the call site to add
-/// timeout, retry, etc.  BEP 15 protocol-level retry
-/// (connection ID expiry, multi-address fallback) remains inside
-/// `announce()` — those are protocol concerns, not middleware.
-impl Service<AnnounceRequest> for UdpTracker {
-    type Response = AnnounceResponse;
-    type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: AnnounceRequest) -> Self::Future {
-        let this = self.clone();
-        Box::pin(async move { this.announce(req).await })
     }
 }
 

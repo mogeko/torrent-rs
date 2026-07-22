@@ -6,16 +6,12 @@
 //! [`QueryHandler`] callback.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
-use tower::Service;
 
 use crate::error::{Error, ErrorKind};
 
@@ -24,8 +20,7 @@ use super::krpc::{KrpcMessage, TransactionId};
 /// A DHT KRPC request ready to be dispatched.
 ///
 /// Bundles the destination address, transaction ID, and serialized
-/// KRPC payload. This is the request type for the `tower::Service`
-/// implementation on [`DhtRpc`].
+/// KRPC payload.
 #[derive(Debug, Clone)]
 pub struct DhtRequest {
     pub addr: SocketAddr,
@@ -58,10 +53,11 @@ struct DhtRpcInner {
 ///
 /// Thin `Arc`-based handle — cloning is cheap.  Supports concurrent
 /// in-flight queries via a background receive loop and a transaction
-/// ID → oneshot channel map. Implements [`tower::Service`] so callers
-/// can compose timeout, retry, and rate-limiting middleware.
+/// ID → oneshot channel map.
 ///
-/// Incoming queries are dispatched to an optional [`QueryHandler`] callback.
+/// Timeout is not embedded — apply [`tokio::time::timeout`] at the
+/// call site.  Incoming queries are dispatched to an optional
+/// [`QueryHandler`] callback.
 #[derive(Clone)]
 pub struct DhtRpc {
     inner: Arc<DhtRpcInner>,
@@ -72,9 +68,6 @@ impl DhtRpc {
     ///
     /// Spawns a background receive loop that dispatches incoming KRPC
     /// messages to the corresponding in-flight query via transaction ID.
-    ///
-    /// Timeout is not embedded — apply [`tower::timeout::TimeoutLayer`]
-    /// at the call site via [`tower::ServiceBuilder`].
     pub async fn new(bind_addr: SocketAddr) -> Result<Self, Error> {
         let socket = bind_dht_socket(bind_addr)?;
         let inner = Arc::new(DhtRpcInner {
@@ -102,8 +95,8 @@ impl DhtRpc {
 
     /// Send a query and wait for a response via the transaction table.
     ///
-    /// Raw I/O only — no timeout is applied here.  Wrap with
-    /// [`tower::ServiceBuilder::timeout`] at the call site.
+    /// Raw I/O only — no timeout is applied here.
+    /// Wrap with [`tokio::time::timeout`] at the call site.
     pub async fn query(
         &self, addr: SocketAddr, tid: TransactionId, data: &[u8],
     ) -> Result<KrpcMessage, Error> {
@@ -128,26 +121,6 @@ impl DhtRpc {
     ) -> Result<KrpcMessage, Error> {
         let data = super::krpc::build_ping(tid, node_id);
         self.query(addr, tid, &data).await
-    }
-}
-
-/// Tower [`Service`] implementation for DHT KRPC queries.
-///
-/// This is a **raw** service — no timeout is applied here.  Wrap with
-/// [`tower::ServiceBuilder`] at the call site to add timeout, retry, or
-/// rate-limiting middleware.
-impl Service<DhtRequest> for DhtRpc {
-    type Response = KrpcMessage;
-    type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: DhtRequest) -> Self::Future {
-        let this = self.clone();
-        Box::pin(async move { this.query(req.addr, req.tid, &req.data).await })
     }
 }
 
