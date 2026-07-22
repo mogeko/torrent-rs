@@ -1,11 +1,14 @@
 mod announce;
 mod choke;
+mod extension;
 mod peer;
 mod pex;
 mod piece_pipeline;
 mod pieces;
 mod types;
 
+#[allow(unused_imports)] // used in Phase 2+
+pub(crate) use extension::{SwarmBuilder, SwarmContext, SwarmExtension};
 pub(crate) use types::{PeerEvent, PeerInfo};
 
 use std::collections::{HashMap, HashSet};
