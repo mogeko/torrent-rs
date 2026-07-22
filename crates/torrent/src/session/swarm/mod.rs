@@ -1,11 +1,14 @@
 mod announce;
 mod choke;
+mod extension;
 mod peer;
 mod pex;
 mod piece_pipeline;
 mod pieces;
+mod super_seed;
 mod types;
 
+pub(crate) use extension::{SwarmBuilder, SwarmContext, SwarmExtension};
 pub(crate) use types::{PeerEvent, PeerInfo};
 
 use std::collections::{HashMap, HashSet};
@@ -15,7 +18,6 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
-use tower::Service;
 
 use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
@@ -31,16 +33,13 @@ use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
 use self::choke::ChokeManager;
-use self::pex::PexManager;
 use self::piece_pipeline::PiecePipeline;
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
-use super::webseed::{PieceRange, WebSeedConfig, WebSeedService};
+use super::webseed::WebSeedConfig;
 use super::{
     InfoHash, PeerStatus, SessionConfig, TorrentEvent, TorrentState, TorrentStatus, TrackerStatus,
 };
-
-use self::types::{UT_PEX, UT_PEX_ID};
 
 /// Commands sent to the download loop.
 pub(crate) enum TorrentCommand {
@@ -68,8 +67,9 @@ pub(crate) struct TorrentHandle {
     pub peer_statuses: Arc<RwLock<Vec<PeerStatus>>>,
     /// Tracker communication status, updated after each announce.
     pub tracker_status: Arc<RwLock<TrackerStatus>>,
-    /// Web seed URLs collected from the torrent spec (BEP 19).
-    pub(crate) web_seeds: Vec<String>,
+    /// Web seed URLs collected from the torrent spec — passed to
+    /// [`WebSeedExtension`] during activation.
+    web_seeds: Vec<String>,
     /// Set by [`activate`](TorrentHandle::activate).
     pub storage: Option<Arc<dyn Storage>>,
     /// Set by [`activate`](TorrentHandle::activate).
@@ -303,8 +303,6 @@ impl TorrentHandle {
             ),
             corrupt_ban_threshold: config.corrupt_ban_threshold,
             announce_fallback_interval: config.announce_fallback_interval,
-            pex_enabled: config.pex_enabled,
-            pex_manager: PexManager::new(config.pex_interval),
             tracker,
             next_announce: None,
             has_announced: false,
@@ -324,20 +322,23 @@ impl TorrentHandle {
             last_downloaded: 0,
             last_uploaded: 0,
             piece_cache: Vec::new(),
-            recently_dropped: Vec::new(),
-            super_seed,
-            super_seed_assignments: HashMap::new(),
-            super_seed_unrevealed: HashSet::new(),
+            extensions: SwarmBuilder::new()
+                .maybe_pex(config.pex_enabled, config.pex_interval)
+                .maybe_super_seed(super_seed)
+                .maybe_webseed(
+                    config.webseed_enabled,
+                    self.web_seeds.clone(),
+                    WebSeedConfig {
+                        min_gap_pieces: config.webseed_min_gap_pieces,
+                        max_range_bytes: config.webseed_max_range_bytes,
+                        ..Default::default()
+                    },
+                    config.webseed_concurrency,
+                )
+                .build(),
+            blocked_requests: HashSet::new(),
+            confirmed_haves: Vec::new(),
             completed_files: HashSet::new(),
-            web_seeds: self.web_seeds.clone(),
-            webseed_config: WebSeedConfig {
-                min_gap_pieces: config.webseed_min_gap_pieces,
-                max_range_bytes: config.webseed_max_range_bytes,
-                ..Default::default()
-            },
-            webseed_service: None,
-            webseed_tasks: JoinSet::new(),
-            webseed_concurrency: config.webseed_concurrency,
             utp_socket,
         };
 
@@ -429,35 +430,20 @@ pub(crate) struct SwarmLoop {
     /// Cached completed pieces for upload serving (avoid repeated disk reads).
     /// Ordered by insertion time — oldest first for LRU eviction.
     pub(crate) piece_cache: Vec<(u32, Arc<Vec<u8>>)>,
-    /// PEX broadcast manager (BEP 11).
-    pub(crate) pex_manager: PexManager,
-    /// Enable Peer Exchange (BEP 11).
-    pub(crate) pex_enabled: bool,
-    /// Recently disconnected peers to announce in PEX dropped field.
-    pub(crate) recently_dropped: Vec<SocketAddr>,
-    /// Enable super seeding mode (BEP 16). When enabled, pieces are
-    /// uploaded to one peer at a time to minimize redundant uploads
-    /// during initial seeding.
-    pub(crate) super_seed: bool,
-    /// Piece → peer assignments for super seeding. Each key is a
-    /// piece index being exclusively uploaded to the given peer.
-    pub(crate) super_seed_assignments: HashMap<u32, SocketAddr>,
-    /// Unrevealed piece indices. These pieces have been uploaded to
-    /// the assigned peer but not yet confirmed (no HAVE received).
-    pub(crate) super_seed_unrevealed: HashSet<u32>,
+    /// Registered extensions (PEX, super seed, web seed, …).  Dispatched
+    /// sequentially in insertion order for tick and peer events.
+    pub(crate) extensions: Vec<Box<dyn SwarmExtension>>,
+    /// Requests blocked by extensions (e.g. super seed gating).
+    /// Cleared before each peer event dispatch, populated by extensions,
+    /// checked by the core Request handler.
+    pub(crate) blocked_requests: HashSet<(u32, SocketAddr)>,
+    /// Pieces whose HAVE was confirmed by an extension (e.g. super seed
+    /// reveal).  The core calls [`broadcast_have`](Self::broadcast_have)
+    /// for each entry after extensions process a peer event.
+    pub(crate) confirmed_haves: Vec<u32>,
     /// Paths of files that already reached 100% — prevents duplicate
     /// [`TorrentEvent::FileCompleted`] emissions.
     pub(crate) completed_files: HashSet<Vec<String>>,
-    /// Web seed URLs for this torrent (BEP 19).
-    pub(crate) web_seeds: Vec<String>,
-    /// Web seed configuration.
-    pub(crate) webseed_config: WebSeedConfig,
-    /// Tower-based web seed download service (BEP 19).
-    pub(crate) webseed_service: Option<WebSeedService>,
-    /// In-flight web seed download tasks.
-    pub(crate) webseed_tasks: JoinSet<Result<Vec<u32>, Error>>,
-    /// Maximum concurrent web seed HTTP requests.
-    pub(crate) webseed_concurrency: usize,
     /// Shared uTP socket from the session (BEP 29).
     pub(crate) utp_socket: Option<Arc<UtpSocket>>,
 }
@@ -473,18 +459,17 @@ impl SwarmLoop {
         let mut status_tick = tokio::time::interval(Duration::from_secs(1));
         let mut choke_tick = tokio::time::interval(self.choke_manager.interval());
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
-        let mut pex_tick = tokio::time::interval(self.pex_manager.interval());
 
-        // Create tower-based web seed download service (BEP 19).
-        // Gap-finding + HTTP Range download are driven from status_tick.
-        if !self.web_seeds.is_empty() {
-            self.webseed_service = Some(WebSeedService::new(
-                self.web_seeds.clone(),
-                self.piece_mgr.clone(),
-                self.storage.clone(),
-                self.metainfo.clone(),
-                self.webseed_config.clone(),
-            ));
+        // Run extension on_start hooks (e.g. web seed service init).
+        {
+            let mut exts = std::mem::take(&mut self.extensions);
+            let mut ctx = self.build_context();
+            for ext in &mut exts {
+                if let Err(e) = ext.on_start(&mut ctx).await {
+                    tracing::warn!("extension on_start failed: {}", e);
+                }
+            }
+            self.extensions = exts;
         }
 
         loop {
@@ -511,6 +496,35 @@ impl SwarmLoop {
                     }
                 }
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
+                    // Clone before the core handler takes ownership,
+                    // so extensions can inspect the event afterwards.
+                    let ext_event = event.clone();
+
+                    // Clear pre-event state used for extension ↔ core communication.
+                    self.blocked_requests.clear();
+                    self.confirmed_haves.clear();
+
+                    // Dispatch to extensions FIRST so they can gate
+                    // requests (super seed) before the core sends data.
+                    {
+                        let mut exts = std::mem::take(&mut self.extensions);
+                        let mut ctx = self.build_context();
+                        for ext in &mut exts {
+                            if let Err(e) = ext.on_peer_event(addr, &ext_event, &mut ctx).await {
+                                tracing::warn!("extension on_peer_event failed: {}", e);
+                            }
+                        }
+                        self.extensions = exts;
+                    }
+
+                    // Process confirmed_haves set by extensions.
+                    for index in std::mem::take(&mut self.confirmed_haves) {
+                        if let Err(e) = self.broadcast_have(index).await {
+                            tracing::warn!("broadcast_have failed for piece {}: {}", index, e);
+                        }
+                    }
+
+                    // Core message handling.
                     self.handle_peer_event(addr, event).await;
                     if !self.piece_mgr.read().await.missing_pieces().is_empty()
                         && let Err(e) = self.piece_pipeline.fill(
@@ -523,22 +537,19 @@ impl SwarmLoop {
                 _ = status_tick.tick() => {
                     self.update_status().await;
                     self.announce_if_needed().await;
-                    // BEP 16: acquire piece_mgr once for both the seeding
-                    // check and the bitfield needed by the selector.
-                    if self.super_seed {
-                        let pm = self.piece_mgr.read().await;
-                        if pm.missing_pieces().is_empty() {
-                            let our_bf = pm.bitfield().to_vec();
-                            drop(pm);
-                            self.super_seed_select_piece(&our_bf);
-                        }
-                    }
                     if let Err(e) = self.connect_pending().await {
                         tracing::warn!("failed to connect pending peers: {}", e);
                     }
-                    // BEP 19: web seed gap-find + HTTP Range download.
-                    if self.webseed_service.is_some() {
-                        self.try_webseed_download().await;
+                    // Dispatch tick to extensions (PEX broadcast, …).
+                    {
+                        let mut exts = std::mem::take(&mut self.extensions);
+                        let mut ctx = self.build_context();
+                        for ext in &mut exts {
+                            if let Err(e) = ext.on_tick(&mut ctx).await {
+                                tracing::warn!("extension on_tick failed: {}", e);
+                            }
+                        }
+                        self.extensions = exts;
                     }
                 }
                 _ = choke_tick.tick() => {
@@ -554,38 +565,34 @@ impl SwarmLoop {
                 _ = stale_tick.tick() => {
                     self.piece_pipeline.expire_stale(&mut self.peers, &self.peer_mgr).await;
                 }
-                _ = pex_tick.tick() => {
-                    if self.pex_enabled {
-                        if let Err(e) = self.pex_manager.broadcast(
-                            &self.peers,
-                            &mut self.recently_dropped,
-                            &self.peer_mgr,
-                        ).await {
-                            tracing::warn!("failed to broadcast PEX: {}", e);
-                        }
-                    }
-                }
-                Some(result) = async {
-                    if self.webseed_tasks.is_empty() {
-                        std::future::pending().await
-                    } else {
-                        self.webseed_tasks.join_next().await
-                    }
-                }, if !self.webseed_tasks.is_empty() => {
-                    match result {
-                        Ok(Ok(pieces)) if !pieces.is_empty() => {
-                            tracing::debug!("web seed: downloaded {} pieces", pieces.len());
-                        }
-                        Ok(Err(e)) => {
-                            tracing::debug!("web seed: download failed: {}", e);
-                        }
-                        Err(join_err) => {
-                            tracing::warn!("web seed: task panicked: {}", join_err);
-                        }
-                        _ => {}
-                    }
-                }
             }
+        }
+    }
+
+    /// Build a [`SwarmContext`] borrowing the core loop's shared state.
+    ///
+    /// Extensions receive this context in `on_start`, `on_tick`, and
+    /// `on_peer_event`, giving them read/write access to peers, locks,
+    /// and immutable metadata.
+    ///
+    /// Callers must use [`std::mem::take`] on `self.extensions` before
+    /// calling this method to avoid a borrow conflict (this method
+    /// borrows `self.peers` mutably while the caller needs to iterate
+    /// `self.extensions` mutably).
+    fn build_context(&mut self) -> SwarmContext<'_> {
+        SwarmContext {
+            info_hash: self.info_hash,
+            metainfo: &self.metainfo,
+            storage: self.storage.clone(),
+            event_tx: &self.event_tx,
+            listen_port: self.listen_port,
+            peer_id: self.peer_id,
+            piece_mgr: self.piece_mgr.clone(),
+            peer_mgr: &self.peer_mgr,
+            status: &self.status,
+            peers: &mut self.peers,
+            blocked_requests: &mut self.blocked_requests,
+            confirmed_haves: &mut self.confirmed_haves,
         }
     }
 
@@ -662,8 +669,6 @@ impl SwarmLoop {
             status.bitfield = bitfield;
             status.elapsed = self.started_at.elapsed();
             status.total_wasted = self.total_wasted;
-            status.super_seed_active = self.super_seed;
-            status.super_seed_remaining = self.super_seed_unrevealed.len() as u32;
 
             if is_complete && status.state != TorrentState::Seeding {
                 tracing::info!(
@@ -812,9 +817,12 @@ impl SwarmLoop {
 
         let mut pi = PeerInfo::new();
 
-        // BEP 10: register our enabled extensions.
-        if self.pex_enabled {
-            pi.our_extension_ids.insert(UT_PEX.to_string(), UT_PEX_ID);
+        // BEP 10: collect our enabled LTEP extensions from all registered
+        // extensions (PEX, future: metadata exchange, …).
+        for ext in &self.extensions {
+            for (name, id) in ext.ltep_extensions() {
+                pi.our_extension_ids.insert(name, id);
+            }
         }
 
         // Send the LTEP handshake if we have any extensions to
@@ -886,64 +894,6 @@ impl SwarmLoop {
         {
             tracing::warn!("failed to send LTEP handshake to {}: {}", addr, e);
         }
-    }
-
-    /// Try to download a missing piece gap via web seed (BEP 19).
-    async fn try_webseed_download(&mut self) {
-        // Respect concurrency limit.
-        if self.webseed_tasks.len() >= self.webseed_concurrency {
-            return;
-        }
-
-        use crate::session::webseed::{find_largest_gap, gap_within_file};
-
-        let ws = match self.webseed_service.as_ref() {
-            Some(ws) => ws.clone(),
-            None => return,
-        };
-
-        let (bitfield, piece_length) = {
-            let pm = self.piece_mgr.read().await;
-            (pm.bitfield().to_vec(), self.metainfo.info.piece_length)
-        };
-
-        let gap = find_largest_gap(&bitfield).or_else(|| {
-            gap_within_file(
-                &bitfield,
-                &self.metainfo,
-                piece_length,
-                self.webseed_config.min_gap_pieces,
-            )
-        });
-
-        let Some((gap_start, gap_size)) = gap else {
-            return;
-        };
-
-        let start_byte = gap_start as u64 * piece_length;
-        let end_byte = (start_byte + self.webseed_config.max_range_bytes)
-            .min(self.metainfo.info.total_size())
-            .saturating_sub(1);
-
-        tracing::debug!(
-            "web seed: found gap of {} pieces at index {}, requesting bytes [{}-{}] ({:.1}KB) [slot {}/{}]",
-            gap_size,
-            gap_start,
-            start_byte,
-            end_byte,
-            (end_byte - start_byte + 1) as f64 / 1024.0,
-            self.webseed_tasks.len(),
-            self.webseed_concurrency,
-        );
-
-        let range = PieceRange {
-            start_byte,
-            end_byte,
-        };
-        self.webseed_tasks.spawn(async move {
-            let mut ws = ws;
-            ws.call(range).await
-        });
     }
 }
 
