@@ -1,28 +1,26 @@
 //! Web seed download engine (BEP 19).
 //!
-//! Web seeds are standard HTTP/FTP servers that host torrent files.
-//! This module downloads pieces from web seed URLs using HTTP Range
-//! requests, filling gaps left by P2P peer downloads.
-//!
-//! # Module Layout
-//!
-//! - [`types`] — configuration, health scoring, scheduler↔fetcher messages
-//! - [`fetcher`] — passive HTTP download worker (FetchTask)
-//! - [`scheduler`] — centralized work dispatch (WebSeedScheduler)
+//! Downloads pieces from web seed URLs using HTTP Range requests via
+//! a tower [`Service<PieceRange>`] implemented by [`WebSeedService`].
+//! Gap-finding utilities in [`gap`] locate missing piece ranges in
+//! the bitfield; URL health tracking and UCB multi-armed bandit
+//! selection are handled internally by the service.
 //!
 //! # Architecture
 //!
-//! The scheduler reads the piece bitfield, selects the largest gap,
-//! picks the best URL by UCB-weighted throughput score, and dispatches
-//! [`WorkItem`]s to fetcher tasks via mpsc channels.  Fetchers handle
-//! HTTP Range requests, SHA-1 verification, and storage writes.
+//! ```text
+//! SwarmLoop::status_tick()
+//!   ├── find_largest_gap() / gap_within_file()
+//!   └── webseed_service.call(PieceRange)
+//!         ├── UCB select best URL
+//!         ├── HTTP Range download
+//!         └── SHA-1 verify + storage write
+//! ```
 
-mod fetcher;
-mod scheduler;
+mod gap;
+mod service;
 mod types;
 
-pub(crate) use self::fetcher::FetchTask;
-pub(crate) use self::scheduler::{WebSeedScheduler, deduplicate_urls};
-pub(crate) use self::types::{
-    UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WorkItem, WorkResult,
-};
+pub(crate) use self::gap::{find_largest_gap, gap_within_file};
+pub(crate) use self::service::WebSeedService;
+pub(crate) use self::types::{PieceRange, WebSeedConfig};

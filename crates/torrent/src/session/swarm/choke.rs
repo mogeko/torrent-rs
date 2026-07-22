@@ -1,51 +1,69 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use rand::RngExt;
+use tokio::sync::RwLock;
 
 use crate::error::Error;
 use crate::peer::PeerMessage;
+use crate::piece::PieceManager;
 
-use super::SwarmLoop;
-use super::types::BLOCK_SIZE;
+use super::types::{ActiveDownload, BLOCK_SIZE, PeerInfo};
+use super::{PeerManager, UploadManager};
 
-impl SwarmLoop {
-    /// Returns `true` when we hold every piece — we are in seeding mode.
-    pub(super) async fn is_seeding(&self) -> bool {
-        let pm = self.piece_mgr.read().await;
-        pm.missing_pieces().is_empty()
+/// Periodic choke/unchoke decision engine (BEP 3 tit-for-tat).
+///
+/// Extracted from [`SwarmLoop`] so the choke algorithm can be unit-tested
+/// independently.  Called from the `choke_tick` branch of the event loop.
+pub(crate) struct ChokeManager {
+    upload_mgr: UploadManager,
+    interval: Duration,
+    snub_timeout: Duration,
+}
+
+impl ChokeManager {
+    pub fn new(max_uploads: u32, interval: Duration, snub_timeout: Duration) -> Self {
+        ChokeManager {
+            upload_mgr: UploadManager::new(max_uploads),
+            interval,
+            snub_timeout,
+        }
+    }
+
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    /// Check whether a peer currently holds an unchoke slot.
+    pub fn is_unchoked(&self, addr: &SocketAddr) -> bool {
+        self.upload_mgr.is_unchoked(addr)
     }
 
     /// Run a choke/unchoke round: select top uploaders + optimistic unchoke.
-    ///
-    /// In download mode (BEP 3 tit-for-tat): unchoke peers that upload the
-    /// most TO us, using `downloaded_this_round` (peer → us).  Peers that
-    /// haven't sent data for >`snub_timeout` are snubbed.
-    ///
-    /// In seeding mode: unchoke peers that download the most FROM us, using
-    /// `uploaded_this_round` (us → peer).  Only peers that have sent
-    /// `Interested` are considered; the snub check is replaced by the
-    /// `peer_interested` flag.
-    pub(super) async fn run_choke_unchoke(&mut self) -> Result<(), Error> {
-        let max_uploads = self.upload_mgr.max_uploads();
-
-        if max_uploads == 0 {
+    pub async fn run_round(
+        &mut self, peers: &mut HashMap<SocketAddr, PeerInfo>,
+        active_downloads: &mut HashMap<u32, ActiveDownload>, piece_mgr: &RwLock<PieceManager>,
+        peer_mgr: &RwLock<PeerManager>,
+    ) -> Result<(), Error> {
+        let max = self.upload_mgr.max_uploads() as usize;
+        if max == 0 {
             return Ok(());
         }
 
-        let seeding = self.is_seeding().await;
+        let seeding = {
+            let pm = piece_mgr.read().await;
+            pm.missing_pieces().is_empty()
+        };
 
-        // Build a sorted peer list.
-        //  - Downloading: rank by downloaded_this_round (peer → us, BEP 3 tit-for-tat).
-        //  - Seeding:     rank by uploaded_this_round   (us → peer), only interested peers.
         let mut peer_stats: Vec<(SocketAddr, u64)> = if seeding {
-            self.peers
+            peers
                 .iter()
                 .filter(|(_, info)| info.peer_interested)
                 .map(|(addr, info)| (*addr, info.uploaded_this_round))
                 .collect()
         } else {
-            self.peers
+            peers
                 .iter()
                 .map(|(addr, info)| (*addr, info.downloaded_this_round))
                 .collect()
@@ -53,7 +71,7 @@ impl SwarmLoop {
 
         peer_stats.sort_by_key(|(_, u)| std::cmp::Reverse(*u));
 
-        let top_count = ((max_uploads - 1) as usize).min(peer_stats.len());
+        let top_count = (max - 1).min(peer_stats.len());
         let mut to_unchoke: HashSet<SocketAddr> =
             peer_stats.iter().take(top_count).map(|(a, _)| *a).collect();
 
@@ -65,35 +83,28 @@ impl SwarmLoop {
         }
 
         if seeding {
-            // Seeding snub: retain only peers that are still interested.
-            to_unchoke.retain(|addr| self.peers.get(addr).is_some_and(|p| p.peer_interested));
-
-            // Refill from the sorted list (respect the same filter).
+            to_unchoke.retain(|addr| peers.get(addr).is_some_and(|p| p.peer_interested));
             for (addr, _) in &peer_stats {
-                if to_unchoke.len() >= max_uploads as usize {
+                if to_unchoke.len() >= max {
                     break;
                 }
-                let interested = self.peers.get(addr).is_some_and(|p| p.peer_interested);
-                if interested {
+                if peers.get(addr).is_some_and(|p| p.peer_interested) {
                     to_unchoke.insert(*addr);
                 }
             }
         } else {
-            // Download-mode snubbing: remove peers idle for >snub_timeout (BEP 3).
             let snub_timeout = self.snub_timeout;
             to_unchoke.retain(|addr| {
-                self.peers.get(addr).is_none_or(|p| {
+                peers.get(addr).is_none_or(|p| {
                     p.last_data_received
                         .is_some_and(|t| t.elapsed() < snub_timeout)
                 })
             });
-
-            // Fill remaining slots from rate-sorted list, respecting snub filter.
             for (addr, _) in &peer_stats {
-                if to_unchoke.len() >= max_uploads as usize {
+                if to_unchoke.len() >= max {
                     break;
                 }
-                let is_active = self.peers.get(addr).is_some_and(|p| {
+                let is_active = peers.get(addr).is_none_or(|p| {
                     p.last_data_received
                         .is_some_and(|t| t.elapsed() < snub_timeout)
                 });
@@ -103,7 +114,7 @@ impl SwarmLoop {
             }
         }
 
-        let pm = self.peer_mgr.read().await;
+        let pm = peer_mgr.read().await;
 
         for addr in &to_unchoke {
             if !self.upload_mgr.is_unchoked(addr) {
@@ -117,16 +128,12 @@ impl SwarmLoop {
         let choked_count = previously_unchoked.len();
         for addr in previously_unchoked {
             if !to_unchoke.contains(&addr) {
-                // Cancel outstanding requests before choking.
-                // BEP 6: keep allowed-fast requests alive — only cancel
-                // requests that aren't in our_allowed_fast.
-                if let Some(peer) = self.peers.get(&addr) {
+                if let Some(peer) = peers.get(&addr) {
                     for (index, begin, _) in peer.pipeline.iter().flatten() {
                         if peer.our_allowed_fast.contains(index) {
                             continue;
                         }
-                        let cancel_len = self
-                            .active_downloads
+                        let cancel_len = active_downloads
                             .get(index)
                             .map(|dl| dl.block_len(*begin))
                             .unwrap_or(BLOCK_SIZE);
@@ -138,13 +145,12 @@ impl SwarmLoop {
                         let _ = pm.send_to(&addr, &msg).await;
                     }
                 }
-                // Clear pipeline for this peer (BEP 6: keep allowed-fast slots).
-                if let Some(peer) = self.peers.get_mut(&addr) {
+                if let Some(peer) = peers.get_mut(&addr) {
                     for slot in &mut peer.pipeline {
                         if let Some((index, begin, _)) = *slot
                             && !peer.our_allowed_fast.contains(&index)
                         {
-                            if let Some(dl) = self.active_downloads.get_mut(&index) {
+                            if let Some(dl) = active_downloads.get_mut(&index) {
                                 let block_idx = (begin / dl.block_size) as usize;
                                 if block_idx < dl.requested.len() {
                                     dl.requested[block_idx] = None;
@@ -159,8 +165,7 @@ impl SwarmLoop {
             }
         }
 
-        // Reset per-round counters
-        for info in self.peers.values_mut() {
+        for info in peers.values_mut() {
             info.uploaded_this_round = 0;
             info.downloaded_this_round = 0;
         }
@@ -169,7 +174,7 @@ impl SwarmLoop {
             "choke round: {} unchoked, {} choked ({} peers total)",
             to_unchoke.len(),
             choked_count.saturating_sub(to_unchoke.len()),
-            self.peers.len(),
+            peers.len(),
         );
 
         Ok(())

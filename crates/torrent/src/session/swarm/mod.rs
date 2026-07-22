@@ -2,19 +2,20 @@ mod announce;
 mod choke;
 mod peer;
 mod pex;
+mod piece_pipeline;
 mod pieces;
 mod types;
 
-pub(crate) use types::{ActiveDownload, PeerEvent, PeerInfo};
+pub(crate) use types::{PeerEvent, PeerInfo};
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Notify, RwLock, Semaphore, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
-use url::Url;
+use tower::Service;
 
 use crate::bencode::encode as bencode_encode;
 use crate::error::Error;
@@ -24,17 +25,17 @@ use crate::peer::utp::UtpSocket;
 use crate::peer::{
     ExtensionNegotiation, PeerConnection, PeerId, PeerMessage, compute_allowed_fast_set,
 };
-use crate::piece::{PieceManager, PieceSelector, RarestFirst};
+use crate::piece::{PieceManager, RarestFirst};
 use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
+use self::choke::ChokeManager;
+use self::pex::PexManager;
+use self::piece_pipeline::PiecePipeline;
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
-use super::webseed::{
-    FetchTask, UrlActivity, UrlHealth, UrlKind, UrlState, WebSeedConfig, WebSeedScheduler,
-    WorkItem, WorkResult, deduplicate_urls,
-};
+use super::webseed::{PieceRange, WebSeedConfig, WebSeedService};
 use super::{
     InfoHash, PeerStatus, SessionConfig, TorrentEvent, TorrentState, TorrentStatus, TrackerStatus,
 };
@@ -275,14 +276,6 @@ impl TorrentHandle {
         let peer_id = PeerId::random();
         let tracker = Tracker::from_torrent(metainfo.clone());
 
-        let webseed_config = WebSeedConfig {
-            min_gap_pieces: config.webseed_min_gap_pieces,
-            max_range_bytes: config.webseed_max_range_bytes,
-            max_concurrent: config.webseed_max_concurrent,
-            park_threshold: 5,
-            park_retry_interval: Duration::from_secs(60),
-        };
-        let webseed_notify = Arc::new(Notify::new());
         let utp_socket = self.utp_socket.clone();
 
         let mut swarm_loop = SwarmLoop {
@@ -301,27 +294,30 @@ impl TorrentHandle {
             listen_port: config.listen_port,
             announce_ip: config.announce_ip,
             announce_ipv6: config.announce_ipv6,
-            request_timeout: config.request_timeout,
             tracker_timeout: config.tracker_timeout,
-            max_concurrent_pieces: config.max_concurrent_pieces,
             piece_cache_size: config.piece_cache_size,
-            endgame_threshold: config.endgame_threshold,
-            choke_interval: config.choke_interval,
-            snub_timeout: config.snub_timeout,
+            choke_manager: ChokeManager::new(
+                config.max_uploads,
+                config.choke_interval,
+                config.snub_timeout,
+            ),
             corrupt_ban_threshold: config.corrupt_ban_threshold,
             announce_fallback_interval: config.announce_fallback_interval,
             pex_enabled: config.pex_enabled,
-            pex_interval: config.pex_interval,
+            pex_manager: PexManager::new(config.pex_interval),
             tracker,
             next_announce: None,
             has_announced: false,
             announced_completed: false,
             peers: HashMap::new(),
-            active_downloads: HashMap::new(),
-            selector: Box::new(RarestFirst),
+            piece_pipeline: PiecePipeline::new(
+                Box::new(RarestFirst),
+                config.max_concurrent_pieces,
+                config.endgame_threshold,
+                config.request_timeout,
+            ),
             peer_msg_rx,
             peer_msg_tx,
-            upload_mgr: UploadManager::new(config.max_uploads),
             total_downloaded: 0,
             total_uploaded: 0,
             total_wasted: 0,
@@ -334,10 +330,14 @@ impl TorrentHandle {
             super_seed_unrevealed: HashSet::new(),
             completed_files: HashSet::new(),
             web_seeds: self.web_seeds.clone(),
-            webseed_config,
-            webseed_scheduler: None,
-            webseed_fetchers: Vec::new(),
-            webseed_notify,
+            webseed_config: WebSeedConfig {
+                min_gap_pieces: config.webseed_min_gap_pieces,
+                max_range_bytes: config.webseed_max_range_bytes,
+                ..Default::default()
+            },
+            webseed_service: None,
+            webseed_tasks: JoinSet::new(),
+            webseed_concurrency: config.webseed_concurrency,
             utp_socket,
         };
 
@@ -390,21 +390,12 @@ pub(crate) struct SwarmLoop {
     pub(crate) announce_ip: Option<Ipv4Addr>,
     /// Explicit IPv6 address to announce (BEP 7).
     pub(crate) announce_ipv6: Option<Ipv6Addr>,
-    /// Timeout for a single block request.
-    pub(crate) request_timeout: Duration,
-    /// Timeout for tracker announce calls (applied via tower middleware
-    /// at the call site in [`announce_to_tracker`]).
+    /// Timeout for tracker announce calls.
     pub(crate) tracker_timeout: Duration,
-    /// Maximum concurrent piece downloads.
-    pub(crate) max_concurrent_pieces: usize,
     /// How many completed pieces to cache for upload serving.
     pub(crate) piece_cache_size: usize,
-    /// EndGame threshold (switch when fewer pieces remain).
-    pub(crate) endgame_threshold: usize,
-    /// Choke/unchoke interval.
-    pub(crate) choke_interval: Duration,
-    /// Snub timeout for idle peers.
-    pub(crate) snub_timeout: Duration,
+    /// Choke/unchoke manager (BEP 3 tit-for-tat).
+    pub(crate) choke_manager: ChokeManager,
     /// Corrupt block ban threshold.
     pub(crate) corrupt_ban_threshold: u32,
     /// Re-announce fallback interval on tracker error.
@@ -419,16 +410,12 @@ pub(crate) struct SwarmLoop {
     pub(crate) announced_completed: bool,
     /// Per-peer protocol state.
     pub(crate) peers: HashMap<SocketAddr, PeerInfo>,
-    /// Currently active piece downloads.
-    pub(crate) active_downloads: HashMap<u32, ActiveDownload>,
-    /// Piece selection strategy (default: rarest-first).
-    pub(crate) selector: Box<dyn PieceSelector>,
+    /// Piece download pipeline (selection, assignment, expiry).
+    pub(crate) piece_pipeline: PiecePipeline,
     /// Receive peer messages from reader tasks.
     pub(crate) peer_msg_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
     /// Clone for spawning new reader tasks.
     pub(crate) peer_msg_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    /// Upload slot manager.
-    pub(crate) upload_mgr: UploadManager,
     /// Total bytes downloaded.
     pub(crate) total_downloaded: u64,
     /// Total bytes uploaded.
@@ -442,12 +429,12 @@ pub(crate) struct SwarmLoop {
     /// Cached completed pieces for upload serving (avoid repeated disk reads).
     /// Ordered by insertion time — oldest first for LRU eviction.
     pub(crate) piece_cache: Vec<(u32, Arc<Vec<u8>>)>,
-    /// Recently disconnected peers to announce in PEX dropped field.
-    pub(crate) recently_dropped: Vec<SocketAddr>,
+    /// PEX broadcast manager (BEP 11).
+    pub(crate) pex_manager: PexManager,
     /// Enable Peer Exchange (BEP 11).
     pub(crate) pex_enabled: bool,
-    /// PEX broadcast interval.
-    pub(crate) pex_interval: Duration,
+    /// Recently disconnected peers to announce in PEX dropped field.
+    pub(crate) recently_dropped: Vec<SocketAddr>,
     /// Enable super seeding mode (BEP 16). When enabled, pieces are
     /// uploaded to one peer at a time to minimize redundant uploads
     /// during initial seeding.
@@ -465,12 +452,12 @@ pub(crate) struct SwarmLoop {
     pub(crate) web_seeds: Vec<String>,
     /// Web seed configuration.
     pub(crate) webseed_config: WebSeedConfig,
-    /// Handle for the web seed scheduler task.
-    pub(crate) webseed_scheduler: Option<JoinHandle<()>>,
-    /// Handles for spawned fetcher tasks (one per URL).
-    pub(crate) webseed_fetchers: Vec<JoinHandle<()>>,
-    /// Notify the web seed scheduler when a piece is completed by a P2P peer.
-    pub(crate) webseed_notify: Arc<Notify>,
+    /// Tower-based web seed download service (BEP 19).
+    pub(crate) webseed_service: Option<WebSeedService>,
+    /// In-flight web seed download tasks.
+    pub(crate) webseed_tasks: JoinSet<Result<Vec<u32>, Error>>,
+    /// Maximum concurrent web seed HTTP requests.
+    pub(crate) webseed_concurrency: usize,
     /// Shared uTP socket from the session (BEP 29).
     pub(crate) utp_socket: Option<Arc<UtpSocket>>,
 }
@@ -484,82 +471,20 @@ impl SwarmLoop {
         }
 
         let mut status_tick = tokio::time::interval(Duration::from_secs(1));
-        let mut choke_tick = tokio::time::interval(self.choke_interval);
+        let mut choke_tick = tokio::time::interval(self.choke_manager.interval());
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
-        let mut pex_tick = tokio::time::interval(self.pex_interval);
+        let mut pex_tick = tokio::time::interval(self.pex_manager.interval());
 
-        // Spawn web seed scheduler + fetchers (BEP 19).
-        // The scheduler reads the bitfield, selects gaps, and dispatches
-        // work to fetcher tasks via mpsc channels.  Each fetcher is a
-        // passive worker that downloads whatever the scheduler assigns.
+        // Create tower-based web seed download service (BEP 19).
+        // Gap-finding + HTTP Range download are driven from status_tick.
         if !self.web_seeds.is_empty() {
-            // Deduplicate URLs pointing to the same origin (BEP 19 mirrors
-            // often list many URLs for the same physical server).
-            let parsed: Vec<Url> = self
-                .web_seeds
-                .iter()
-                .filter_map(|s| {
-                    Url::parse(s)
-                        .map_err(|e| tracing::warn!("invalid web seed URL '{}': {}", s, e))
-                        .ok()
-                })
-                .collect();
-            let (unique, removed) = deduplicate_urls(parsed);
-            if removed > 0 {
-                tracing::info!(
-                    "web seed: {} URLs deduplicated to {} unique origins",
-                    removed + unique.len(),
-                    unique.len(),
-                );
-            }
-
-            let max_concurrent = self.webseed_config.max_concurrent;
-            let semaphore = Arc::new(Semaphore::new(max_concurrent));
-            let (result_tx, result_rx) = mpsc::channel::<WorkResult>(max_concurrent * 2);
-            let (mut urls, mut fetchers) = (Vec::new(), Vec::new());
-
-            for (url_index, url) in unique.into_iter().enumerate() {
-                let (work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
-                let result_tx = result_tx.clone();
-
-                let fetcher = FetchTask::new(
-                    url.clone(),
-                    url_index,
-                    self.piece_mgr.clone(),
-                    self.storage.clone(),
-                    self.metainfo.clone(),
-                    work_rx,
-                    result_tx,
-                    semaphore.clone(),
-                );
-                tracing::trace!("web seed: spawning fetcher for {url}");
-                fetchers.push(tokio::spawn(async move { fetcher.run().await }));
-
-                urls.push(UrlState {
-                    url: url.clone(),
-                    url_kind: UrlKind::classify(&url),
-                    health: UrlHealth::default(),
-                    work_tx,
-                    activity: UrlActivity::Active,
-                });
-            }
-
-            if !urls.is_empty() {
-                let scheduler = WebSeedScheduler::new(
-                    urls,
-                    self.piece_mgr.clone(),
-                    self.metainfo.clone(),
-                    self.webseed_config.clone(),
-                    result_rx,
-                    self.webseed_notify.clone(),
-                );
-                tracing::debug!(
-                    "spawning web seed scheduler for {} URLs",
-                    self.web_seeds.len()
-                );
-                self.webseed_scheduler = Some(tokio::spawn(async move { scheduler.run().await }));
-            }
-            self.webseed_fetchers = fetchers;
+            self.webseed_service = Some(WebSeedService::new(
+                self.web_seeds.clone(),
+                self.piece_mgr.clone(),
+                self.storage.clone(),
+                self.metainfo.clone(),
+                self.webseed_config.clone(),
+            ));
         }
 
         loop {
@@ -581,19 +506,17 @@ impl SwarmLoop {
                         }
                         Some(TorrentCommand::Cancel) | None => {
                             let _ = self.announce_to_tracker(AnnounceEvent::Stopped).await;
-                            if let Some(scheduler) = self.webseed_scheduler.take() {
-                                scheduler.abort();
-                            }
-                            for task in self.webseed_fetchers.drain(..) {
-                                task.abort();
-                            }
                             break;
                         }
                     }
                 }
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
                     self.handle_peer_event(addr, event).await;
-                    if !self.is_seeding().await && let Err(e) = self.fill_pipelines().await {
+                    if !self.piece_mgr.read().await.missing_pieces().is_empty()
+                        && let Err(e) = self.piece_pipeline.fill(
+                            &mut self.peers, &self.piece_mgr, &self.peer_mgr, &self.metainfo,
+                        ).await
+                    {
                             tracing::warn!("failed to fill pipelines: {}", e);
                         }
                 }
@@ -613,20 +536,53 @@ impl SwarmLoop {
                     if let Err(e) = self.connect_pending().await {
                         tracing::warn!("failed to connect pending peers: {}", e);
                     }
+                    // BEP 19: web seed gap-find + HTTP Range download.
+                    if self.webseed_service.is_some() {
+                        self.try_webseed_download().await;
+                    }
                 }
                 _ = choke_tick.tick() => {
-                    if let Err(e) = self.run_choke_unchoke().await {
+                    if let Err(e) = self.choke_manager.run_round(
+                        &mut self.peers,
+                        self.piece_pipeline.active_downloads_mut(),
+                        &self.piece_mgr,
+                        &self.peer_mgr,
+                    ).await {
                         tracing::warn!("failed to run choke/unchoke: {}", e);
                     }
                 }
                 _ = stale_tick.tick() => {
-                    self.expire_stale_requests().await;
+                    self.piece_pipeline.expire_stale(&mut self.peers, &self.peer_mgr).await;
                 }
                 _ = pex_tick.tick() => {
                     if self.pex_enabled {
-                        if let Err(e) = self.broadcast_pex().await {
+                        if let Err(e) = self.pex_manager.broadcast(
+                            &self.peers,
+                            &mut self.recently_dropped,
+                            &self.peer_mgr,
+                        ).await {
                             tracing::warn!("failed to broadcast PEX: {}", e);
                         }
+                    }
+                }
+                Some(result) = async {
+                    if self.webseed_tasks.is_empty() {
+                        std::future::pending().await
+                    } else {
+                        self.webseed_tasks.join_next().await
+                    }
+                }, if !self.webseed_tasks.is_empty() => {
+                    match result {
+                        Ok(Ok(pieces)) if !pieces.is_empty() => {
+                            tracing::debug!("web seed: downloaded {} pieces", pieces.len());
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!("web seed: download failed: {}", e);
+                        }
+                        Err(join_err) => {
+                            tracing::warn!("web seed: task panicked: {}", join_err);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -930,6 +886,64 @@ impl SwarmLoop {
         {
             tracing::warn!("failed to send LTEP handshake to {}: {}", addr, e);
         }
+    }
+
+    /// Try to download a missing piece gap via web seed (BEP 19).
+    async fn try_webseed_download(&mut self) {
+        // Respect concurrency limit.
+        if self.webseed_tasks.len() >= self.webseed_concurrency {
+            return;
+        }
+
+        use crate::session::webseed::{find_largest_gap, gap_within_file};
+
+        let ws = match self.webseed_service.as_ref() {
+            Some(ws) => ws.clone(),
+            None => return,
+        };
+
+        let (bitfield, piece_length) = {
+            let pm = self.piece_mgr.read().await;
+            (pm.bitfield().to_vec(), self.metainfo.info.piece_length)
+        };
+
+        let gap = find_largest_gap(&bitfield).or_else(|| {
+            gap_within_file(
+                &bitfield,
+                &self.metainfo,
+                piece_length,
+                self.webseed_config.min_gap_pieces,
+            )
+        });
+
+        let Some((gap_start, gap_size)) = gap else {
+            return;
+        };
+
+        let start_byte = gap_start as u64 * piece_length;
+        let end_byte = (start_byte + self.webseed_config.max_range_bytes)
+            .min(self.metainfo.info.total_size())
+            .saturating_sub(1);
+
+        tracing::debug!(
+            "web seed: found gap of {} pieces at index {}, requesting bytes [{}-{}] ({:.1}KB) [slot {}/{}]",
+            gap_size,
+            gap_start,
+            start_byte,
+            end_byte,
+            (end_byte - start_byte + 1) as f64 / 1024.0,
+            self.webseed_tasks.len(),
+            self.webseed_concurrency,
+        );
+
+        let range = PieceRange {
+            start_byte,
+            end_byte,
+        };
+        self.webseed_tasks.spawn(async move {
+            let mut ws = ws;
+            ws.call(range).await
+        });
     }
 }
 
