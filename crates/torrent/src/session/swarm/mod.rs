@@ -8,7 +8,6 @@ mod pieces;
 mod super_seed;
 mod types;
 
-#[allow(unused_imports)]
 pub(crate) use extension::{SwarmBuilder, SwarmContext, SwarmExtension};
 pub(crate) use types::{PeerEvent, PeerInfo};
 
@@ -34,12 +33,10 @@ use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
 use self::choke::ChokeManager;
-use self::pex::PexExtension;
 use self::piece_pipeline::PiecePipeline;
-use self::super_seed::SuperSeedExtension;
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
-use super::webseed::{WebSeedConfig, WebSeedExtension};
+use super::webseed::WebSeedConfig;
 use super::{
     InfoHash, PeerStatus, SessionConfig, TorrentEvent, TorrentState, TorrentStatus, TrackerStatus,
 };
@@ -325,27 +322,20 @@ impl TorrentHandle {
             last_downloaded: 0,
             last_uploaded: 0,
             piece_cache: Vec::new(),
-            extensions: {
-                let mut exts: Vec<Box<dyn SwarmExtension>> = Vec::new();
-                if config.pex_enabled {
-                    exts.push(Box::new(PexExtension::new(config.pex_interval)));
-                }
-                if super_seed {
-                    exts.push(Box::new(SuperSeedExtension::new()));
-                }
-                if config.webseed_enabled && !self.web_seeds.is_empty() {
-                    exts.push(Box::new(WebSeedExtension::new(
-                        self.web_seeds.clone(),
-                        WebSeedConfig {
-                            min_gap_pieces: config.webseed_min_gap_pieces,
-                            max_range_bytes: config.webseed_max_range_bytes,
-                            ..Default::default()
-                        },
-                        config.webseed_concurrency,
-                    )));
-                }
-                exts
-            },
+            extensions: SwarmBuilder::new()
+                .maybe_pex(config.pex_enabled, config.pex_interval)
+                .maybe_super_seed(super_seed)
+                .maybe_webseed(
+                    config.webseed_enabled,
+                    self.web_seeds.clone(),
+                    WebSeedConfig {
+                        min_gap_pieces: config.webseed_min_gap_pieces,
+                        max_range_bytes: config.webseed_max_range_bytes,
+                        ..Default::default()
+                    },
+                    config.webseed_concurrency,
+                )
+                .build(),
             blocked_requests: HashSet::new(),
             confirmed_haves: Vec::new(),
             completed_files: HashSet::new(),

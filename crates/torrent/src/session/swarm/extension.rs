@@ -136,15 +136,22 @@ pub(crate) trait SwarmExtension: Send + Sync {
 
 /// Builder for assembling a [`SwarmLoop`] with optional extensions.
 ///
-/// Add extensions via [`extension`](Self::extension), then call `build`
-/// to construct the loop.  Convenience methods (e.g. `with_pex`) will
-/// be added as extensions are extracted from `SwarmLoop`.
-#[allow(dead_code)] // used in Phase 5 (builder API)
+/// Use convenience methods to add protocol extensions, or call
+/// [`extension`](Self::extension) directly for custom extensions.
+///
+/// # Example
+///
+/// ```ignore
+/// let exts = SwarmBuilder::new()
+///     .with_pex(config.pex_interval)
+///     .maybe_super_seed(true)
+///     .with_webseed(urls, config, concurrency)
+///     .build();
+/// ```
 pub(crate) struct SwarmBuilder {
     extensions: Vec<Box<dyn SwarmExtension>>,
 }
 
-#[allow(dead_code)] // used in Phase 5 (builder API)
 impl SwarmBuilder {
     /// Create a new builder with no extensions.
     pub fn new() -> Self {
@@ -153,15 +160,57 @@ impl SwarmBuilder {
         }
     }
 
-    /// Register an extension.  Extensions are dispatched in insertion order.
+    /// Register an arbitrary extension.  Extensions are dispatched
+    /// in insertion order.
+    #[allow(dead_code)] // public API for custom extensions
     pub fn extension(mut self, ext: impl SwarmExtension + 'static) -> Self {
         self.extensions.push(Box::new(ext));
         self
     }
-}
 
-impl Default for SwarmBuilder {
-    fn default() -> Self {
-        Self::new()
+    /// Add the PEX (Peer Exchange, BEP 11) extension conditionally.
+    ///
+    /// When `enabled` is false this is a no-op.
+    pub fn maybe_pex(mut self, enabled: bool, interval: std::time::Duration) -> Self {
+        if enabled {
+            self.extensions
+                .push(Box::new(super::pex::PexExtension::new(interval)));
+        }
+        self
+    }
+
+    /// Add the super seed extension (BEP 16) conditionally.
+    ///
+    /// When `enabled` is false this is a no-op so callers don't need
+    /// an `if` at the call site.
+    pub fn maybe_super_seed(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.extensions
+                .push(Box::new(super::super_seed::SuperSeedExtension::new()));
+        }
+        self
+    }
+
+    /// Add the web seed download extension (BEP 19) conditionally.
+    ///
+    /// When `enabled` is false or `urls` is empty this is a no-op.
+    pub fn maybe_webseed(
+        mut self, enabled: bool, urls: Vec<String>, config: crate::session::webseed::WebSeedConfig,
+        concurrency: usize,
+    ) -> Self {
+        if enabled && !urls.is_empty() {
+            self.extensions
+                .push(Box::new(crate::session::webseed::WebSeedExtension::new(
+                    urls,
+                    config,
+                    concurrency,
+                )));
+        }
+        self
+    }
+
+    /// Consume the builder and return the registered extensions.
+    pub fn build(self) -> Vec<Box<dyn SwarmExtension>> {
+        self.extensions
     }
 }
