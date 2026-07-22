@@ -5,6 +5,7 @@ mod peer;
 mod pex;
 mod piece_pipeline;
 mod pieces;
+mod super_seed;
 mod types;
 
 #[allow(unused_imports)]
@@ -36,6 +37,7 @@ use crate::tracker::{AnnounceEvent, Tracker};
 use self::choke::ChokeManager;
 use self::pex::PexExtension;
 use self::piece_pipeline::PiecePipeline;
+use self::super_seed::SuperSeedExtension;
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
 use super::webseed::{PieceRange, WebSeedConfig, WebSeedService};
@@ -328,11 +330,13 @@ impl TorrentHandle {
                 if config.pex_enabled {
                     exts.push(Box::new(PexExtension::new(config.pex_interval)));
                 }
+                if super_seed {
+                    exts.push(Box::new(SuperSeedExtension::new()));
+                }
                 exts
             },
-            super_seed,
-            super_seed_assignments: HashMap::new(),
-            super_seed_unrevealed: HashSet::new(),
+            blocked_requests: HashSet::new(),
+            confirmed_haves: Vec::new(),
             completed_files: HashSet::new(),
             web_seeds: self.web_seeds.clone(),
             webseed_config: WebSeedConfig {
@@ -437,16 +441,14 @@ pub(crate) struct SwarmLoop {
     /// Registered extensions (PEX, super seed, web seed, …).  Dispatched
     /// sequentially in insertion order for tick and peer events.
     pub(crate) extensions: Vec<Box<dyn SwarmExtension>>,
-    /// Enable super seeding mode (BEP 16). When enabled, pieces are
-    /// uploaded to one peer at a time to minimize redundant uploads
-    /// during initial seeding.
-    pub(crate) super_seed: bool,
-    /// Piece → peer assignments for super seeding. Each key is a
-    /// piece index being exclusively uploaded to the given peer.
-    pub(crate) super_seed_assignments: HashMap<u32, SocketAddr>,
-    /// Unrevealed piece indices. These pieces have been uploaded to
-    /// the assigned peer but not yet confirmed (no HAVE received).
-    pub(crate) super_seed_unrevealed: HashSet<u32>,
+    /// Requests blocked by extensions (e.g. super seed gating).
+    /// Cleared before each peer event dispatch, populated by extensions,
+    /// checked by the core Request handler.
+    pub(crate) blocked_requests: HashSet<(u32, SocketAddr)>,
+    /// Pieces whose HAVE was confirmed by an extension (e.g. super seed
+    /// reveal).  The core calls [`broadcast_have`](Self::broadcast_have)
+    /// for each entry after extensions process a peer event.
+    pub(crate) confirmed_haves: Vec<u32>,
     /// Paths of files that already reached 100% — prevents duplicate
     /// [`TorrentEvent::FileCompleted`] emissions.
     pub(crate) completed_files: HashSet<Vec<String>>,
@@ -527,15 +529,13 @@ impl SwarmLoop {
                     // Clone before the core handler takes ownership,
                     // so extensions can inspect the event afterwards.
                     let ext_event = event.clone();
-                    self.handle_peer_event(addr, event).await;
-                    if !self.piece_mgr.read().await.missing_pieces().is_empty()
-                        && let Err(e) = self.piece_pipeline.fill(
-                            &mut self.peers, &self.piece_mgr, &self.peer_mgr, &self.metainfo,
-                        ).await
-                    {
-                            tracing::warn!("failed to fill pipelines: {}", e);
-                        }
-                    // Dispatch peer event to extensions (PEX, super seed, …).
+
+                    // Clear pre-event state used for extension ↔ core communication.
+                    self.blocked_requests.clear();
+                    self.confirmed_haves.clear();
+
+                    // Dispatch to extensions FIRST so they can gate
+                    // requests (super seed) before the core sends data.
                     {
                         let mut exts = std::mem::take(&mut self.extensions);
                         let mut ctx = self.build_context();
@@ -546,20 +546,27 @@ impl SwarmLoop {
                         }
                         self.extensions = exts;
                     }
+
+                    // Process confirmed_haves set by extensions.
+                    for index in std::mem::take(&mut self.confirmed_haves) {
+                        if let Err(e) = self.broadcast_have(index).await {
+                            tracing::warn!("broadcast_have failed for piece {}: {}", index, e);
+                        }
+                    }
+
+                    // Core message handling.
+                    self.handle_peer_event(addr, event).await;
+                    if !self.piece_mgr.read().await.missing_pieces().is_empty()
+                        && let Err(e) = self.piece_pipeline.fill(
+                            &mut self.peers, &self.piece_mgr, &self.peer_mgr, &self.metainfo,
+                        ).await
+                    {
+                            tracing::warn!("failed to fill pipelines: {}", e);
+                        }
                 }
                 _ = status_tick.tick() => {
                     self.update_status().await;
                     self.announce_if_needed().await;
-                    // BEP 16: acquire piece_mgr once for both the seeding
-                    // check and the bitfield needed by the selector.
-                    if self.super_seed {
-                        let pm = self.piece_mgr.read().await;
-                        if pm.missing_pieces().is_empty() {
-                            let our_bf = pm.bitfield().to_vec();
-                            drop(pm);
-                            self.super_seed_select_piece(&our_bf);
-                        }
-                    }
                     if let Err(e) = self.connect_pending().await {
                         tracing::warn!("failed to connect pending peers: {}", e);
                     }
@@ -638,6 +645,8 @@ impl SwarmLoop {
             peer_mgr: &self.peer_mgr,
             status: &self.status,
             peers: &mut self.peers,
+            blocked_requests: &mut self.blocked_requests,
+            confirmed_haves: &mut self.confirmed_haves,
         }
     }
 
@@ -714,8 +723,6 @@ impl SwarmLoop {
             status.bitfield = bitfield;
             status.elapsed = self.started_at.elapsed();
             status.total_wasted = self.total_wasted;
-            status.super_seed_active = self.super_seed;
-            status.super_seed_remaining = self.super_seed_unrevealed.len() as u32;
 
             if is_complete && status.state != TorrentState::Seeding {
                 tracing::info!(

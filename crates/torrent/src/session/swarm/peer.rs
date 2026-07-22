@@ -30,17 +30,8 @@ impl SwarmLoop {
                 self.peers.remove(&addr);
                 let _ = self.event_tx.send(TorrentEvent::PeerDisconnected { addr });
                 self.peer_mgr.write().await.remove_peer(&addr);
-                // BEP 16: release super seed assignments for the disconnected peer.
-                // Pieces that were unrevealed and assigned to this peer go back
-                // to the pool so they can be reassigned on the next tick.
-                if self.super_seed {
-                    let ssa = self.super_seed_assignments.iter();
-                    let orphaned = ssa.filter(|(_, a)| *a == &addr).map(|(&i, _)| i);
-                    for idx in orphaned {
-                        self.super_seed_unrevealed.remove(&idx);
-                    }
-                    self.super_seed_assignments.retain(|_, a| a != &addr);
-                }
+                // BEP 16 super seed cleanup is handled by
+                // SuperSeedExtension::on_peer_event (Disconnected).
             }
             PeerEvent::Message(msg) => {
                 if let Err(_e) = self.handle_peer_message(addr, msg).await {
@@ -61,15 +52,8 @@ impl SwarmLoop {
                     self.peers.remove(&addr);
                     let _ = self.event_tx.send(TorrentEvent::PeerDisconnected { addr });
                     self.peer_mgr.write().await.remove_peer(&addr);
-                    // BEP 16: release super seed assignments for the dead peer.
-                    if self.super_seed {
-                        let ssa = self.super_seed_assignments.iter();
-                        let orphaned = ssa.filter(|(_, a)| *a == &addr).map(|(&i, _)| i);
-                        for idx in orphaned {
-                            self.super_seed_unrevealed.remove(&idx);
-                        }
-                        self.super_seed_assignments.retain(|_, a| a != &addr);
-                    }
+                    // BEP 16 super seed cleanup is handled by
+                    // SuperSeedExtension::on_peer_event (Disconnected).
                 }
             }
         }
@@ -119,19 +103,8 @@ impl SwarmLoop {
                 if idx < peer.bitfield.len() {
                     peer.bitfield[idx] = true;
                 }
-
-                // BEP 16: if the assigned peer confirms they have
-                // the piece, reveal it to the entire swarm.
-                if self.super_seed && self.super_seed_assignments.get(&index) == Some(&addr) {
-                    self.super_seed_unrevealed.remove(&index);
-                    self.super_seed_assignments.remove(&index);
-                    tracing::debug!(
-                        "super seed: peer {} confirmed piece {}, revealing",
-                        addr,
-                        index,
-                    );
-                    self.broadcast_have(index).await?;
-                }
+                // BEP 16 super seed confirmation is handled by
+                // SuperSeedExtension::on_peer_event (runs before core).
             }
             PeerMessage::Bitfield(bytes) => {
                 let num_pieces = self.metainfo.info.num_pieces();
@@ -186,11 +159,8 @@ impl SwarmLoop {
                     return Ok(());
                 }
 
-                // BEP 16: only serve unrevealed pieces to the assigned peer.
-                if self.super_seed
-                    && self.super_seed_unrevealed.contains(&index)
-                    && self.super_seed_assignments.get(&index) != Some(&addr)
-                {
+                // Check if any extension blocked this request (e.g. super seed).
+                if self.blocked_requests.contains(&(index, addr)) {
                     return Ok(());
                 }
 
@@ -329,15 +299,10 @@ impl SwarmLoop {
             let pm = piece_mgr.read().await;
             let mut bf = pm.to_bitfield();
 
-            // BEP 16: hide unrevealed pieces from the bitfield
-            if self.super_seed {
-                for &idx in &self.super_seed_unrevealed {
-                    let byte = idx as usize / 8;
-                    let bit = 7 - (idx as usize % 8);
-                    if byte < bf.len() {
-                        bf[byte] &= !(1 << bit);
-                    }
-                }
+            // BEP 16: let extensions mask the bitfield (e.g. super seed
+            // hides unrevealed pieces).
+            for ext in &self.extensions {
+                ext.mask_bitfield(&mut bf);
             }
 
             let have_all = pm.missing_pieces().is_empty();

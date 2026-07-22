@@ -14,7 +14,7 @@
 //! implementation that returns `Ready(Ok(()))`, so extensions only
 //! override the hooks they need.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -71,6 +71,14 @@ pub(crate) struct SwarmContext<'a> {
     /// `remote_extension_ids`).  Mutations are safe because extensions run
     /// sequentially within the core loop.
     pub peers: &'a mut HashMap<SocketAddr, PeerInfo>,
+    /// Requests blocked by extensions (e.g. super seed gating).
+    /// Extensions insert `(piece_index, peer_addr)` tuples; the core
+    /// skips sending data for blocked requests.
+    pub blocked_requests: &'a mut HashSet<(u32, SocketAddr)>,
+    /// Pieces whose HAVE was confirmed by an extension (e.g. super
+    /// seed reveal).  The core calls `broadcast_have` for each entry
+    /// after all extensions have processed the event.
+    pub confirmed_haves: &'a mut Vec<u32>,
 }
 
 /// An optional module that hooks into the swarm event loop.
@@ -118,6 +126,13 @@ pub(crate) trait SwarmExtension: Send + Sync {
     fn ltep_extensions(&self) -> HashMap<String, u8> {
         HashMap::new()
     }
+
+    /// Mask the bitfield before it is sent to a new peer.
+    ///
+    /// Extensions may clear bits to hide pieces from the remote peer
+    /// (e.g. super seed hides unrevealed pieces per BEP 16).  The
+    /// default implementation is a no-op.
+    fn mask_bitfield(&self, _bf: &mut Vec<u8>) {}
 }
 
 /// Builder for assembling a [`SwarmLoop`] with optional extensions.
