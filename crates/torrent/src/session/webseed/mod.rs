@@ -17,10 +17,10 @@
 //!         └── SHA-1 verify + storage write
 //! ```
 
+mod extension;
 mod gap;
 mod service;
 mod types;
 
-pub(crate) use self::gap::{find_largest_gap, gap_within_file};
-pub(crate) use self::service::WebSeedService;
-pub(crate) use self::types::{PieceRange, WebSeedConfig};
+pub(crate) use self::extension::WebSeedExtension;
+pub(crate) use self::types::WebSeedConfig;

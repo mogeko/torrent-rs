@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tokio::sync::{RwLock, broadcast};
 
@@ -46,8 +47,7 @@ pub(crate) struct SwarmContext<'a> {
     #[allow(dead_code)] // used by future extensions (web seed, super seed)
     pub metainfo: &'a Metainfo,
     /// Storage backend for reading/writing pieces.
-    #[allow(dead_code)] // used by future extensions (web seed)
-    pub storage: &'a dyn Storage,
+    pub storage: Arc<dyn Storage>,
     /// Sender for broadcasting [`TorrentEvent`]s to external consumers.
     #[allow(dead_code)] // used by future extensions (super seed)
     pub event_tx: &'a broadcast::Sender<TorrentEvent>,
@@ -58,8 +58,7 @@ pub(crate) struct SwarmContext<'a> {
     #[allow(dead_code)] // used by future extensions
     pub peer_id: PeerId,
     /// Piece manager (bitfield, progress tracking).
-    #[allow(dead_code)] // used by future extensions (web seed, super seed)
-    pub piece_mgr: &'a RwLock<PieceManager>,
+    pub piece_mgr: Arc<RwLock<PieceManager>>,
     /// Peer connection pool and message dispatch.
     pub peer_mgr: &'a RwLock<PeerManager>,
     /// Torrent status snapshot (updated each status tick).
