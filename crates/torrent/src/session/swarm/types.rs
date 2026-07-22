@@ -17,6 +17,7 @@ pub(super) const UT_PEX: &str = "ut_pex";
 pub(super) const UT_PEX_ID: u8 = 1;
 
 /// Event from a peer reader task.
+#[derive(Clone)]
 pub(crate) enum PeerEvent {
     /// A valid protocol message.
     Message(PeerMessage),

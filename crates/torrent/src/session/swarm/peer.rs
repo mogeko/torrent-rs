@@ -30,9 +30,6 @@ impl SwarmLoop {
                 self.peers.remove(&addr);
                 let _ = self.event_tx.send(TorrentEvent::PeerDisconnected { addr });
                 self.peer_mgr.write().await.remove_peer(&addr);
-                if self.pex_enabled {
-                    self.recently_dropped.push(addr);
-                }
                 // BEP 16: release super seed assignments for the disconnected peer.
                 // Pieces that were unrevealed and assigned to this peer go back
                 // to the pool so they can be reassigned on the next tick.
@@ -64,9 +61,6 @@ impl SwarmLoop {
                     self.peers.remove(&addr);
                     let _ = self.event_tx.send(TorrentEvent::PeerDisconnected { addr });
                     self.peer_mgr.write().await.remove_peer(&addr);
-                    if self.pex_enabled {
-                        self.recently_dropped.push(addr);
-                    }
                     // BEP 16: release super seed assignments for the dead peer.
                     if self.super_seed {
                         let ssa = self.super_seed_assignments.iter();
@@ -247,12 +241,10 @@ impl SwarmLoop {
                 }
             }
             PeerMessage::Port(_) => {}
-            PeerMessage::Extended { ext_id: 0, data } => {
-                // BEP 10: LTEP extension negotiation handshake
-                self.handle_ltep_handshake(addr, &data).await?;
-            }
-            PeerMessage::Extended { ext_id, data } => {
-                self.handle_extended_message(addr, ext_id, data).await?;
+            PeerMessage::Extended { .. } => {
+                // Extended messages (LTEP handshake, PEX, …) are dispatched
+                // to extensions via SwarmExtension::on_peer_event after this
+                // handler returns.  No core processing needed here.
             }
             // ── BEP 6 Fast Extension ──
             PeerMessage::Suggest(index) => {

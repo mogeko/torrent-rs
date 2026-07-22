@@ -7,7 +7,7 @@ mod piece_pipeline;
 mod pieces;
 mod types;
 
-#[allow(unused_imports)] // used in Phase 2+
+#[allow(unused_imports)]
 pub(crate) use extension::{SwarmBuilder, SwarmContext, SwarmExtension};
 pub(crate) use types::{PeerEvent, PeerInfo};
 
@@ -34,7 +34,7 @@ use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
 use self::choke::ChokeManager;
-use self::pex::PexManager;
+use self::pex::PexExtension;
 use self::piece_pipeline::PiecePipeline;
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
@@ -42,8 +42,6 @@ use super::webseed::{PieceRange, WebSeedConfig, WebSeedService};
 use super::{
     InfoHash, PeerStatus, SessionConfig, TorrentEvent, TorrentState, TorrentStatus, TrackerStatus,
 };
-
-use self::types::{UT_PEX, UT_PEX_ID};
 
 /// Commands sent to the download loop.
 pub(crate) enum TorrentCommand {
@@ -306,8 +304,6 @@ impl TorrentHandle {
             ),
             corrupt_ban_threshold: config.corrupt_ban_threshold,
             announce_fallback_interval: config.announce_fallback_interval,
-            pex_enabled: config.pex_enabled,
-            pex_manager: PexManager::new(config.pex_interval),
             tracker,
             next_announce: None,
             has_announced: false,
@@ -327,7 +323,13 @@ impl TorrentHandle {
             last_downloaded: 0,
             last_uploaded: 0,
             piece_cache: Vec::new(),
-            recently_dropped: Vec::new(),
+            extensions: {
+                let mut exts: Vec<Box<dyn SwarmExtension>> = Vec::new();
+                if config.pex_enabled {
+                    exts.push(Box::new(PexExtension::new(config.pex_interval)));
+                }
+                exts
+            },
             super_seed,
             super_seed_assignments: HashMap::new(),
             super_seed_unrevealed: HashSet::new(),
@@ -432,12 +434,9 @@ pub(crate) struct SwarmLoop {
     /// Cached completed pieces for upload serving (avoid repeated disk reads).
     /// Ordered by insertion time — oldest first for LRU eviction.
     pub(crate) piece_cache: Vec<(u32, Arc<Vec<u8>>)>,
-    /// PEX broadcast manager (BEP 11).
-    pub(crate) pex_manager: PexManager,
-    /// Enable Peer Exchange (BEP 11).
-    pub(crate) pex_enabled: bool,
-    /// Recently disconnected peers to announce in PEX dropped field.
-    pub(crate) recently_dropped: Vec<SocketAddr>,
+    /// Registered extensions (PEX, super seed, web seed, …).  Dispatched
+    /// sequentially in insertion order for tick and peer events.
+    pub(crate) extensions: Vec<Box<dyn SwarmExtension>>,
     /// Enable super seeding mode (BEP 16). When enabled, pieces are
     /// uploaded to one peer at a time to minimize redundant uploads
     /// during initial seeding.
@@ -476,7 +475,18 @@ impl SwarmLoop {
         let mut status_tick = tokio::time::interval(Duration::from_secs(1));
         let mut choke_tick = tokio::time::interval(self.choke_manager.interval());
         let mut stale_tick = tokio::time::interval(Duration::from_secs(30));
-        let mut pex_tick = tokio::time::interval(self.pex_manager.interval());
+
+        // Run extension on_start hooks (e.g. web seed service init).
+        {
+            let mut exts = std::mem::take(&mut self.extensions);
+            let mut ctx = self.build_context();
+            for ext in &mut exts {
+                if let Err(e) = ext.on_start(&mut ctx).await {
+                    tracing::warn!("extension on_start failed: {}", e);
+                }
+            }
+            self.extensions = exts;
+        }
 
         // Create tower-based web seed download service (BEP 19).
         // Gap-finding + HTTP Range download are driven from status_tick.
@@ -514,6 +524,9 @@ impl SwarmLoop {
                     }
                 }
                 Some((addr, event)) = self.peer_msg_rx.recv() => {
+                    // Clone before the core handler takes ownership,
+                    // so extensions can inspect the event afterwards.
+                    let ext_event = event.clone();
                     self.handle_peer_event(addr, event).await;
                     if !self.piece_mgr.read().await.missing_pieces().is_empty()
                         && let Err(e) = self.piece_pipeline.fill(
@@ -522,6 +535,17 @@ impl SwarmLoop {
                     {
                             tracing::warn!("failed to fill pipelines: {}", e);
                         }
+                    // Dispatch peer event to extensions (PEX, super seed, …).
+                    {
+                        let mut exts = std::mem::take(&mut self.extensions);
+                        let mut ctx = self.build_context();
+                        for ext in &mut exts {
+                            if let Err(e) = ext.on_peer_event(addr, &ext_event, &mut ctx).await {
+                                tracing::warn!("extension on_peer_event failed: {}", e);
+                            }
+                        }
+                        self.extensions = exts;
+                    }
                 }
                 _ = status_tick.tick() => {
                     self.update_status().await;
@@ -543,6 +567,17 @@ impl SwarmLoop {
                     if self.webseed_service.is_some() {
                         self.try_webseed_download().await;
                     }
+                    // Dispatch tick to extensions (PEX broadcast, …).
+                    {
+                        let mut exts = std::mem::take(&mut self.extensions);
+                        let mut ctx = self.build_context();
+                        for ext in &mut exts {
+                            if let Err(e) = ext.on_tick(&mut ctx).await {
+                                tracing::warn!("extension on_tick failed: {}", e);
+                            }
+                        }
+                        self.extensions = exts;
+                    }
                 }
                 _ = choke_tick.tick() => {
                     if let Err(e) = self.choke_manager.run_round(
@@ -556,17 +591,6 @@ impl SwarmLoop {
                 }
                 _ = stale_tick.tick() => {
                     self.piece_pipeline.expire_stale(&mut self.peers, &self.peer_mgr).await;
-                }
-                _ = pex_tick.tick() => {
-                    if self.pex_enabled {
-                        if let Err(e) = self.pex_manager.broadcast(
-                            &self.peers,
-                            &mut self.recently_dropped,
-                            &self.peer_mgr,
-                        ).await {
-                            tracing::warn!("failed to broadcast PEX: {}", e);
-                        }
-                    }
                 }
                 Some(result) = async {
                     if self.webseed_tasks.is_empty() {
@@ -589,6 +613,31 @@ impl SwarmLoop {
                     }
                 }
             }
+        }
+    }
+
+    /// Build a [`SwarmContext`] borrowing the core loop's shared state.
+    ///
+    /// Extensions receive this context in `on_start`, `on_tick`, and
+    /// `on_peer_event`, giving them read/write access to peers, locks,
+    /// and immutable metadata.
+    ///
+    /// Callers must use [`std::mem::take`] on `self.extensions` before
+    /// calling this method to avoid a borrow conflict (this method
+    /// borrows `self.peers` mutably while the caller needs to iterate
+    /// `self.extensions` mutably).
+    fn build_context(&mut self) -> SwarmContext<'_> {
+        SwarmContext {
+            info_hash: self.info_hash,
+            metainfo: &self.metainfo,
+            storage: self.storage.as_ref(),
+            event_tx: &self.event_tx,
+            listen_port: self.listen_port,
+            peer_id: self.peer_id,
+            piece_mgr: &self.piece_mgr,
+            peer_mgr: &self.peer_mgr,
+            status: &self.status,
+            peers: &mut self.peers,
         }
     }
 
@@ -815,9 +864,12 @@ impl SwarmLoop {
 
         let mut pi = PeerInfo::new();
 
-        // BEP 10: register our enabled extensions.
-        if self.pex_enabled {
-            pi.our_extension_ids.insert(UT_PEX.to_string(), UT_PEX_ID);
+        // BEP 10: collect our enabled LTEP extensions from all registered
+        // extensions (PEX, future: metadata exchange, …).
+        for ext in &self.extensions {
+            for (name, id) in ext.ltep_extensions() {
+                pi.our_extension_ids.insert(name, id);
+            }
         }
 
         // Send the LTEP handshake if we have any extensions to
