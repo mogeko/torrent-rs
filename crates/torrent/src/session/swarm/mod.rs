@@ -32,14 +32,15 @@ use crate::spec::TorrentSpec;
 use crate::storage::Storage;
 use crate::tracker::{AnnounceEvent, Tracker};
 
-use self::choke::ChokeManager;
-use self::piece_pipeline::PiecePipeline;
 use super::peer_mgr::PeerManager;
 use super::upload_mgr::UploadManager;
 use super::webseed::WebSeedConfig;
 use super::{
     InfoHash, PeerStatus, SessionConfig, TorrentEvent, TorrentState, TorrentStatus, TrackerStatus,
 };
+
+use self::choke::ChokeManager;
+use self::piece_pipeline::PiecePipeline;
 
 /// Commands sent to the download loop.
 pub(crate) enum TorrentCommand {

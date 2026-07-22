@@ -17,7 +17,7 @@ mod rpc;
 pub use torrent_core::dht::{BootstrapNode, Node, RoutingTable, krpc};
 
 pub use self::query::{announce_peer, find_node, get_peers};
-pub use self::rpc::{DhtRequest, DhtRpc, QueryHandler};
+pub use self::rpc::{DhtRpc, QueryHandler};
 
 // Internal: session-level implementation details.
 pub(crate) use torrent_core::dht::{DualRoutingTable, generate_node_id, generate_secret};

@@ -91,6 +91,25 @@ impl WebSeedService {
         }
     }
 
+    /// Check whether any web seed URL is currently available for download.
+    ///
+    /// Returns `true` if at least one URL is [`UrlActivity::Active`] or a
+    /// [`UrlActivity::Parked`] URL is ready for retry.  Callers should
+    /// skip spawning download tasks when this returns `false` to avoid
+    /// wasting work on tasks that will immediately fail.
+    pub(crate) fn has_available_urls(&self) -> bool {
+        let urls = match self.inner.urls.try_read() {
+            Ok(urls) => urls,
+            Err(_) => return false, // lock contended — assume unavailable
+        };
+        urls.iter().any(|s| match s.activity {
+            UrlActivity::Active => true,
+            UrlActivity::Parked => s
+                .health
+                .ready_for_retry(self.inner.config.park_retry_interval),
+        })
+    }
+
     /// Download a byte range from the best available web seed URL.
     ///
     /// Selects the best URL via UCB scoring, downloads the byte range

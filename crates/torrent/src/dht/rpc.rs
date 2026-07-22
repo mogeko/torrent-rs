@@ -17,24 +17,6 @@ use crate::error::{Error, ErrorKind};
 
 use super::krpc::{KrpcMessage, TransactionId};
 
-/// A DHT KRPC request ready to be dispatched.
-///
-/// Bundles the destination address, transaction ID, and serialized
-/// KRPC payload.
-#[derive(Debug, Clone)]
-pub struct DhtRequest {
-    pub addr: SocketAddr,
-    pub tid: TransactionId,
-    pub data: Vec<u8>,
-}
-
-impl DhtRequest {
-    /// Create a new DHT request.
-    pub fn new(addr: SocketAddr, tid: TransactionId, data: Vec<u8>) -> Self {
-        DhtRequest { addr, tid, data }
-    }
-}
-
 /// Callback type for handling incoming DHT queries.
 ///
 /// Receives the decoded [`KrpcMessage`] and the source address, returns
